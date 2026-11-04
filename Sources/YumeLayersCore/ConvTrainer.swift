@@ -1045,15 +1045,21 @@ public func runGpuHeat(seconds: Double = 60, duty: Double = 0.85,
 
     // duty <= 0 — автоматический режим: нагрузку задаёт контур по температуре,
     // ровно как в обучении. Это и есть проверка «работает на грани».
+    // В ОБОИХ режимах потолок — жёсткие 90%: диагностика не имеет права
+    // быть опаснее обучения. Раньше здесь стояло 98% в авто и 100% в ручном.
     let auto = duty <= 0
-    var power = PowerController(ceiling: auto ? maxSafeDuty : 1.0, startDuty: auto ? 0.5 : 1.0)
-    var currentDuty = auto ? power.duty : duty
+    let requestedDuty = clampedGpuDuty(duty)
+    var power = PowerController(ceiling: safeDutyCap,
+                                startDuty: auto ? 0.5 : requestedDuty)
+    var currentDuty = auto ? power.duty : requestedDuty
 
     yumeLog(String(format: "Прогрев: %@, %d×%d, %@, %.0f с",
                    engine.deviceName, w, h,
                    auto ? String(format: "авто (цель %.0f °C)", power.targetTempC)
-                        : String(format: "скважность %.0f%%", duty * 100),
+                        : String(format: "скважность %.0f%%", requestedDuty * 100),
                    seconds))
+    yumeLog(String(format: "Потолок скважности %.0f%% · запрос %.0f%%",
+                   safeDutyCap * 100, duty * 100))
     let start = Date()
     var t = 0
     var lastLog = Date.distantPast
@@ -1070,22 +1076,27 @@ public func runGpuHeat(seconds: Double = 60, duty: Double = 0.85,
         let gpuMs = session.end()
         stepMsAll.append(gpuMs)
 
+        // Датчик читаем один раз за шаг и В ОБОИХ режимах: аварийная
+        // температура обязана останавливать и ручной прогрев тоже.
+        let stats = sensor.read()
         if auto {
-            let s = sensor.read()
-            currentDuty = power.update(stats: s)
-            if let s = s, s.temperatureC >= emergencyTempC {
-                yumeLog(String(format: "🔥 %.0f °C — остывание 20 с", s.temperatureC))
-                Thread.sleep(forTimeInterval: 20)
-                currentDuty = max(power.duty * 0.5, 0.05)
-            }
+            currentDuty = clampedGpuDuty(power.update(stats: stats))
+        }
+        if let s = stats, s.temperatureC >= emergencyTempC {
+            yumeLog(String(format: "🔥 %.0f °C — остывание 20 с", s.temperatureC))
+            Thread.sleep(forTimeInterval: 20)
+            currentDuty = clampedGpuDuty(max(power.duty * 0.5, 0.05))
         }
 
+        // Финальный клэмп на месте применения: даже если контур или ручной
+        // запрос когда-нибудь вернут больше, до GPU дойдёт не выше 90%.
+        currentDuty = clampedGpuDuty(currentDuty)
         let sleepMs = dutySleepMs(gpuMs: gpuMs, duty: currentDuty, maxPauseMs: 5000)
         if sleepMs > 0 { Thread.sleep(forTimeInterval: sleepMs / 1000) }
 
         if Date().timeIntervalSince(lastLog) > 3 {
             lastLog = Date()
-            guard let s = sensor.read() else { continue }
+            guard let s = stats else { continue }
             peakTemp = max(peakTemp, s.temperatureC)
             yumeLog(String(format: "  %.0f °C · %.0f Вт · нагрузка %.0f%% · %.0f мс/шаг",
                            s.temperatureC, s.powerW, currentDuty * 100, gpuMs))

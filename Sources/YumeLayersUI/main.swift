@@ -430,7 +430,7 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
     private let batchCtl = EditableValueControl(value: "1")
     private let lrCtl = EditableValueControl(value: "0.0003")
     private let pauseCtl = EditableValueControl(value: "250")
-    private let powerCtl = EditableValueControl(value: "100")
+    private let powerCtl = EditableValueControl(value: "90")
     private let convPathCtl = EditableValueControl(value: "~/YumeLayers/checkpoints/conv.safetensors", width: 0)
     private let resumeSwitch = NSSwitch()
     private let adaptiveSwitch = NSSwitch()
@@ -1047,8 +1047,8 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
                      info: "Размер шага градиентного спуска (learning rate). Слишком большое значение — расходимость/NaN, слишком малое — очень медленное обучение. По умолчанию 0.0003."),
             valueRow("Пауза, мс:", pauseCtl,
                      info: "Фиксированная пауза после каждого шага, в миллисекундах. Работает только когда «Авто-пауза (нагрев)» выключена: тогда нагрузка постоянная и равна этой паузе. При включённом авто-режиме паузу считает регулятор по температуре, и это поле не используется."),
-            valueRow("Нагрузка GPU, %:", powerCtl,
-                     info: "Потолок нагрузки. 100 — работать на пределе (99% времени GPU занята, 1% оставлен системе). Фактическую нагрузку регулятор подбирает сам по температуре видеокарты: держит рабочую точку 82 °C и не даёт уйти выше 85 °C."),
+            valueRow("Нагрузка GPU, % (≤90):", powerCtl,
+                     info: "Потолок нагрузки. 90 — GPU занята 90% времени, 10% оставлено системе и WindowServer; это жёсткий предохранитель после перезагрузки из-за перегрева 4 ноября 2026, значения выше 90 игнорируются. Фактическую нагрузку регулятор подбирает сам по температуре видеокарты: держит рабочую точку 82 °C, потолок 85 °C, при 86 °C уходит на принудительное остывание."),
             switchRow("Авто-пауза (нагрев)", adaptiveSwitch,
                       tooltip: "Авто-пауза при перегреве: регулятор сам подбирает нагрузку по температуре GPU — держит максимум, который не ведёт к перезагрузке"),
             autoTuneButton,
@@ -2351,7 +2351,10 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
         p.batch = max(1, batchCtl.intValue(def: 1))
         p.lr = Float(lrCtl.doubleValue(def: 0.0005))
         p.pauseMs = max(0, pauseCtl.intValue(def: 250))
-        p.gpuPowerPercent = min(max(powerCtl.intValue(def: 100), 10), 100)
+        // Жёсткий потолок 90%: поле не должно обещать то, что регулятор
+        // всё равно не даст. Раньше 100% молча превращались в 90%.
+        p.gpuPowerPercent = min(max(powerCtl.intValue(def: defaultGpuPowerPercent), 10),
+                                Int(safeDutyCap * 100))
         p.resume = resumeSwitch.state == .on
         p.adaptiveThrottle = adaptiveSwitch.state == .on
         p.convPath = (convPathCtl.stringValue as NSString).expandingTildeInPath
@@ -2577,7 +2580,7 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
         batchCtl.setValue("1")
         lrCtl.setValue("0.0003")
         pauseCtl.setValue("250")
-        powerCtl.setValue("100")
+        powerCtl.setValue("90")
         resumeSwitch.state = .off
         adaptiveSwitch.state = .on
         convPathCtl.setValue("~/YumeLayers/checkpoints/conv.safetensors")

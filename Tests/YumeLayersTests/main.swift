@@ -2037,6 +2037,49 @@ func testDutyCap90() {
     expect(Params().gpuPowerPercent == 90, "Params по умолчанию = 90%")
 }
 
+/// `runGpuHeat` — диагностический прогрев, но он гоняет тот же 856×480
+/// forward+backward, что и обучение, и поэтому не имеет права обходить потолок.
+/// До исправления там стоял `ceiling: auto ? maxSafeDuty : 1.0`, то есть 98–100%.
+func testHeatDutyCap() {
+    section("Прогрев GPU: 90% без обходных путей")
+
+    expectClose(clampedGpuDuty(1.0), safeDutyCap, 1e-9,
+                "gpuheat: ручной режим 100% упирается в 90%")
+    expectClose(clampedGpuDuty(0.99), safeDutyCap, 1e-9,
+                "gpuheat: 99% упирается в 90%")
+    expectClose(clampedGpuDuty(0.90), safeDutyCap, 1e-9,
+                "gpuheat: ровно 90% разрешены")
+    expectClose(clampedGpuDuty(0.75), 0.75, 1e-9,
+                "gpuheat: 75% проходят как есть")
+    let autoDuty = clampedGpuDuty(-1)
+    expect(autoDuty.isFinite && autoDuty >= 0.05 && autoDuty <= safeDutyCap,
+           "gpuheat: авто-режим (duty ≤ 0) остаётся в коридоре")
+    let nanDuty = clampedGpuDuty(Double.nan)
+    expect(nanDuty.isFinite && nanDuty <= safeDutyCap,
+           "gpuheat: NaN не превращается в полную нагрузку")
+
+    // Сам регулятор с новым потолком не должен выходить за 90% ни при
+    // каких показаниях датчика, включая «холодно» (там он разгоняется).
+    var power = PowerController(ceiling: safeDutyCap, startDuty: 0.5)
+    expectClose(power.ceiling, safeDutyCap, 1e-9,
+                "PowerController: потолок = 90%")
+    for temp in stride(from: 40.0, through: 100.0, by: 5.0) {
+        let stats = GpuStats(temperatureC: temp, coreClockMHz: 400,
+                             activityPercent: 90, powerW: 30)
+        let d = power.update(stats: stats)
+        expect(d <= safeDutyCap + 1e-9,
+               "PowerController при \(Int(temp)) °C не выше 90%")
+    }
+    expect(power.duty <= safeDutyCap + 1e-9,
+           "PowerController после 13 замеров не выше 90%")
+
+    // Пауза при 90% обязана быть положительной: именно она отдаёт 10%
+    // времени WindowServer и не даёт повториться watchdog-перезагрузке.
+    let guard90 = GpuDutyGuard(powerPercent: 100)
+    expect(guard90.pauseMs(gpuMs: 150) > 0,
+           "даже запрос 100% оставляет паузу на остывание")
+}
+
 // MARK: - main
 
 func runAll() {
@@ -2068,6 +2111,7 @@ func runAll() {
     testLayeredVAEGradients()
     testLayeredTrainer()
     testDutyCap90()
+    testHeatDutyCap()
 }
 
 let started = Date()
