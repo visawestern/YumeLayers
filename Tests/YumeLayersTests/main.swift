@@ -1573,7 +1573,9 @@ func testLayerRenderer() {
         expect(ok, "CHW: порядок каналов фон|объекты|маска|свет")
     }
 
-    // 480p smoke: рендерится целиком, макет цел.
+    // 480p smoke: рендерится целиком, макет цел. Порог времени — для -O
+    // (штатный scripts/test.sh). Под -Onone Swift-массивы без оптимизации
+    // дают ~100× замедления, это не показатель архитектуры.
     do {
         let t0 = Date()
         let big = makeLayeredScene(w: 854, h: 480, seed: 7)
@@ -1602,6 +1604,145 @@ func testLayerRenderer() {
     }
 }
 
+// MARK: - Универсальная слоистая архитектура
+
+func testUniversalLayers() {
+    section("Универсальные слои: любые комбинации экспертов")
+
+    // Фон дополняется объектными экспертами — фон при этом НЕ меняется.
+    do {
+        let bg = makeComposedScene(w: 96, h: 64, recipe: .backdrop(), seed: 9)
+        let ext = makeComposedScene(w: 96, h: 64,
+            recipe: .backdrop().adding(LayerSpec(.figure, count: 2, role: .objects)), seed: 9)
+        expectEqual(bg.flattened().background, ext.flattened().background,
+                    "добавление объектных экспертов не меняет фон (побитово)")
+        expect(bg.composite != ext.composite, "добавление объектов меняет кадр")
+        expect(ext.flattened().mask.contains(where: { $0 == 1 }), "объекты появились в маске")
+        expectEqual(ext.layers.count, bg.layers.count + 2, "каждая фигура = отдельный слой-эксперт")
+    }
+
+    // Роль — КТО произвёл слой, а не ЧТО в нём: фон-эксперт может рисовать фигуры.
+    do {
+        let a = makeComposedScene(w: 96, h: 64, recipe: LayerRecipe([
+            LayerSpec(.sky, role: .background),
+            LayerSpec(.figure, role: .objects)]), seed: 3)
+        let b = makeComposedScene(w: 96, h: 64, recipe: LayerRecipe([
+            LayerSpec(.sky, role: .background),
+            LayerSpec(.figure, role: .background)]), seed: 3)   // та же семантика
+        expectEqual(a.composite, b.composite, "роль эксперта не влияет на композицию")
+        expectEqual(a.flattened().mask, b.flattened().mask, "фон-эксперт тоже делает объекты")
+    }
+
+    // Любая комбинация: композиция восстанавливается из 8 каналов ТОЧНО.
+    let recipes: [(String, LayerRecipe)] = [
+        ("пусто", LayerRecipe([])),
+        ("только небо", LayerRecipe([LayerSpec(.sky, role: .background)])),
+        ("только фигуры", LayerRecipe([LayerSpec(.figure, count: 2, role: .objects)])),
+        ("небо+земля+фигуры", LayerRecipe([
+            LayerSpec(.sky, role: .background), LayerSpec(.ground, role: .background),
+            LayerSpec(.figure, count: 3, role: .objects)])),
+        ("перекрытие: земля поверх фигур", LayerRecipe([
+            LayerSpec(.sky, role: .background), LayerSpec(.figure, role: .objects),
+            LayerSpec(.ground, role: .background)])),
+        ("облако поверх фигур", LayerRecipe([
+            LayerSpec(.sky, role: .background), LayerSpec(.figure, role: .objects),
+            LayerSpec(.clouds, count: 2, role: .background)])),
+        ("фон-эксперт делает всё", LayerRecipe([
+            LayerSpec(.sky, role: .background), LayerSpec(.ground, role: .background),
+            LayerSpec(.figure, count: 2, role: .background, group: .objects)])),
+        ("только свет", LayerRecipe([LayerSpec(.lightGradient, role: .lighting)])),
+        ("свет+фигуры+тени", LayerRecipe([
+            LayerSpec(.lightGradient, role: .lighting), LayerSpec(.figure, count: 2, role: .objects),
+            LayerSpec(.shadow, count: 2, role: .lighting)])),
+        ("солнце+облака", LayerRecipe([
+            LayerSpec(.sun, role: .background), LayerSpec(.clouds, count: 4, role: .background)])),
+        ("классика", .classic(figureCount: 3)),
+    ]
+    for (name, recipe) in recipes {
+        let scene = makeComposedScene(w: 96, h: 64, recipe: recipe, seed: 77).flattened()
+        let rebuilt = composeLayers(w: scene.w, h: scene.h, background: scene.background,
+                                    objects: scene.objects, mask: scene.mask, light: scene.light)
+        expectEqual(rebuilt, scene.composite, "[\(name)] 8 каналов → кадр побитово")
+        expect(scene.mask.allSatisfy { $0 == 0 || $0 == 1 }, "[\(name)] маска бинарна")
+        expect(scene.composite.allSatisfy { $0.isFinite && $0 >= 0 && $0 <= 1 },
+               "[\(name)] кадр в [0,1]")
+        expect(scene.light.allSatisfy { $0.isFinite && $0 >= 0 && $0 <= 1 },
+               "[\(name)] свет в [0,1]")
+    }
+
+    // Перекрытие: земля, отрисованная ПОСЛЕ фигуры, скрывает её — маска это видит.
+    do {
+        let alone = makeComposedScene(w: 96, h: 64, recipe: LayerRecipe([
+            LayerSpec(.sky, role: .background), LayerSpec(.figure, role: .objects)]), seed: 5)
+            .flattened()
+        let occluded = makeComposedScene(w: 96, h: 64, recipe: LayerRecipe([
+            LayerSpec(.sky, role: .background), LayerSpec(.figure, role: .objects),
+            LayerSpec(.ground, role: .background)]), seed: 5).flattened()
+        let a = alone.mask.filter { $0 == 1 }.count
+        let b = occluded.mask.filter { $0 == 1 }.count
+        expect(b < a, "перекрытие: скрытая часть фигур ушла из маски (\(a) → \(b))")
+    }
+
+    // Масштаб: 8 облаков + 8 фигур на 480p рендерится целиком (-O).
+    do {
+        let heavy = LayerRecipe([
+            LayerSpec(.sky, role: .background),
+            LayerSpec(.clouds, count: 8, role: .background),
+            LayerSpec(.ground, role: .background),
+            LayerSpec(.figure, count: 8, role: .objects),
+            LayerSpec(.lightGradient, role: .lighting),
+        ])
+        let t0 = Date()
+        let s = makeComposedScene(w: 854, h: 480, recipe: heavy, seed: 11).flattened()
+        let dt = Date().timeIntervalSince(t0)
+        expectEqual(s.channelsCHW().count, 854 * 480 * 8, "480p: 8 каналов при 16 слоях")
+        expect(dt < 8, "480p: 16 слоёв < 8 с (\(String(format: "%.2f", dt)) с)")
+    }
+}
+
+// MARK: - Качество и покадровый план
+
+func testSceneQuality() {
+    section("Качество не хуже входа · ускорение движения")
+
+    // PSNR: идентично → ∞, известная ошибка → 20 дБ.
+    let ref = [Float](repeating: 0.5, count: 300)
+    expect(psnr(reference: ref, candidate: ref) == .infinity, "PSNR идентичных кадров = ∞")
+    let shifted = [Float](repeating: 0.6, count: 300)
+    expectClose(Double(psnr(reference: ref, candidate: shifted)), 20, 0.01,
+                "PSNR при MSE 0.01 = 20 дБ")
+    expect(luminanceSSIM(reference: ref, candidate: ref) > 0.999, "SSIM идентичных = 1")
+    expect(luminanceSSIM(reference: ref, candidate: shifted) < 1, "SSIM differing < 1")
+
+    // Ворот качества: не хуже входа → принят, регрессия → отклонён.
+    do {
+        let floor = QualityFloor(minPSNR: 30, minSSIM: 0.90)
+        expect(floor.accepts(reference: ref, reconstruction: ref), "пол: идеальная реконструкция принята")
+        let bad = [Float](repeating: 0.2, count: 300)
+        expect(!floor.accepts(reference: ref, reconstruction: bad), "пол: регрессия отклонена")
+        expect(floor.accepts(current: 33, previous: 32), "пол: улучшение принято")
+        expect(!floor.accepts(current: 30.1, previous: 32), "пол: просадка > 0.5 дБ отклонена")
+        expect(floor.report(reference: ref, reconstruction: ref).contains("принят"),
+               "отчёт качества: принят")
+    }
+
+    // Покадровый план: статика на ключевых кадрах, объекты — каждый кадр.
+    do {
+        let plan = FramePlan(keyframeInterval: 8)
+        expect(plan.needsRecompute(frame: 0, kind: .sky), "ключевой кадр: небо пересчитано")
+        expect(!plan.needsRecompute(frame: 3, kind: .sky), "промежуточный кадр: небо из кэша")
+        expect(plan.needsRecompute(frame: 3, kind: .figure), "объекты пересчитываются покадрово")
+        expect(plan.needsRecompute(frame: 3, kind: .sky, motionScore: 0.9),
+               "смена плана: кэш сброшен")
+        let layers: [LayerSpec] = [
+            LayerSpec(.sky, role: .background), LayerSpec(.ground, role: .background),
+            LayerSpec(.lightGradient, role: .lighting), LayerSpec(.figure, count: 2, role: .objects),
+        ]
+        expect(plan.estimatedSpeedup(layers: layers) > 1.5,
+               "кэш статичных экспертов даёт ускорение > 1.5×")
+    }
+}
+
 // MARK: - main
 
 func runAll() {
@@ -1625,6 +1766,8 @@ func runAll() {
     testPowerController()
     testPureLogic()
     testLayerRenderer()
+    testUniversalLayers()
+    testSceneQuality()
 }
 
 let started = Date()
