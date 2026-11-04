@@ -14,7 +14,13 @@ public func encodePNG(width: Int, height: Int, rgb: [Float]) -> Data? {
     for y in 0..<height {
         for x in 0..<width {
             let si = (y * width + x) * 3
-            let di = (y * width + x) * 4
+            // CGContext с `data:` хранит строку 0 СНИЗУ, а наши массивы —
+            // top-down (так же их читает decodeImageRGB). Без этого сдвига
+            // каждый сохранённый PNG был перевёрнут по вертикали: превью
+            // слоёв и реконструкции показывали небо внизу, землю вверху.
+            // Инвариант: decodeImageRGB(encodePNG(rgb)) == rgb с точностью
+            // до 1/255 (проверяется тестом итерации 6).
+            let di = ((height - 1 - y) * width + x) * 4
             pixels[di] = UInt8(min(255, max(0, rgb[si] * 255)))
             pixels[di+1] = UInt8(min(255, max(0, rgb[si+1] * 255)))
             pixels[di+2] = UInt8(min(255, max(0, rgb[si+2] * 255)))

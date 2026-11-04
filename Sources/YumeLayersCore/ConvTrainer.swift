@@ -21,7 +21,11 @@ public func loadImageRGB(data: Data, w: Int, h: Int) -> [Float]? {
     return decodeImageRGB(img, w: w, h: h)
 }
 
-private func decodeImageRGB(_ img: CGImage, w: Int, h: Int) -> [Float]? {
+/// Публичная точка декодирования CGImage → RGB [0,1] top-down.
+/// Итерация 6: конвейеру нужно decoded-кадры из `AVAssetImageGenerator`,
+/// а не только JPEG из файла/памяти. Логика одна и та же, дублировать её
+/// нельзя — иначе превью и обучение будут видеть разные цвета.
+public func decodeImageRGB(_ img: CGImage, w: Int, h: Int) -> [Float]? {
     var pixels = [UInt8](repeating: 0, count: w * h * 4)
     let cs = CGColorSpaceCreateDeviceRGB()
     guard let ctx = CGContext(data: &pixels, width: w, height: h, bitsPerComponent: 8,

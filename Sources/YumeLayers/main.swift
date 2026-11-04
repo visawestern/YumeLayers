@@ -49,6 +49,56 @@ case "layered":
                  report.acceptedByFloor ? "принят" : "не пройден"))
     print(String(format: "скважность GPU %.0f%% · сборка: %d канала (RGB)",
                  report.duty * 100, report.compositeChannels))
+case "pipeline":
+    // ПОД КЛЮЧ: MP4 → кадры → 8-канальная разметка → обучение → чекпоинт → превью.
+    // pipeline [видео.mp4] [кадры] [шаги] [ширина] [высота]
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    let fallback = home + "/Downloads/8446035036876.mp4"
+    let video = args.count > 2 ? args[2]
+        : (FileManager.default.fileExists(atPath: fallback) ? fallback : "")
+    guard !video.isEmpty else {
+        print("нужен путь к видео: swift run -c release YumeLayers pipeline <видео.mp4> [кадры] [шаги] [ш] [в]")
+        break
+    }
+    let frames = args.count > 3 ? (Int(args[3]) ?? 16) : 16
+    let steps = args.count > 4 ? (Int(args[4]) ?? 200) : 200
+    let pw = args.count > 5 ? (Int(args[5]) ?? 96) : 96
+    let ph = args.count > 6 ? (Int(args[6]) ?? 72) : 72
+    let win = args.count > 7 ? (Double(args[7]) ?? 2.0) : 2.0
+    let ckptDir = home + "/YumeLayers/checkpoints"
+    try? FileManager.default.createDirectory(atPath: ckptDir,
+                                              withIntermediateDirectories: true)
+    let ckpt = ckptDir + "/layered.safetensors"
+
+    print("pipeline: \(video)")
+    print("  кадры \(frames) · \(pw)×\(ph) · отрывок \(win) с · шагов \(steps) · латент C=32 · GPU ≤90%")
+    do {
+        let r = try runLayerPipeline(videoPath: video, w: pw, h: ph,
+                                     frameCount: frames, steps: steps,
+                                     latentChannels: 32,
+                                     windowSeconds: win,
+                                     checkpointPath: ckpt,
+                                     previewPrefix: p.outPrefix + "_pipeline")
+        if let a = r.dataset.alignment {
+            print(String(format: "  стабилизация: %d×%d · выброшено кадров %d · невязка %.4f",
+                         r.width, r.height, a.droppedFrames, a.meanResidual))
+        }
+        print(String(format: "  разметка: %d сцен · объектов %.1f%% · ошибка сборки %.2e",
+                     r.frameCount, r.dataset.meanCoverage * 100,
+                     r.dataset.compositeError))
+        print(String(format: "  loss %.5f → %.5f · PSNR %.2f дБ · SSIM %.4f · пол качества: %@",
+                     r.train.firstLoss, r.train.lastLoss,
+                     r.train.psnr, r.train.ssim,
+                     r.train.acceptedByFloor ? "принят" : "НЕ пройден"))
+        print(String(format: "  тепло: GPU %.1f с · пауз %.1f с (%d снов) · аварий %d · скважность %.1f%%",
+                     r.train.totalGpuMs / 1000, r.train.totalPauseMs / 1000,
+                     r.train.sleepCalls, r.train.emergencyPauses,
+                     r.train.measuredDuty * 100))
+        print("  чекпоинт: \(r.train.checkpointSaved ? (r.checkpointPath ?? "?") : "не сохранён")")
+        print("  превью: \(r.previewPaths.count) PNG → \(p.outPrefix)_pipeline_*.png")
+    } catch {
+        print("  ОШИБКА: \(error.localizedDescription)")
+    }
 case "gpusensors":
     // Живая телеметрия дискретной GPU: температура, частота, загрузка, мощность.
     // Проверка, что IORegistry отдаёт данные и что контур по температуре
@@ -69,7 +119,8 @@ default:
     print("""
     YumeLayers (чистый Swift, без PyTorch)
     GUI:  swift run -c release YumeLayersUI   (параметры задаются в окне)
-    CLI:  swift run -c release YumeLayers conv   (480p, щадящий режим)
+    CLI:  swift run -c release YumeLayers pipeline [видео.mp4] [кадры] [шаги] [ш] [в]
+          swift run -c release YumeLayers conv   (480p, щадящий режим)
           swift run -c release YumeLayers layered [шаги] [мощность %]  (8 каналов, ≤90% GPU)
           swift run -c release YumeLayers layers [ш] [в] [seed]        (превью слоёв)
           swift run -c release YumeLayers check / convcheck / gpubench

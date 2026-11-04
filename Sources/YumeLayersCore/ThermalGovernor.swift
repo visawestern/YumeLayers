@@ -307,6 +307,79 @@ public struct GpuDutyGuard {
     }
 }
 
+/// Пейсер скважности для ДЛИННЫХ прогонов.
+///
+/// `GpuDutyGuard.wait` спит после КАЖДОГО command buffer. Когда шаг короткий
+/// (80×56, ~1 мс GPU), положенная пауза ~0.1 мс, но `Thread.sleep` на macOS
+/// стоит порядка нескольких мс и контекстных переключений: 8 000 шагов
+/// превращались в 250 с вместо десятков секунд. Здесь паузы накапливаются
+/// в долг и сбрасываются одним сном, когда долг >= `minSleepMs`. Итоговое
+/// соотношение «GPU занята / всего» остаётся ровно 90% — меняется только
+/// число обращений к планировщику, а не тепловой режим.
+///
+/// Все счётчики наблюдаемы: отчёт обучения показывает реально потраченное
+/// время простоя, а не предположение.
+public final class GpuDutyPacer {
+    public let duty: Double
+    public let maxPauseMs: Double
+    public let minSleepMs: Double
+
+    private var debtMs: Double = 0
+    public private(set) var totalGpuMs: Double = 0
+    public private(set) var totalPauseMs: Double = 0
+    public private(set) var sleepCalls: Int = 0
+    public private(set) var emergencyPauses: Int = 0
+
+    public init(powerPercent: Int = defaultGpuPowerPercent,
+                maxPauseMs: Double = 2000,
+                minSleepMs: Double = 2.0) {
+        self.duty = effectiveDutyCeiling(powerPercent: powerPercent)
+        self.maxPauseMs = max(0, maxPauseMs)
+        self.minSleepMs = max(0, minSleepMs)
+    }
+
+    public var pendingPauseMs: Double { debtMs }
+
+    /// Зачесть один command buffer; при накоплении долга — уснуть один раз.
+    @discardableResult
+    public func wait(gpuMs: Double) -> Double {
+        let g = (gpuMs.isFinite && gpuMs > 0) ? gpuMs : 0
+        totalGpuMs += g
+        debtMs += dutySleepMs(gpuMs: g, duty: duty, maxPauseMs: maxPauseMs)
+        if debtMs >= minSleepMs { return sleepDebt() }
+        return 0
+    }
+
+    /// Сбросить накопленный долг (вызывать в конце прогона).
+    @discardableResult
+    public func sleepDebt() -> Double {
+        guard debtMs > 0 else { return 0 }
+        let ms = debtMs
+        Thread.sleep(forTimeInterval: ms / 1000)
+        debtMs = 0
+        totalPauseMs += ms
+        sleepCalls += 1
+        return ms
+    }
+
+    /// Аварийное остывание: НЕ откладывается в долг, применяется сразу.
+    @discardableResult
+    public func emergency(tempC: Double?) -> Double {
+        guard let t = tempC, t.isFinite, t >= emergencyTempC else { return 0 }
+        emergencyPauses += 1
+        let ms = maxPauseMs
+        Thread.sleep(forTimeInterval: ms / 1000)
+        totalPauseMs += ms
+        return ms
+    }
+
+    /// Фактическая скважность по отношению GPU-времени к GPU+паузам.
+    public var measuredDuty: Double {
+        let total = totalGpuMs + totalPauseMs
+        return total > 0 ? totalGpuMs / total : 0
+    }
+}
+
 /// Скважность-потолок по пользовательской «мощности» в процентах.
 ///
 /// 100% → 0.99, 85% → 0.8415, 50% → 0.495. Ниже 10% не опускаемся:

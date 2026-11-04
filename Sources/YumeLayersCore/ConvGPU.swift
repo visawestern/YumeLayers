@@ -130,9 +130,13 @@ public struct VAECache {
 /// 4.9 МБ) и потому разрешала пачку 16 — это ~8.6 ГБ активаций при 8.18 ГБ
 /// видеопамяти, то есть гарантированный OOM.
 public func convVAEBytesPerSample(w: Int, h: Int, channels: Int = 3,
-                                  layered: Bool = false) -> Int {
+                                  layered: Bool = false,
+                                  latentChannels: Int = ConvVAEGPU.latentC) -> Int {
     let hw = w * h
-    let C = ConvVAEGPU.latentC   // каналов латента (столько же у mu и logvar)
+    // Ёмкость латента теперь параметр. При C=32 буферы mu/logvar/sigma/eps/z,
+    // u1 и im2col декодера d1 вдвое больше — бюджет обязан это видеть, иначе
+    // effectiveBatchSize снова разрешит невлезающую пачку (история §C2 AUDIT).
+    let C = max(latentChannels, 1)
     let ic = max(channels, 1)
     var f = 0
     // e1: channels → 16, stride 2
@@ -180,9 +184,11 @@ public func activationBudgetBytes(workingSet: UInt64) -> Int {
 public func effectiveBatchSize(requested: Int, w: Int, h: Int,
                                budgetBytes: Int,
                                channels: Int = 3,
-                               layered: Bool = false) -> Int {
+                               layered: Bool = false,
+                               latentChannels: Int = ConvVAEGPU.latentC) -> Int {
     let per = max(convVAEBytesPerSample(w: w, h: h, channels: channels,
-                                        layered: layered), 1)
+                                        layered: layered,
+                                        latentChannels: latentChannels), 1)
     let fits = max(1, budgetBytes / per)
     return max(1, min(max(requested, 1), fits))
 }
@@ -247,18 +253,35 @@ public final class ConvVAEGPU {
     /// При C=16 сжатие 12×, что уже сопоставимо с обычными VAE на латенте /8.
     /// Значение вынесено в константу: изменение здесь автоматически меняет
     /// ширину e3 (2·C) и вход d1 (C).
-    static let latentC = 16
+    public static let latentC = 16
 
     /// Во сколько раз латент меньше исходного RGB-кадра по числу значений.
+    /// Оставлено как свойство: GUI, лог `ConvTrainer` и прежние тесты читают
+    /// именно базовую конфигурацию (3 канала, C = 16).
     static var compressionRatio: Double { 192.0 / Double(latentC) }
 
     /// То же для 8-канального layered-входа: 8·hw / (C·hw/64) = 512/C.
-    /// Латент при этом НЕ растёт — факторизация по экспертам позволяет
-    /// держать то же сжатие при вдвое более богатом входе.
     static var layeredCompressionRatio: Double { 512.0 / Double(latentC) }
+
+    /// Сжатие для ПРОИЗВОЛЬНОЙ конфигурации: `channels·64 / C`.
+    ///
+    /// При 8 каналах и C=16 сжатие 32× — именно здесь был потолок 28.8 дБ:
+    /// латент физически слишком узок, чтобы нести все 8 слоёв. C=32 даёт
+    /// 16×, C=64 даёт 8×. Формула, а не константа, позволяет осознанно
+    /// выбирать ёмкость под доступную VRAM.
+    static func compressionRatio(channels: Int = 3,
+                                 latentChannels: Int = ConvVAEGPU.latentC) -> Double {
+        Double(max(channels, 1)) * 64.0 / Double(max(latentChannels, 1))
+    }
 
     /// Число входных/выходных каналов: 3 (RGB) или 8 (слои).
     let channels: Int
+
+    /// Число каналов латента ЭТОЙ модели. Не статическая константа: два VAE
+    /// с разной ёмкостью живут в одном процессе, и `forward` обязан брать C
+    /// у своего экземпляра, иначе 32-канальная модель соберёт 16-канальный
+    /// латент и упадёт на `split2`.
+    public let latentChannels: Int
 
     let e1: ConvLayerGPU
     let e2: ConvLayerGPU
@@ -270,9 +293,15 @@ public final class ConvVAEGPU {
     /// - Parameter seed: seed инициализации весов. По умолчанию фиксирован,
     ///   чтобы обучение было воспроизводимым; тесты полагаются на это.
     init(engine: MetalEngine, channels: Int = 3,
+         latentChannels: Int = ConvVAEGPU.latentC,
          seed: UInt64 = 0x5EED_1234_ABCD_0001) {
         self.channels = channels
-        let C = ConvVAEGPU.latentC
+        // C кратно 8: split2/merge2 и im2col работают блоками, а чекпоинт
+        // должен однозначно описывать форму. Некорректный ввод не тихо
+        // округляется, а явно отвергается.
+        precondition(latentChannels >= 1, "число каналов латента должно быть > 0")
+        self.latentChannels = latentChannels
+        let C = latentChannels
         var rng = SplitMix64(seed: seed)
         e1 = ConvLayerGPU(engine: engine, ic: channels, oc: 16,
                           k: 3, stride: 2, pad: 1, rng: &rng)
@@ -304,7 +333,7 @@ public final class ConvVAEGPU {
         let h1 = h / 2, w1 = w / 2
         let h2 = h / 4, w2 = w / 4
         let h3 = h / 8, w3 = w / 8
-        let C = ConvVAEGPU.latentC
+        let C = latentChannels
         let plane = h3 * w3
 
         let (p1, c1) = e1.forward(s, image, ih: h, iw: w)
