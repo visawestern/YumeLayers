@@ -38,10 +38,6 @@ public struct FrameAlignmentReport {
     public let meanResidual: Double
 }
 
-private func lumaAt(_ f: [Float], _ i: Int) -> Float {
-    0.299 * f[i * 3] + 0.587 * f[i * 3 + 1] + 0.114 * f[i * 3 + 2]
-}
-
 /// Выровнять стек кадров по ЦЕЛОЧИСЛЕННОМУ сдвигу камеры и обрезать до общей
 /// области. Никакой интерполяции: пиксели только переставляются, поэтому
 /// инвариант точной сборки `compose(слои) == кадр` сохраняется побайтно.
@@ -175,13 +171,6 @@ public struct LayerDataset {
     }
 }
 
-private func maxPixelDelta(_ a: [Float], _ b: [Float]) -> Float {
-    let n = min(a.count, b.count)
-    var m: Float = 0
-    for i in 0..<n { m = max(m, abs(a[i] - b[i])) }
-    return m
-}
-
 /// Разметить стек RGB-кадров и честно измерить точность обратной сборки.
 ///
 /// - Parameter stabilize: включить выравнивание по сдвигу камеры. Для
@@ -295,150 +284,6 @@ public func loadVideoFrames(url: URL, w: Int, h: Int,
         frames.append(rgb)
     }
     return frames
-}
-
-// MARK: - Масштабирование: много сцен из одного фильма
-
-/// Детектор склеек (смены сцен) у фильме.
-///
-/// Проблема прямой выборки «N кадров по всему фильму»: фон в `LayerAnnotator`
-/// считается ОДНОЙ временной медианой по стеку. Если надергать кадры из разных
-/// сцен, медианный фон становится бессмысленной кашей и маска раздувается до
-/// 80% кадра. Поэтому перед аннотацией нужно разбить фильм на однородные
-/// «шоты» (где задник стабилен), и внутри каждого шота уже аннотировать плотно.
-///
-/// Сканируем фильм грубо (`scanCount` моментов), считаем среднюю яркость кадра
-/// и ищем скачки от соседних — это и есть склейки. Порог относительный
-/// (×6 от медианы), чтобы динамичные сцены не дробились на куски.
-public func detectSceneShots(url: URL, w: Int, h: Int,
-                             scanCount: Int = 240,
-                             cutThreshold: Double = 0.18) throws -> [(start: Double, end: Double)] {
-    let asset = AVURLAsset(url: url)
-    let duration = CMTimeGetSeconds(asset.duration)
-    guard duration.isFinite, duration > 0.5 else {
-        throw LayerDatasetError.unreadableVideo(url.path)
-    }
-    let n = max(scanCount, 8)
-    let gen = AVAssetImageGenerator(asset: asset)
-    gen.appliesPreferredTrackTransform = true
-    gen.maximumSize = CGSize(width: w, height: h)
-    gen.requestedTimeToleranceBefore = .zero
-    gen.requestedTimeToleranceAfter = .zero
-
-    var lumas: [Float] = []
-    lumas.reserveCapacity(n)
-    let px = w * h
-    for i in 0..<n {
-        let t = duration * Double(i) / Double(n - 1)
-        let time = CMTime(seconds: t, preferredTimescale: 600)
-        if let cg = try? gen.copyCGImage(at: time, actualTime: nil),
-           let rgb = decodeImageRGB(cg, w: w, h: h) {
-            var s: Float = 0
-            for p in 0..<px { s += lumaAt(rgb, p) }
-            lumas.append(s / Float(px))
-        } else {
-            lumas.append(0)
-        }
-    }
-    var diffs: [Double] = []
-    diffs.reserveCapacity(n)
-    for i in 1..<lumas.count { diffs.append(Double(abs(lumas[i] - lumas[i - 1]))) }
-    let sorted = diffs.sorted()
-    let median = sorted[sorted.count / 2]
-    let thr = max(median * 6.0, cutThreshold)
-
-    var cuts: [Int] = [0]
-    for i in 1..<diffs.count where diffs[i] > thr {
-        if i - cuts.last! >= 2 { cuts.append(i) }
-    }
-    cuts.append(n - 1)
-
-    var shots: [(Double, Double)] = []
-    for k in 0..<(cuts.count - 1) {
-        let a = duration * Double(cuts[k]) / Double(n - 1)
-        let b = duration * Double(cuts[k + 1]) / Double(n - 1)
-        if b - a > 0.4 { shots.append((a, b)) }
-    }
-    return shots
-}
-
-/// Вытащить `count` кадров ПЛОТНО из одного шота `[start, end]`.
-///
-/// В отличие от `loadVideoFrames` (одно окно), здесь кадры берутся внутри
-/// найденной сцены, где фон стабилен — временная медиана даёт корректный
-/// фон, а не кашу из разных сцен.
-public func loadShotFrames(url: URL, w: Int, h: Int,
-                           start: Double, end: Double,
-                           count: Int = 12) throws -> [[Float]] {
-    let gen = AVAssetImageGenerator(asset: AVURLAsset(url: url))
-    gen.appliesPreferredTrackTransform = true
-    gen.maximumSize = CGSize(width: w, height: h)
-    gen.requestedTimeToleranceBefore = .zero
-    gen.requestedTimeToleranceAfter = .zero
-    let n = max(count, 2)
-    var frames: [[Float]] = []
-    frames.reserveCapacity(n)
-    for i in 0..<n {
-        let t = start + (end - start) * Double(i) / Double(n - 1)
-        let time = CMTime(seconds: t, preferredTimescale: 600)
-        if let cg = try? gen.copyCGImage(at: time, actualTime: nil),
-           let rgb = decodeImageRGB(cg, w: w, h: h) {
-            frames.append(rgb)
-        }
-    }
-    return frames
-}
-
-/// Собрать большой датасет из одного фильма: детекция шотов → плотная
-/// аннотация внутри каждого шота → объединение сцен.
-///
-/// Это и есть путь от «16 кадров одного отрывка» к «сотням разнородных сцен»
-/// без потери качества разметки (фон считается в пределах каждого шота).
-public func buildLargeLayerDataset(url: URL, w: Int, h: Int,
-                                   targetFrames: Int = 600,
-                                   framesPerShot: Int = 12,
-                                   scanCount: Int = 240,
-                                   maxShift: Int = 8) throws -> LayerDataset {
-    let shots = try detectSceneShots(url: url, w: w, h: h, scanCount: scanCount)
-
-    var allScenes: [LayeredScene] = []
-    var allFrames: [[Float]] = []
-    var totalCoverage: Double = 0
-    var worstComposite: Float = 0
-    var firstAlignment: FrameAlignmentReport? = nil
-    var dw = 0, dh = 0
-    var usedShots = 0
-
-    for shot in shots {
-        if allFrames.count >= targetFrames { break }
-        let f = try loadShotFrames(url: url, w: w, h: h,
-                                   start: shot.start, end: shot.end,
-                                   count: framesPerShot)
-        if f.count < 4 { continue }
-        let ds = makeLayerDataset(frames: f, w: w, h: h,
-                                  stabilize: true, maxShift: maxShift)
-        guard !ds.scenes.isEmpty else { continue }
-        if dw == 0 { dw = ds.w; dh = ds.h }
-        if ds.w != dw || ds.h != dh { continue }   // все шоты одного размера
-        for (i, sc) in ds.scenes.enumerated() {
-            allScenes.append(sc)
-            allFrames.append(ds.frames[i])
-            totalCoverage += objectCoverage(sc)
-            let got = composeLayers(w: dw, h: dh, background: sc.background,
-                                    objects: sc.objects, mask: sc.mask,
-                                    light: sc.light)
-            worstComposite = max(worstComposite, maxPixelDelta(got, ds.frames[i]))
-        }
-        if firstAlignment == nil { firstAlignment = ds.alignment }
-        usedShots += 1
-    }
-
-    guard !allScenes.isEmpty else { throw LayerDatasetError.emptySource }
-    return LayerDataset(w: dw, h: dh, frames: allFrames,
-                        scenes: allScenes,
-                        meanCoverage: totalCoverage / Double(allScenes.count),
-                        compositeError: worstComposite,
-                        alignment: firstAlignment)
 }
 
 // MARK: - Конвейер под ключ
