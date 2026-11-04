@@ -2370,6 +2370,37 @@ func testLayeredBatching() {
     expect(rBatch.psnr.isFinite && rBatch.ssim.isFinite, "качество конечно")
 }
 
+func testLayeredOverlap() {
+    section("Double-buffering CPU↔GPU: overlap даёт те же числа, что синхронный")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    // Overlap только перекрывает кодирование следующего шага со счётом
+    // текущего на GPU. Математика не меняется: те же сцены, те же seed'ы
+    // (step*batch+b), тот же порядок очереди command buffer'ов, те же
+    // обновления Adam. Значит траектория обучения обязана совпасть — это
+    // и есть доказательство, что перекрытие не ломает зависимости параметров.
+    let S = makeLayeredScene(w: 24, h: 24, seed: 7)
+    let steps = 40
+    let sync = trainLayeredVAE(steps: steps, w: 24, h: 24,
+                               scenes: [S], latentChannels: 32,
+                               cosineSchedule: true, overlap: false)
+    let ovl = trainLayeredVAE(steps: steps, w: 24, h: 24,
+                              scenes: [S], latentChannels: 32,
+                              cosineSchedule: true, overlap: true)
+    expect(ovl.steps == steps, "overlap отработал заявленное число шагов")
+    expectClose(ovl.firstLoss, sync.firstLoss, 1e-6,
+                String(format: "firstLoss совпадает: %.6f vs %.6f",
+                       ovl.firstLoss, sync.firstLoss))
+    expectClose(ovl.lastLoss, sync.lastLoss, 1e-6,
+                String(format: "lastLoss совпадает: %.6f vs %.6f",
+                       ovl.lastLoss, sync.lastLoss))
+    expectClose(Double(ovl.psnr), Double(sync.psnr), 1e-4,
+                String(format: "PSNR совпадает: %.2f vs %.2f",
+                       ovl.psnr, sync.psnr))
+    expectClose(Double(ovl.ssim), Double(sync.ssim), 1e-5,
+                String(format: "SSIM совпадает: %.5f vs %.5f",
+                       ovl.ssim, sync.ssim))
+}
+
 func testDutyPacer() {
     section("Пейсер скважности: пакетные паузы без потери 90%")
     let pacer = GpuDutyPacer(powerPercent: 90, maxPauseMs: 2000, minSleepMs: 2.0)
@@ -2487,6 +2518,7 @@ func runAll() {
     testLayerPipeline()
     testDutyPacer()
     testLayeredBatching()
+    testLayeredOverlap()
     testFrameStabilization()
 }
 

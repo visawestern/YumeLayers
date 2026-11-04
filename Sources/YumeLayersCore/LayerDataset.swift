@@ -340,7 +340,8 @@ public func runLayerPipeline(
     checkpointPath: String? = nil,
     previewPrefix: String? = nil,
     annotation: LayerAnnotationParams = LayerAnnotationParams(),
-    powerPercent: Int = defaultGpuPowerPercent
+    powerPercent: Int = defaultGpuPowerPercent,
+    overlap: Bool = false
 ) throws -> LayerPipelineReport {
 
     let pw = ((max(w, 8) + 7) / 8) * 8
@@ -376,7 +377,8 @@ public func runLayerPipeline(
                                 cosineSchedule: true,
                                 batchSize: batchSize,
                                 checkpointPath: checkpointPath,
-                                powerPercent: powerPercent)
+                                powerPercent: powerPercent,
+                                overlap: overlap)
 
     // Превью: исходный кадр, разметка по слоям и то, что выдала модель.
     // Сравнивать их можно глазами — это и есть «не хуже входа» для человека.

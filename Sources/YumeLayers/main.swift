@@ -66,13 +66,14 @@ case "pipeline":
     let ph = args.count > 6 ? (Int(args[6]) ?? 72) : 72
     let win = args.count > 7 ? (Double(args[7]) ?? 2.0) : 2.0
     let batch = args.count > 8 ? (Int(args[8]) ?? 1) : 1
+    let overlap = args.count > 9 ? ((Int(args[9]) ?? 0) != 0) : false
     let ckptDir = home + "/YumeLayers/checkpoints"
     try? FileManager.default.createDirectory(atPath: ckptDir,
                                               withIntermediateDirectories: true)
     let ckpt = ckptDir + "/layered.safetensors"
 
     print("pipeline: \(video)")
-    print("  кадры \(frames) · \(pw)×\(ph) · отрывок \(win) с · шагов \(steps) · батч \(batch) · латент C=32 · GPU ≤90%")
+    print("  кадры \(frames) · \(pw)×\(ph) · отрывок \(win) с · шагов \(steps) · батч \(batch) · латент C=32 · GPU ≤90% · overlap \(overlap ? "вкл" : "выкл")")
     do {
         let r = try runLayerPipeline(videoPath: video, w: pw, h: ph,
                                      frameCount: frames, steps: steps,
@@ -80,7 +81,8 @@ case "pipeline":
                                      batchSize: batch,
                                      windowSeconds: win,
                                      checkpointPath: ckpt,
-                                     previewPrefix: p.outPrefix + "_pipeline")
+                                     previewPrefix: p.outPrefix + "_pipeline",
+                                     overlap: overlap)
         if let a = r.dataset.alignment {
             print(String(format: "  стабилизация: %d×%d · выброшено кадров %d · невязка %.4f",
                          r.width, r.height, a.droppedFrames, a.meanResidual))
@@ -121,7 +123,7 @@ default:
     print("""
     YumeLayers (чистый Swift, без PyTorch)
     GUI:  swift run -c release YumeLayersUI   (параметры задаются в окне)
-    CLI:  swift run -c release YumeLayers pipeline [видео.mp4] [кадры] [шаги] [ш] [в] [отрывок с] [батч]
+    CLI:  swift run -c release YumeLayers pipeline [видео.mp4] [кадры] [шаги] [ш] [в] [отрывок с] [батч] [overlap 0/1]
           swift run -c release YumeLayers conv   (480p, щадящий режим)
           swift run -c release YumeLayers layered [шаги] [мощность %]  (8 каналов, ≤90% GPU)
           swift run -c release YumeLayers layers [ш] [в] [seed]        (превью слоёв)

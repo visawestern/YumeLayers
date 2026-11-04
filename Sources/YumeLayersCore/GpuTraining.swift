@@ -152,20 +152,72 @@ public final class GpuSession {
     /// шанс завершиться самим, а не утащить за собой оконный сервер.
     static var gpuDeadlineSeconds: Double = 30
 
-    func end() -> Double {
-        enc.endEncoding()
-        let done = DispatchSemaphore(value: 0)
-        cmd.addCompletedHandler { _ in done.signal() }
-        cmd.commit()
-        if done.wait(timeout: .now() + Self.gpuDeadlineSeconds) == .timedOut {
-            yumeLog("❌ GPU не ответила за \(Int(Self.gpuDeadlineSeconds)) с — command buffer завис. "
-                  + "Аварийный выход, чтобы не перегрузить WindowServer.")
-            exit(70)
+    /// Результат асинхронного коммита: позволяет отправить command buffer в
+    /// очередь и продолжить работу, не дожидаясь GPU. `wait()` блокирует до
+    /// завершения, возвращает время GPU (мс) и возвращает стейджинг в пул.
+    ///
+    /// ВАЖНО: возврат стейджинга в пул намеренно происходит в `wait()` на
+    /// вызывающем потоке, а НЕ в completed-handler'е — `BufferPool` не
+    /// потокобезопасен, а handler летит на потоке Metal.
+    public final class CommittedStep {
+        let buffer: MTLCommandBuffer
+        let pool: BufferPool
+        let staged: [MTLBuffer]
+        private let sem = DispatchSemaphore(value: 0)
+        private var gpuMs: Double = 0
+
+        init(_ buffer: MTLCommandBuffer, pool: BufferPool, staged: [MTLBuffer]) {
+            self.buffer = buffer
+            self.pool = pool
+            self.staged = staged
         }
-        for s in staged { pool.put(s) }
+
+        func signal(gpuMs: Double) {
+            self.gpuMs = gpuMs.isFinite ? gpuMs : 0
+            sem.signal()
+        }
+
+        /// Блокирует до завершения GPU (с жёстким пределом `gpuDeadlineSeconds`,
+        /// чтобы висячий buffer не утащил за собой WindowServer) и возвращает
+        /// время GPU в мс.
+        func wait() -> Double {
+            if sem.wait(timeout: .now() + GpuSession.gpuDeadlineSeconds) == .timedOut {
+                yumeLog("❌ GPU не ответила за \(Int(GpuSession.gpuDeadlineSeconds)) с — "
+                      + "command buffer завис. Аварийный выход, чтобы не перегрузить WindowServer.")
+                exit(70)
+            }
+            for s in staged { pool.put(s) }
+            return gpuMs
+        }
+    }
+
+    /// Асинхронная отправка command buffer в очередь GPU БЕЗ блокировки.
+    ///
+    /// Это основа совмещения CPU и GPU (double-buffering): следующий шаг
+    /// кодируется, пока текущий ещё считается на видеокарте. В синхронном
+    /// `end()` CPU простаивал всё время работы GPU; на длинных прогонах
+    /// (30k+ шагов) накладные расходы Metal (commit+ожидание на каждый шаг)
+    /// сопоставимы со временем счёта — порядка 180 с «пустого» времени на 30k
+    /// шагов. Перекрытие убирает этот простой из критического пути.
+    func commit() -> CommittedStep {
+        enc.endEncoding()
+        let committed = cmd!
+        let myStaged = staged
         staged.removeAll()
-        let gpuMs = (cmd.gpuEndTime - cmd.gpuStartTime) * 1000
-        return gpuMs.isFinite ? gpuMs : 0
+        let step = CommittedStep(committed, pool: pool, staged: myStaged)
+        committed.addCompletedHandler { [weak step] _ in
+            let ms = (committed.gpuEndTime - committed.gpuStartTime) * 1000
+            step?.signal(gpuMs: ms)
+        }
+        committed.commit()
+        return step
+    }
+
+    /// Синхронное завершение: отправить и дождаться. Сохранён для обратной
+    /// совместимости (тесты, eval, короткие прогоны). Семантически равно
+    /// `commit().wait()`.
+    func end() -> Double {
+        return commit().wait()
     }
 
     /// Копирует данные с CPU в тензор ВНУТРИ текущего command buffer:

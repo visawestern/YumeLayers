@@ -142,7 +142,8 @@ public func trainLayeredVAE(steps: Int = 60,
                             cosineSchedule: Bool = false,
                             batchSize: Int = 1,
                             checkpointPath: String? = nil,
-                            powerPercent: Int = defaultGpuPowerPercent)
+                            powerPercent: Int = defaultGpuPowerPercent,
+                            overlap: Bool = false)
     -> LayeredTrainReport {
 
     let dataset = scenes ?? [makeLayeredScene(w: max(((max(w, 8) + 7) / 8) * 8, 8),
@@ -207,58 +208,113 @@ public func trainLayeredVAE(steps: Int = 60,
     let invBatch = 1.0 / Float(batch)
 
     let first = evaluate()
-    for step in 1...total {
-        autoreleasepool {
-            let stepLR = cosineSchedule
-                ? cosineLR(step: step - 1, totalSteps: total, baseLR: lr)
-                : lr
-
-            // МИНИ-БАТЧ: `batch` сцен обрабатываются в ОДНОМ command buffer'е —
-            // один коммит и одно ожидание GPU на шаг вместо `batch`. Именно
-            // накладные расходы Metal (~10 мс системного времени на шаг) были
-            // узким местом: GPU на 80×56 занят всего ~6 мс, остальное — коммит
-            // и ожидание. Батч амортизирует их, оставляя 90% скважности
-            // (пейсер считает по реальному времени GPU).
-            //
-            // Градиенты копятся поэлементно и НОРМИРУЮТСЯ на 1/batch: Adam
-            // инвариантен к масштабу lr, но не к масштабу градиентов (m/sqrt(v)
-            // самонеподобен), поэтому делить lr нельзя — делим градиенты.
-            session.begin()
-            var acc: [GPUTensor]? = nil
-            for b in 0..<batch {
-                let idx = (b + (step - 1) * batch) % targets.count
-                let cache = vae.forward(session, image: xs[idx], w: pw, h: ph,
-                                        deterministic: false,
-                                        seed: UInt32(step * batch + b))
-                let (_, grads) = vae.backwardLayered(session, cache,
-                                                     target: targetsGPU[idx],
-                                                     layerWeight: layerWeight,
-                                                     composeWeight: composeWeight,
-                                                     beta: beta)
-                if acc == nil {
-                    acc = grads
-                } else {
-                    for i in 0..<grads.count {
-                        acc![i] = session.add(acc![i], grads[i])
+    if overlap {
+        // Double-buffering CPU↔GPU. Один command buffer держим «в полёте»:
+        // отправляем шаг N, а дозаждаться будем шага N-1 (он уже считается на
+        // GPU). Так кодирование шага N+1 перекрывается со счётом шага N, и простой
+        // CPU в ожидании GPU уходит из критического пути. Математика не меняется:
+        // параметры, записанные Adam'ом шага N, читаются forward'ом шага N+1 — а
+        // Metal гарантирует порядок выполнения buffer'ов в одной очереди.
+        var inFlight: GpuSession.CommittedStep? = nil
+        for step in 1...total {
+            autoreleasepool {
+                let stepLR = cosineSchedule
+                    ? cosineLR(step: step - 1, totalSteps: total, baseLR: lr)
+                    : lr
+                session.begin()
+                var acc: [GPUTensor]? = nil
+                for b in 0..<batch {
+                    let idx = (b + (step - 1) * batch) % targets.count
+                    let cache = vae.forward(session, image: xs[idx], w: pw, h: ph,
+                                            deterministic: false,
+                                            seed: UInt32(step * batch + b))
+                    let (_, grads) = vae.backwardLayered(session, cache,
+                                                         target: targetsGPU[idx],
+                                                         layerWeight: layerWeight,
+                                                         composeWeight: composeWeight,
+                                                         beta: beta)
+                    if acc == nil {
+                        acc = grads
+                    } else {
+                        for i in 0..<grads.count {
+                            acc![i] = session.add(acc![i], grads[i])
+                        }
                     }
                 }
-            }
-            if let g = acc {
-                let scaled = g.map { session.smul(invBatch, $0) }
-                vae.applyAdam(session, grads: scaled, t: step, lr: stepLR)
-            }
-            let gpuMs = session.end()
-            pacer.wait(gpuMs: gpuMs)
-
-            // Раз в 10 шагов смотрим на датчик: аварийная температура важнее
-            // любого расписания, обучение обязано уступить GPU системе.
-            if step % 10 == 0 {
-                _ = pacer.emergency(tempC: sensor.read()?.temperatureC)
+                if let g = acc {
+                    let scaled = g.map { session.smul(invBatch, $0) }
+                    vae.applyAdam(session, grads: scaled, t: step, lr: stepLR)
+                }
+                let cb = session.commit()
+                if let prev = inFlight {
+                    let ms = prev.wait()
+                    pacer.wait(gpuMs: ms)
+                }
+                inFlight = cb
+                if step % 10 == 0 {
+                    _ = pacer.emergency(tempC: sensor.read()?.temperatureC)
+                }
             }
         }
+        if let prev = inFlight {
+            let ms = prev.wait()
+            pacer.wait(gpuMs: ms)
+        }
+        pacer.sleepDebt()
+    } else {
+        for step in 1...total {
+            autoreleasepool {
+                let stepLR = cosineSchedule
+                    ? cosineLR(step: step - 1, totalSteps: total, baseLR: lr)
+                    : lr
+
+                // МИНИ-БАТЧ: `batch` сцен обрабатываются в ОДНОМ command buffer'е —
+                // один коммит и одно ожидание GPU на шаг вместо `batch`. Именно
+                // накладные расходы Metal (~10 мс системного времени на шаг) были
+                // узким местом: GPU на 80×56 занят всего ~6 мс, остальное — коммит
+                // и ожидание. Батч амортизирует их, оставляя 90% скважности
+                // (пейсер считает по реальному времени GPU).
+                //
+                // Градиенты копятся поэлементно и НОРМИРУЮТСЯ на 1/batch: Adam
+                // инвариантен к масштабу lr, но не к масштабу градиентов (m/sqrt(v)
+                // самонеподобен), поэтому делить lr нельзя — делим градиенты.
+                session.begin()
+                var acc: [GPUTensor]? = nil
+                for b in 0..<batch {
+                    let idx = (b + (step - 1) * batch) % targets.count
+                    let cache = vae.forward(session, image: xs[idx], w: pw, h: ph,
+                                            deterministic: false,
+                                            seed: UInt32(step * batch + b))
+                    let (_, grads) = vae.backwardLayered(session, cache,
+                                                         target: targetsGPU[idx],
+                                                         layerWeight: layerWeight,
+                                                         composeWeight: composeWeight,
+                                                         beta: beta)
+                    if acc == nil {
+                        acc = grads
+                    } else {
+                        for i in 0..<grads.count {
+                            acc![i] = session.add(acc![i], grads[i])
+                        }
+                    }
+                }
+                if let g = acc {
+                    let scaled = g.map { session.smul(invBatch, $0) }
+                    vae.applyAdam(session, grads: scaled, t: step, lr: stepLR)
+                }
+                let gpuMs = session.end()
+                pacer.wait(gpuMs: gpuMs)
+
+                // Раз в 10 шагов смотрим на датчик: аварийная температура важнее
+                // любого расписания, обучение обязано уступить GPU системе.
+                if step % 10 == 0 {
+                    _ = pacer.emergency(tempC: sensor.read()?.temperatureC)
+                }
+            }
+        }
+        pacer.sleepDebt()
     }
     let last = evaluate()
-    pacer.sleepDebt()
 
     // Пол качества — по СОБРАННОМУ кадру, а не по 8 каналам по отдельности.
     // Берём первую сцену: она же уходит в PNG-превью конвейера.
