@@ -1,0 +1,404 @@
+// YumeLayers — свёрточный VAE на Metal: forward + backward + Adam целиком на GPU.
+// Раскладка карт: (каналы, H*W), веса свёртки: (oc, ic*kh*kw). im2col/col2im — в шейдерах.
+import Foundation
+
+/// Детерминированный ГПСЧ для инициализации весов (splitmix64).
+///
+/// Раньше веса брались из `Float.random` без seed: два запуска с одним и тем же
+/// датасетом давали разные модели, а тесты были невоспроизводимы. Для обучения
+/// это ещё и мешает сравнивать изменения гиперпараметров.
+struct SplitMix64: RandomNumberGenerator {
+    private var state: UInt64
+    init(seed: UInt64) { state = seed }
+    mutating func next() -> UInt64 {
+        state &+= 0x9E3779B97F4A7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+        return z ^ (z >> 31)
+    }
+}
+
+/// Один свёрточный слой на GPU.
+public final class ConvLayerGPU {
+    let ic: Int
+    let oc: Int
+    let k: Int
+    let stride: Int
+    let pad: Int
+
+    let W: GPUTensor      // oc × (ic*k*k)
+    let b: GPUTensor      // oc × 1
+    let mW: GPUTensor
+    let vW: GPUTensor
+    let mb: GPUTensor
+    let vb: GPUTensor
+
+    init(engine: MetalEngine, ic: Int, oc: Int, k: Int = 3, stride: Int = 1, pad: Int = 1,
+         scale: Float? = nil, rng: inout SplitMix64) {
+        self.ic = ic; self.oc = oc; self.k = k; self.stride = stride; self.pad = pad
+        let fanIn = ic * k * k
+        // He-инициализация: σ = √(2/fanIn) сохраняет дисперсию сигнала через ReLU.
+        // Множитель 0.2 из прежней версии занижал веса в 5 раз — сигнал затухал
+        // к латенту на порядки, и часть каналов умирала уже на первом слое.
+        let s = scale ?? sqrt(2.0 / Float(fanIn))
+        var wdata = [Float](repeating: 0, count: oc * fanIn)
+        for i in 0..<wdata.count {
+            // равномерное в [-s·√3, s·√3] имеет ту же дисперсию, что N(0, s²)
+            let u = Float.random(in: -1...1, using: &rng)
+            wdata[i] = u * s * 1.7320508
+        }
+        self.W = GPUTensor(engine: engine, data: wdata, rows: oc)
+        self.b = GPUTensor(engine: engine, data: [Float](repeating: 0, count: oc), rows: oc)
+        self.mW = GPUTensor(engine: engine, rows: oc, cols: fanIn)
+        self.vW = GPUTensor(engine: engine, rows: oc, cols: fanIn)
+        self.mb = GPUTensor(engine: engine, rows: oc, cols: 1)
+        self.vb = GPUTensor(engine: engine, rows: oc, cols: 1)
+    }
+
+    func forward(_ s: GpuSession, _ x: GPUTensor, ih: Int, iw: Int) -> (GPUTensor, ConvCache) {
+        let oh = (ih + 2 * pad - k) / stride + 1
+        let ow = (iw + 2 * pad - k) / stride + 1
+        let cols = s.im2col(x, ih: ih, iw: iw, ic: ic, kh: k, kw: k, stride: stride, pad: pad)
+        let pre = s.biasRow(s.matmul(W, cols), b)
+        let cache = ConvCache(x: x, cols: cols, ih: ih, iw: iw, oh: oh, ow: ow)
+        return (pre, cache)
+    }
+
+    func backward(_ s: GpuSession, _ cache: ConvCache, dOut: GPUTensor)
+        -> (dx: GPUTensor, gW: GPUTensor, gb: GPUTensor) {
+        let gW = s.gradW(dOut, cache.cols, oc: oc, kk: ic * k * k) // oc × (ic*k*k)
+        let gb = s.biasRowGrad(dOut)                               // oc × 1
+        let dx: GPUTensor
+        if stride == 1 {
+            dx = s.convBackInputS1(dOut, W, ic: ic, oc: oc,
+                                   ih: cache.ih, iw: cache.iw, k: k, pad: pad)
+        } else {
+            let dcols = s.matmul(W, dOut, transA: true)            // (ic*k*k) × (oh*ow)
+            dx = s.col2im(dcols, ic: ic, ih: cache.ih, iw: cache.iw,
+                          kh: k, kw: k, stride: stride, pad: pad,
+                          oh: cache.oh, ow: cache.ow)
+        }
+        return (dx, gW, gb)
+    }
+
+    func applyAdam(_ s: GpuSession, _ gW: GPUTensor, _ gb: GPUTensor, t: Int, lr: Float) {
+        s.adamUpdate(W, gW, mW, vW, t: t, lr: lr)
+        s.adamUpdate(b, gb, mb, vb, t: t, lr: lr)
+    }
+
+    var matrices: [Matrix] { [W.toMatrix(), b.toMatrix()] }
+}
+
+public struct ConvCache {
+    let x: GPUTensor
+    let cols: GPUTensor
+    let ih: Int
+    let iw: Int
+    let oh: Int
+    let ow: Int
+}
+
+/// Кэш прямого прохода VAE.
+///
+/// Латент вариационный: энкодер выдаёт 2·C каналов, они делятся на `mu` и
+/// `logvar`, затем сэмплируется `z = mu + exp(0.5·logvar)·eps`.
+public struct VAECache {
+    let image: GPUTensor
+    let c1: ConvCache, p1: GPUTensor, a1: GPUTensor
+    let c2: ConvCache, p2: GPUTensor, a2: GPUTensor
+    let c3: ConvCache, p3: GPUTensor
+    let mu: GPUTensor, logvar: GPUTensor, sigma: GPUTensor, eps: GPUTensor
+    let z: GPUTensor
+    let u1: GPUTensor, c4: ConvCache, p4: GPUTensor, a4: GPUTensor
+    let u2: GPUTensor, c5: ConvCache, p5: GPUTensor, a5: GPUTensor
+    let u3: GPUTensor, c6: ConvCache, p6: GPUTensor
+    let recon: GPUTensor
+    let w: Int, h: Int
+
+    /// Число каналов латента (не 2·C).
+    var latentChannels: Int { mu.rows }
+    var latentPlane: Int { mu.cols }
+}
+
+/// Байт видеопамяти на ОДИН кадр пачки: все активации прямого прохода, кэш
+/// im2col и реконструкция. Считается по форме слоёв, а не «на глаз».
+///
+/// Доминируют im2col-буферы stride-1 слоёв декодера: для d3 это
+/// `16·9·hw = 144·hw` float'ов, то есть ~230 МБ на кадр 854×480 только под
+/// один слой. Прежняя формула учитывала лишь сам кадр (`3·hw` float'ов,
+/// 4.9 МБ) и потому разрешала пачку 16 — это ~8.6 ГБ активаций при 8.18 ГБ
+/// видеопамяти, то есть гарантированный OOM.
+public func convVAEBytesPerSample(w: Int, h: Int) -> Int {
+    let hw = w * h
+    let C = ConvVAEGPU.latentC   // каналов латента (столько же у mu и logvar)
+    var f = 0
+    // e1: 3 → 16, stride 2
+    f += 16 * hw / 4 * 2            // p1, a1
+    f += (3 * 9) * hw / 4           // cols1
+    // e2: 16 → 32, stride 2
+    f += 32 * hw / 16 * 2           // p2, a2
+    f += (16 * 9) * hw / 16         // cols2
+    // e3: 32 → 2C, stride 2
+    f += (2 * C) * hw / 64          // p3
+    f += 5 * C * hw / 64            // mu, logvar, sigma, eps, z
+    // d1: C → 32, stride 1
+    f += C * hw / 16                // u1
+    f += (C * 9) * hw / 16          // cols4
+    f += 32 * hw / 16 * 2           // p4, a4
+    // d2: 32 → 16, stride 1
+    f += 32 * hw / 4                // u2
+    f += (32 * 9) * hw / 4          // cols5
+    f += 16 * hw / 4 * 2            // p5, a5
+    // d3: 16 → 3, stride 1
+    f += 16 * hw                    // u3
+    f += (16 * 9) * hw              // cols6
+    f += 3 * hw * 2                 // p6, recon
+    return f * 4
+}
+
+/// Доля рабочего набора видеопамяти под активации обучения.
+///
+/// Бюджет делится явно: 60% — пул кадров (`gpuFramePoolCapacity`), 30% —
+/// активации, 10% — запас на фрагментацию и служебные буферы. Раньше два
+/// бюджета считались независимо (60% и «сколько влезет»), и вместе они
+/// превышали рабочий набор: на 8.18 ГБ пул занимал 4.9 ГБ, а пачка из 16
+/// кадров требовала ещё 8.6 ГБ — гарантированный OOM.
+public let activationBudgetFraction = 0.30
+
+/// Байт под активации одного шага обучения.
+public func activationBudgetBytes(workingSet: UInt64) -> Int {
+    Int(Double(workingSet) * activationBudgetFraction)
+}
+
+/// Сколько кадров в пачке влезает в `budgetBytes` с учётом активаций.
+/// Ровно один кадр разрешён всегда: иначе обучение невозможно в принципе,
+/// и лучше упасть на явной проверке размера, чем молча не работать.
+public func effectiveBatchSize(requested: Int, w: Int, h: Int,
+                               budgetBytes: Int) -> Int {
+    let per = max(convVAEBytesPerSample(w: w, h: h), 1)
+    let fits = max(1, budgetBytes / per)
+    return max(1, min(max(requested, 1), fits))
+}
+
+/// Сообщение при нехватке видеопамяти.
+///
+/// Metal возвращает `nil` из `makeBuffer`, если памяти не хватило; без этого
+/// текста пользователь видел только падение на разыменовании `nil` и не понимал,
+/// что уменьшать. Формат проверяется тестом.
+public func allocationFailureMessage(bytes: Int, availableBytes: Int, what: String) -> String {
+    let mb = max(bytes, 0) / 1_048_576
+    let av = max(availableBytes, 0) / 1_048_576
+    return "не хватило видеопамяти: нужно \(mb) МБ под \(what), свободно ~\(av) МБ. "
+         + "Уменьшите разрешение кадра или размер пачки."
+}
+
+/// Ошибка «чекпоинт от другой архитектуры» — не битый файл, а модель других
+/// размеров (например, латент до перехода на вариационный путь: e3 был 64
+/// канала вместо 2·C). Такую ситуацию можно пережить, начав обучение с новых
+/// весов, поэтому её надо отличать от настоящих ошибок чтения.
+public func isIncompatibleCheckpoint(_ error: Error) -> Bool {
+    let e = error as NSError
+    // 10 — неверное число матриц, 11 — несовпадение формы слоя (см. ConvVAEGPU.load).
+    return e.domain == "Yume" && (e.code == 10 || e.code == 11)
+}
+
+/// Полная потеря VAE: `MSE(recon, target) + β·KL`. Считается по CPU-копиям.
+/// Должна совпадать с формулой в `ConvVAEGPU.backward`, иначе численная
+/// проверка градиентов показывает расхождение там, где его нет.
+public func vaeLoss(cache: VAECache, target: [Float], beta: Float = 1.0) -> Double {
+    let r = cache.recon.toArray()
+    let n = min(r.count, target.count)
+    guard n > 0 else { return .infinity }
+    var mse = 0.0
+    for i in 0..<n {
+        let d = Double(r[i] - target[i])
+        mse += d * d
+    }
+    mse /= Double(n)
+    return mse + Double(beta) * ConvVAEGPU.klMean(cache)
+}
+
+/// Свёрточный VAE: 3 → 16 → 32 → 2·C (mu, logvar) → z (C) → C → 32 → 16 → 3.
+///
+/// Сжатие 8× по каждой оси, латент (h/8, w/8). Веса — 6 слоёв × (W, b) = 12
+/// матриц в checkpoint; энкодерный слой e3 вдвое шире остальных, потому что
+/// содержит и средние, и логарифмы дисперсий.
+public final class ConvVAEGPU {
+    /// Каналов латента (столько же у `mu` и у `logvar`).
+    ///
+    /// Степень сжатия = 3·hw / (C·hw/64) = 192/C. При C=64 это всего 3× —
+    /// то есть «латент» по объёму почти равен исходному кадру, и вариационный
+    /// регуляризатор ничего не ограничивает: сеть может просто запомнить кадры.
+    /// При C=16 сжатие 12×, что уже сопоставимо с обычными VAE на латенте /8.
+    /// Значение вынесено в константу: изменение здесь автоматически меняет
+    /// ширину e3 (2·C) и вход d1 (C).
+    static let latentC = 16
+
+    /// Во сколько раз латент меньше исходного RGB-кадра по числу значений.
+    static var compressionRatio: Double { 192.0 / Double(latentC) }
+
+    let e1: ConvLayerGPU
+    let e2: ConvLayerGPU
+    let e3: ConvLayerGPU
+    let d1: ConvLayerGPU
+    let d2: ConvLayerGPU
+    let d3: ConvLayerGPU
+
+    /// - Parameter seed: seed инициализации весов. По умолчанию фиксирован,
+    ///   чтобы обучение было воспроизводимым; тесты полагаются на это.
+    init(engine: MetalEngine, seed: UInt64 = 0x5EED_1234_ABCD_0001) {
+        let C = ConvVAEGPU.latentC
+        var rng = SplitMix64(seed: seed)
+        e1 = ConvLayerGPU(engine: engine, ic: 3,  oc: 16, k: 3, stride: 2, pad: 1, rng: &rng)
+        e2 = ConvLayerGPU(engine: engine, ic: 16, oc: 32, k: 3, stride: 2, pad: 1, rng: &rng)
+        e3 = ConvLayerGPU(engine: engine, ic: 32, oc: 2 * C, k: 3, stride: 2, pad: 1, rng: &rng)
+        d1 = ConvLayerGPU(engine: engine, ic: C,  oc: 32, k: 3, stride: 1, pad: 1, rng: &rng)
+        d2 = ConvLayerGPU(engine: engine, ic: 32, oc: 16, k: 3, stride: 1, pad: 1, rng: &rng)
+        // Выходной слой — намеренно мелкий: p6 должен стартовать около нуля,
+        // иначе сигмоида насыщается и градиент к декодеру исчезает.
+        let outScale = 0.1 / sqrt(Float(16 * 3 * 3))
+        d3 = ConvLayerGPU(engine: engine, ic: 16, oc: 3, k: 3, stride: 1, pad: 1,
+                          scale: outScale, rng: &rng)
+    }
+
+    var layers: [ConvLayerGPU] { [e1, e2, e3, d1, d2, d3] }
+
+    /// Прямой проход.
+    ///
+    /// - Parameters:
+    ///   - deterministic: `true` → ε = 0, то есть `z = mu`. Используется для
+    ///     валидации, реконструкций и численной проверки градиентов, чтобы
+    ///     шум не менялся между прогонами.
+    ///   - seed: seed гауссова шума; одинаковый seed → одинаковый `z`.
+    func forward(_ s: GpuSession, image: GPUTensor, w: Int, h: Int,
+                 deterministic: Bool = false, seed: UInt32 = 0) -> VAECache {
+        precondition(w % 8 == 0 && h % 8 == 0, "ширина и высота должны делиться на 8")
+        let h1 = h / 2, w1 = w / 2
+        let h2 = h / 4, w2 = w / 4
+        let h3 = h / 8, w3 = w / 8
+        let C = ConvVAEGPU.latentC
+        let plane = h3 * w3
+
+        let (p1, c1) = e1.forward(s, image, ih: h, iw: w)
+        let a1 = s.relu(p1)
+        let (p2, c2) = e2.forward(s, a1, ih: h1, iw: w1)
+        let a2 = s.relu(p2)
+        let (p3, c3) = e3.forward(s, a2, ih: h2, iw: w2)
+
+        // Вариационный латент: mu, logvar → σ → z = mu + σ·ε
+        let (mu, logvar) = s.split2(p3, c: C, plane: plane)
+        let sigma = s.expHalf(logvar)
+        let eps: GPUTensor
+        if deterministic {
+            // ε = 0 без отдельного ядра: нулевой тензор в текущем command buffer.
+            eps = GPUTensor(engine: s.engine, rows: C, cols: plane)
+            s.zeroFill(eps)
+        } else {
+            eps = s.randn(seed: seed, rows: C, cols: plane)
+        }
+        let z = s.fma(mu, sigma, eps)
+
+        let u1 = s.upsample2x(z, h: h3, w: w3)
+        let (p4, c4) = d1.forward(s, u1, ih: h2, iw: w2)
+        let a4 = s.relu(p4)
+        let u2 = s.upsample2x(a4, h: h2, w: w2)
+        let (p5, c5) = d2.forward(s, u2, ih: h1, iw: w1)
+        let a5 = s.relu(p5)
+        let u3 = s.upsample2x(a5, h: h1, w: w1)
+        let (p6, c6) = d3.forward(s, u3, ih: h, iw: w)
+        let recon = s.sigmoid(p6)
+
+        return VAECache(image: image, c1: c1, p1: p1, a1: a1,
+                        c2: c2, p2: p2, a2: a2,
+                        c3: c3, p3: p3,
+                        mu: mu, logvar: logvar, sigma: sigma, eps: eps, z: z,
+                        u1: u1, c4: c4, p4: p4, a4: a4,
+                        u2: u2, c5: c5, p5: p5, a5: a5,
+                        u3: u3, c6: c6, p6: p6,
+                        recon: recon, w: w, h: h)
+    }
+
+    /// Возвращает (градиенты входов, градиенты слоёв в порядке layers).
+    ///
+    /// Потеря: `MSE(recon, target) + β·KL`, где KL усреднён по элементам
+    /// латента. Градиент по `z` идёт через перепараметризацию, по `mu`/`logvar`
+    /// — плюс вклад KL-регуляризатора.
+    func backward(_ s: GpuSession, _ cache: VAECache, target: GPUTensor,
+                  beta: Float = 1.0) -> ([GPUTensor], [GPUTensor]) {
+        let w = cache.w, h = cache.h
+        let n = Float(3 * w * h)
+        // dL/d(recon) = 2(recon-target)/N, затем через сигмоиду
+        let dRecon = s.smul(2.0 / n, s.sub(cache.recon, target))
+        let dP6 = s.sigmoidGrad(cache.p6, dRecon)
+
+        let (dx6, gW6, gb6) = d3.backward(s, cache.c6, dOut: dP6)
+        let dA5 = s.downsample2x(dx6, h: h / 2, w: w / 2)
+        let dP5 = s.reluGrad(cache.a5, dA5)
+        let (dx5, gW5, gb5) = d2.backward(s, cache.c5, dOut: dP5)
+        let dA4 = s.downsample2x(dx5, h: h / 4, w: w / 4)
+        let dP4 = s.reluGrad(cache.a4, dA4)
+        let (dx4, gW4, gb4) = d1.backward(s, cache.c4, dOut: dP4)
+
+        // ---- Вариационный узел ----
+        let dz = s.downsample2x(dx4, h: h / 8, w: w / 8)
+        let M = Float(max(cache.mu.n, 1))
+        let (dmu, dlogvar) = s.vaeGrad(dz: dz, mu: cache.mu, logvar: cache.logvar,
+                                       eps: cache.eps,
+                                       betaN: beta / M, betaHalfN: 0.5 * beta / M)
+        let dP3 = s.merge2(dmu, dlogvar, c: cache.latentChannels, plane: cache.latentPlane)
+
+        let (dx3, gW3, gb3) = e3.backward(s, cache.c3, dOut: dP3)
+        let dP2 = s.reluGrad(cache.a2, dx3)
+        let (dx2, gW2, gb2) = e2.backward(s, cache.c2, dOut: dP2)
+        let dP1 = s.reluGrad(cache.a1, dx2)
+        let (dx1, gW1, gb1) = e1.backward(s, cache.c1, dOut: dP1)
+
+        return ([dx1, dx2, dx3, dx4, dx5, dx6],
+                [gW1, gb1, gW2, gb2, gW3, gb3, gW4, gb4, gW5, gb5, gW6, gb6])
+    }
+
+    /// KL(N(mu, σ²)‖N(0,1)), усреднённая по элементам латента (Double для логов).
+    static func klMean(_ cache: VAECache) -> Double {
+        let mu = cache.mu.toArray()
+        let lv = cache.logvar.toArray()
+        guard !mu.isEmpty else { return 0 }
+        var sum = 0.0
+        for i in 0..<mu.count {
+            let l = Double(min(max(lv[i], -10), 10))
+            sum += 0.5 * (Double(mu[i]) * Double(mu[i]) + exp(l) - 1 - l)
+        }
+        return sum / Double(mu.count)
+    }
+
+    func applyAdam(_ s: GpuSession, grads: [GPUTensor], t: Int, lr: Float) {
+        let ls = layers
+        for (i, layer) in ls.enumerated() {
+            layer.applyAdam(s, grads[i * 2], grads[i * 2 + 1], t: t, lr: lr)
+        }
+    }
+
+    var matrices: [Matrix] {
+        var out: [Matrix] = []
+        for l in layers { out.append(l.W.toMatrix()); out.append(l.b.toMatrix()) }
+        return out
+    }
+
+    /// Загрузка весов из checkpoint. Формат: W0,b0,W1,b1,...
+    func load(from mats: [Matrix]) throws {
+        guard mats.count >= 12 else {
+            throw NSError(domain: "Yume", code: 10,
+                          userInfo: [NSLocalizedDescriptionKey: "checkpoint: нужно 12 матриц, найдено \(mats.count)"])
+        }
+        for (i, layer) in layers.enumerated() {
+            let wm = mats[i * 2], bm = mats[i * 2 + 1]
+            guard wm.rows == layer.oc, wm.cols == layer.ic * layer.k * layer.k,
+                  bm.data.count == layer.oc else {
+                throw NSError(domain: "Yume", code: 11,
+                              userInfo: [NSLocalizedDescriptionKey: "checkpoint: несовпадение формы слоя \(i)"])
+            }
+            layer.W.copyFrom(GPUTensor(engine: layer.W.engine, data: wm.data, rows: wm.rows))
+            layer.b.copyFrom(GPUTensor(engine: layer.b.engine, data: bm.data, rows: bm.rows))
+        }
+    }
+}

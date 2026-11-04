@@ -1,0 +1,12 @@
+# Build artifacts
+.build/
+DerivedData/
+
+# macOS junk
+.DS_Store
+
+# Large media (training source video — keep locally, not in git)
+*.mp4
+
+# App bundle is rebuilt by scripts/build-app-direct.sh
+YumeLayers.app/

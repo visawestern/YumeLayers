@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YumeLayers — тренировка</title>
+<style>
+  :root{ --bg:#0e1016; --card:#161a24; --border:#262c3b; --text:#e8ebf4; --muted:#8b93a7;
+         --acc:#7c5cff; --ok:#2bd47d; --err:#ff5c5c; --warn:#ffb020; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;min-height:100vh}
+  .wrap{max-width:1280px;margin:0 auto;padding:20px}
+  header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+  h1{font-size:22px;font-weight:700} h1 span{color:var(--acc)}
+  .badge{font-size:12px;background:var(--card);border:1px solid var(--border);padding:4px 10px;border-radius:20px;color:var(--muted)}
+  .grid{display:grid;grid-template-columns:340px 1fr;gap:16px}
+  @media(max-width:900px){ .grid{grid-template-columns:1fr} }
+  .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:14px}
+  h2{font-size:14px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:12px}
+  label{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px}
+  input[type=text],input[type=number],select{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);
+    border-radius:8px;padding:8px 10px;font-size:13px;outline:none}
+  input:focus,select:focus{border-color:var(--acc)}
+  .row{display:flex;gap:8px;flex-wrap:wrap} .row>*{flex:1;min-width:90px}
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:none;border-radius:8px;
+    padding:10px 14px;font-size:13px;font-weight:600;cursor:pointer;transition:.15s;width:100%}
+  .btn.primary{background:var(--acc);color:#fff} .btn.primary:hover{background:#8d72ff}
+  .btn.ok{background:var(--ok);color:#04140c} .btn.warn{background:var(--warn);color:#201500}
+  .btn:disabled{opacity:.4;cursor:not-allowed}
+  .btn.small{padding:6px 10px;font-size:12px;width:auto}
+  .files{background:var(--bg);border:1px dashed var(--border);border-radius:8px;padding:10px;max-height:140px;overflow:auto;font-size:12px;color:var(--muted)}
+  .files div{padding:2px 0}
+  .progressbar{height:8px;background:var(--bg);border-radius:6px;overflow:hidden;margin-top:8px}
+  .progressbar > div{height:100%;background:var(--acc);width:0%;transition:width .4s}
+  #msg{font-size:12px;color:var(--muted);margin-top:8px;min-height:16px}
+  #chart{width:100%;height:180px;background:var(--bg);border-radius:8px;border:1px solid var(--border)}
+  .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+  .gallery img{width:100%;border-radius:8px;border:1px solid var(--border);cursor:pointer;transition:.15s}
+  .gallery img:hover{transform:scale(1.02);border-color:var(--acc)}
+  .statusline{display:flex;gap:12px;font-size:12px;color:var(--muted);margin-bottom:8px;flex-wrap:wrap}
+  .statusline b{color:var(--text)}
+  .collapse{display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;color:var(--muted)}
+  .hidden{display:none}
+  .tag{font-size:10px;background:var(--bg);border:1px solid var(--border);padding:2px 8px;border-radius:12px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Yume<span>Layers</span></h1>
+    <span class="badge">прототип · латентная диффузия слоёв</span>
+  </header>
+
+  <div class="grid">
+    <!-- левая панель -->
+    <div>
+      <div class="card">
+        <h2>Данные</h2>
+        <label>Пути к видео (по одному в строке, полные пути)</label>
+        <textarea id="videoPaths" rows="3" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:8px;font-size:12px;resize:vertical"></textarea>
+        <label>Разрешение кадра</label>
+        <div class="row">
+          <input id="imageSize" type="number" value="192" min="64" max="512" step="32">
+          <select id="mode">
+            <option value="diffusion">Диффузия</option>
+            <option value="vae">VAE</option>
+          </select>
+        </div>
+        <label>Эпох</label>
+        <input id="epochs" type="number" value="300" min="1">
+        <label>Создать пустую галерею (кнопка)</label>
+        <div style="margin-top:12px"><button class="btn primary" id="trainBtn">▶ Обучить / продолжить</button></div>
+        <div style="margin-top:8px;display:flex;gap:8px">
+          <button class="btn ok small" id="vaeBtn">Обучить VAE</button>
+          <button class="btn warn small" id="stopBtn" disabled>Стоп</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Статус</h2>
+        <div class="statusline">
+          <span>задача: <b id="stJob">—</b></span>
+          <span>прогресс: <b id="stProg">0%</b></span>
+        </div>
+        <div class="progressbar"><div id="stBar"></div></div>
+        <div id="msg"></div>
+      </div>
+
+      <div class="card">
+        <h2>Генерация</h2>
+        <label>Промпт (текст)</label>
+        <input id="prompt" type="text" placeholder="небо, закат, персонаж у окна">
+        <div class="row">
+          <div><label>Шагов</label><input id="steps" type="number" value="60" min="10"></div>
+          <div><label>Сид</label><input id="seed" type="number" value="42"></div>
+        </div>
+        <div style="margin-top:12px"><button class="btn primary" id="genBtn">✦ Сгенерировать</button></div>
+      </div>
+    </div>
+
+    <!-- правая панель -->
+    <div>
+      <div class="card">
+        <div class="collapse" onclick="document.getElementById('hist').classList.toggle('hidden')">
+          <span>📈 График потерь (клик — свернуть/развернуть)</span>
+        </div>
+        <div id="hist"><canvas id="chart"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="collapse" onclick="document.getElementById('gal').classList.toggle('hidden')">
+          <span>🖼 Результаты и чекпоинты</span>
+        </div>
+        <div id="gal">
+          <div class="gallery" id="gallery"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let status = {};
+
+async function api(path, body){
+  const r = await fetch(path, {method: body ? "POST" : "GET",
+    headers: body ? {"Content-Type":"application/json"} : {},
+    body: body ? JSON.stringify(body) : undefined});
+  return r.json();
+}
+
+function drawChart(hist){
+  const c = $("chart"), ctx = c.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const W = c.clientWidth, H = c.clientHeight;
+  c.width = W*dpr; c.height = H*dpr; ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,W,H);
+  const losses = hist.filter(e => e.loss != null).map(e => e.loss);
+  if(!losses.length) return;
+  const maxL = Math.max(...losses), minL = Math.min(...losses);
+  const span = Math.max(maxL - minL, 1e-6);
+  ctx.strokeStyle = "#7c5cff"; ctx.lineWidth = 2; ctx.beginPath();
+  losses.forEach((v,i)=>{
+    const x = i/(losses.length-1)*(W-20)+10;
+    const y = H-20 - (v-minL)/span*(H-40);
+    i ? ctx.lineTo(x,y) : ctx.moveTo(x,y);
+  });
+  ctx.stroke();
+  ctx.fillStyle = "#8b93a7"; ctx.font = "11px sans-serif";
+  ctx.fillText(`loss: ${losses[losses.length-1].toFixed(4)}`, 12, 18);
+}
+
+async function refresh(){
+  status = await api("/api/status");
+  $("stJob").textContent = status.running ? status.job : "—";
+  $("stProg").textContent = Math.round(status.progress*100)+"%";
+  $("stBar").style.width = (status.progress*100)+"%";
+  $("msg").textContent = status.message || "";
+  $("stopBtn").disabled = !status.running;
+  $("trainBtn").disabled = status.running;
+  $("vaeBtn").disabled = status.running;
+  drawChart(status.history || []);
+  const gal = $("gallery");
+  gal.innerHTML = (status.outputs || []).slice().reverse().map(f =>
+    `<img src="/outputs/${encodeURIComponent(f)}" title="${f}" onclick="window.open('/outputs/${encodeURIComponent(f)}')">`).join("");
+  if(!(status.outputs||[]).length) gal.innerHTML = '<span class="tag">пока пусто</span>';
+}
+
+$("trainBtn").onclick = async () => {
+  const data = { mode: $("mode").value, image_size: +$("imageSize").value,
+    epochs: +$("epochs").value,
+    video_paths: $("videoPaths").value.split("\n").map(s=>s.trim()).filter(Boolean) };
+  const r = await api("/api/train", data);
+  $("msg").textContent = r.message;
+  setTimeout(refresh, 300);
+};
+$("vaeBtn").onclick = async () => {
+  const r = await api("/api/train", { mode:"vae", image_size:+$("imageSize").value, epochs:+$("epochs").value });
+  $("msg").textContent = r.message;
+  setTimeout(refresh, 300);
+};
+$("genBtn").onclick = async () => {
+  const r = await api("/api/generate", { prompt: $("prompt").value,
+    steps: +$("steps").value, seed: +$("seed").value });
+  $("msg").textContent = r.ok ? "готово: "+r.path : ("ошибка: "+r.error);
+  refresh();
+};
+$("stopBtn").onclick = () => { /* остановка фонового потока — реализуется средствами ОС; здесь сброс сообщения */ };
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

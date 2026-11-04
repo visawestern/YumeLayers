@@ -1,0 +1,7 @@
+# YumeLayers — зависимости
+torch>=2.1.0
+numpy
+Pillow
+opencv-python-headless
+# для текстового conditioning (опционально): transformers>=4.36
+ffmpeg-python
