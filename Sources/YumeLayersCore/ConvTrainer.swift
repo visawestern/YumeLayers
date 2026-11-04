@@ -430,7 +430,7 @@ private func runReconsOn(engine: MetalEngine, items: [(name: String, jpeg: Data)
         let hot = sensor.read()?.temperatureC ?? 0
         let duty: Double = hot >= defaultMaxTempC ? 0.60
                          : hot >= defaultTargetTempC ? 0.85
-                         : maxSafeDuty
+                         : safeDutyCap
         let reconSleep = dutySleepMs(gpuMs: reconGpuMs, duty: duty, maxPauseMs: 2000)
         if reconSleep > 0 { Thread.sleep(forTimeInterval: reconSleep / 1000) }
 
@@ -633,7 +633,7 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
     // держалась ниже порога троттлинга. Пользователь задаёт только потолок
     // («мощность, %»); фактическую нагрузку находит сам контур.
     let gpuSensor = GpuSensor()
-    var power = PowerController(ceiling: dutyCeiling(powerPercent: p.gpuPowerPercent))
+    var power = PowerController(ceiling: effectiveDutyCeiling(powerPercent: p.gpuPowerPercent))
     var currentDuty = power.duty
     var lastSensorAt = Date.distantPast
     var lastSensorLog = Date.distantPast

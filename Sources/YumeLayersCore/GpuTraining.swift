@@ -684,4 +684,28 @@ public final class GpuSession {
         dispatch(256, 1, mu.n, 1)
         return (dmu, dlv)
     }
+
+    // ---------- 8-канальный layered путь ----------
+
+    /// `dL/d(recon)` по всем 8 каналам: MSE по слоям + MSE собранного кадра.
+    /// См. `layered_grad_kernel` и CPU-эталон `layeredLossGradient`.
+    ///
+    /// Возвращает тензор (8, w·h) в CHW. Вызывается ДО `sigmoidGrad`: это
+    /// градиент по выходу сигмоиды d3, а не по логитам.
+    public func layeredGrad(recon: GPUTensor, target: LayeredTargetGPU,
+                            layerWeight: Float = 1,
+                            composeWeight: Float = 1) -> GPUTensor {
+        precondition(recon.n == LayeredScene.layerChannels * target.plane,
+                     "layeredGrad: реконструкция должна быть 8·w·h")
+        let g = GPUTensor(engine: engine, rows: LayeredScene.layerChannels,
+                          cols: target.plane)
+        enc.setComputePipelineState(engine.layeredGradPS)
+        setBuffers([recon.buf, target.channels.buf, target.composite.buf, g.buf])
+        setUInt(UInt32(target.plane), index: 4)
+        var wl = layerWeight, wc = composeWeight
+        enc.setBytes(&wl, length: 4, index: 5)
+        enc.setBytes(&wc, length: 4, index: 6)
+        dispatch(256, 1, target.plane, 1)
+        return g
+    }
 }

@@ -1743,6 +1743,300 @@ func testSceneQuality() {
     }
 }
 
+// MARK: - 8-канальный layered VAE: математика потерь (CPU, без Metal)
+
+func testLayeredLossMath() {
+    section("Layered loss: композиция + градиенты (CPU)")
+
+    // 1. Точная сборка в CHW-раскладке обязана совпадать с HWC-композитором
+    //    рендерера. Это тот самый инвариант composeLayers(flattened) == composite.
+    let scene = makeLayeredScene(w: 32, h: 32, seed: 2026)
+    let t = LayeredTarget(scene: scene)
+    expectEqual(t.channelsCHW.count, 8 * 32 * 32, "таргет: 8·w·h значений")
+    expectEqual(t.compositeCHW.count, 3 * 32 * 32, "композит: 3·w·h значений")
+    let exactCHW = composeCHW(w: 32, h: 32, recon: t.channelsCHW)
+    expect(maxAbsDiff(exactCHW, t.compositeCHW) < 1e-6,
+           "composeCHW(таргет) == composite поканально")
+    let exactHWC = composeHWC(w: 32, h: 32, recon: t.channelsCHW)
+    expect(maxAbsDiff(exactHWC, scene.composite) < 1e-6,
+           "composeHWC(таргет) == composite кадра")
+
+    // 2. Идеальная реконструкция → нулевая потеря, возмущённая → > 0.
+    expectClose(layeredLoss(recon: t.channelsCHW, target: t), 0, 1e-9,
+                "идеальная реконструкция: loss = 0")
+    var bad = t.channelsCHW
+    for i in 0..<bad.count { bad[i] = min(1, max(0, bad[i] + 0.05)) }
+    expect(layeredLoss(recon: bad, target: t) > 0, "испорченная реконструкция: loss > 0")
+
+    // 3. Аналитический градиент == конечная разность по ВСЕМ 8 каналам,
+    //    включая маску и свет: именно они несут композиционный член.
+    let n = 4 * 4
+    let smallChannels: [Float] = (0..<(8 * n)).map {
+        0.25 + 0.03 * Float($0 / n) + 0.01 * Float($0 % n)
+    }
+    let smallComposite: [Float] = [Float](repeating: 0.42, count: 3 * n)
+    let small = LayeredTarget(w: 4, h: 4,
+                              channelsCHW: smallChannels,
+                              compositeCHW: smallComposite)
+    var recon = [Float](repeating: 0, count: 8 * n)
+    for i in 0..<recon.count { recon[i] = 0.30 + 0.02 * Float(i % 7) }
+    let g = layeredLossGradient(recon: recon, target: small,
+                                layerWeight: 1, composeWeight: 1)
+    expectEqual(g.count, 8 * n, "градиент: 8·w·h значений")
+    let eps: Float = 1e-3
+    var worst = 0.0
+    for ch in 0..<8 {
+        for i in [0, 5, 11] {
+            let idx = ch * n + i
+            var rp = recon, rm = recon
+            rp[idx] += eps
+            rm[idx] -= eps
+            let lp = layeredLoss(recon: rp, target: small,
+                                 layerWeight: 1, composeWeight: 1)
+            let lm = layeredLoss(recon: rm, target: small,
+                                 layerWeight: 1, composeWeight: 1)
+            let numeric: Double = (lp - lm) / (2 * Double(eps))
+            let analytic = Double(g[idx])
+            let denom = max(1e-6, abs(analytic) + abs(numeric))
+            let rel = abs(analytic - numeric) / denom
+            worst = max(worst, rel)
+            expect(rel < 0.05,
+                   String(format: "канал %d пикс %d: аналит %.3e / числ %.3e (%.2f%%)",
+                          ch, i, analytic, numeric, rel * 100))
+        }
+    }
+    print(String(format: "      макс. относительная ошибка градиента: %.2f%%", worst * 100))
+
+    // 4. Композиционный член реально влияет на градиенты маски, света и фона.
+    let gNoComp = layeredLossGradient(recon: recon, target: small,
+                                      layerWeight: 1, composeWeight: 0)
+    expect(maxAbsDiff(Array(g[6 * n..<8 * n]), Array(gNoComp[6 * n..<8 * n])) > 1e-6,
+           "без composeWeight градиенты маски/света меняются")
+    expect(maxAbsDiff(Array(g[0..<3 * n]), Array(gNoComp[0..<3 * n])) > 1e-6,
+           "composeWeight влияет и на каналы фона")
+
+    // 5. Пол качества считается по СОБРАННОМУ кадру, а не по слоям по отдельности.
+    let q = composedQuality(recon: t.channelsCHW, target: t)
+    expect(q.psnr == .infinity && q.ssim > 0.999, "идеальная сборка: PSNR ∞ / SSIM 1")
+    let qBad = composedQuality(recon: bad, target: t)
+    expect(qBad.psnr.isFinite && qBad.psnr < 40, "испорченная сборка: PSNR конечен")
+
+    // 6. Бюджет памяти layered-пути учитывает дополнительные буферы.
+    expect(layeredActivationBytes(w: 32, h: 32) > 0, "layered-буферы учтены в бюджете")
+    expectEqual(layeredActivationBytes(w: 64, h: 64),
+                4 * layeredActivationBytes(w: 32, h: 32),
+                "память layered-буферов ∝ площади")
+}
+
+// MARK: - 8-канальный layered VAE: Metal-ядро градиента
+
+func testLayeredLossGPU() {
+    section("Layered loss: Metal-ядро градиента")
+
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let session = GpuSession(engine)
+    let w = 32, h = 24, n = w * h
+    let t = LayeredTarget(scene: makeLayeredScene(w: w, h: h, seed: 77))
+    let tg = LayeredTargetGPU(engine: engine, target: t)
+
+    // Возмущённая реконструкция строго внутри (0,1): кламп не зануляет градиент.
+    var recon = [Float](repeating: 0, count: 8 * n)
+    for i in 0..<recon.count { recon[i] = 0.30 + 0.02 * Float(i % 7) }
+    let r = GPUTensor(engine: engine, data: recon, rows: 8)
+
+    session.begin()
+    let gpuGrad = session.layeredGrad(recon: r, target: tg,
+                                      layerWeight: 1, composeWeight: 1)
+    _ = session.end()
+
+    let got = gpuGrad.toArray()
+    let cpu = layeredLossGradient(recon: recon, target: t,
+                                  layerWeight: 1, composeWeight: 1)
+    expectEqual(got.count, 8 * n, "Metal: форма градиента 8·w·h")
+    expect(got.allSatisfy { $0.isFinite }, "Metal: градиент без NaN")
+    expect(maxAbsDiff(got, cpu) < 1e-5,
+           String(format: "Metal-градиент == CPU-аналитике (max Δ %.2e)", maxAbsDiff(got, cpu)))
+    expect(got.contains { abs($0) > 1e-7 }, "Metal: градиент невырожден")
+}
+
+// MARK: - 8-канальный layered VAE: форма, память, чекпоинт
+
+func testLayeredVAEShape() {
+    section("Layered VAE: 8 каналов вместо 3")
+
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let session = GpuSession(engine)
+    let w = 32, h = 24
+    let t = LayeredTarget(scene: makeLayeredScene(w: w, h: h, seed: 11))
+    let x = GPUTensor(engine: engine, data: t.channelsCHW, rows: 8)
+
+    let vae3 = ConvVAEGPU(engine: engine)
+    let vae8 = ConvVAEGPU(engine: engine, channels: 8)
+    expectEqual(vae3.channels, 3, "старый VAE остался 3-канальным")
+    expectEqual(vae8.channels, 8, "новый VAE: 8 каналов")
+    expectEqual(vae8.e1.ic, 8, "e1 принимает 8 каналов")
+    expectEqual(vae8.d3.oc, 8, "d3 выдаёт 8 каналов")
+    expectClose(ConvVAEGPU.layeredCompressionRatio, 32, 1e-9,
+                "сжатие 8-канального входа = 32×")
+    expectClose(ConvVAEGPU.compressionRatio, 12, 1e-9,
+                "сжатие 3-канального входа = 12×")
+
+    session.begin()
+    let cache = vae8.forward(session, image: x, w: w, h: h, deterministic: true)
+    _ = session.end()
+    expectEqual(cache.recon.rows, 8, "реконструкция: 8 каналов")
+    expectEqual(cache.recon.cols, w * h, "реконструкция: w×h")
+    let r = cache.recon.toArray()
+    expect(r.allSatisfy { $0.isFinite && $0 >= 0 && $0 <= 1 },
+           "8 каналов в [0,1] (сигмоида)")
+    expectEqual(cache.z.rows, ConvVAEGPU.latentC, "латент не изменился")
+
+    // Бюджет VRAM: 8 каналов + layered-буферы дороже, но кадр всё ещё влезает.
+    let b3 = convVAEBytesPerSample(w: 856, h: 480)
+    let b8 = convVAEBytesPerSample(w: 856, h: 480, channels: 8, layered: true)
+    expect(b8 > b3, "8-канальный путь требует больше активаций")
+    expect(Double(b8) / 1_048_576 < 650, "480p layered-кадр укладывается в бюджет")
+    expect(effectiveBatchSize(requested: 16, w: 856, h: 480,
+                              budgetBytes: 8 * 1024 * 1024 * 1024 / 2,
+                              channels: 8, layered: true) >= 1,
+           "layered-пачка ≥ 1")
+
+    // Старый 3-канальный чекпоинт несовместим с 8-канальной моделью:
+    // это не битый файл, а другая архитектура (код 11).
+    do {
+        try vae8.load(from: vae3.matrices)
+        expect(false, "3-канальный чекпоинт отклонён 8-канальной моделью")
+    } catch {
+        expect(isIncompatibleCheckpoint(error), "несовместимость распознана (код 11)")
+        expectEqual((error as NSError).code, 11, "код ошибки = 11")
+    }
+}
+
+// MARK: - 8-канальный layered VAE: градиенты сети vs конечные разности
+
+func testLayeredVAEGradients() {
+    section("Layered VAE: градиенты vs конечные разности")
+
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let session = GpuSession(engine)
+    let w = 32, h = 24
+    let beta: Float = 0.05
+    let t = LayeredTarget(scene: makeLayeredScene(w: w, h: h, seed: 33))
+    let tg = LayeredTargetGPU(engine: engine, target: t)
+    let x = GPUTensor(engine: engine, data: t.channelsCHW, rows: 8)
+    let vae = ConvVAEGPU(engine: engine, channels: 8)
+
+    /// Полная потеря: MSE по 8 слоям + MSE собранного кадра + β·KL.
+    /// Именно её должен дифференцировать `layered_grad_kernel`.
+    func loss() -> Double {
+        session.begin()
+        let c = vae.forward(session, image: x, w: w, h: h, deterministic: false, seed: 5)
+        _ = session.end()
+        return layeredVAELoss(cache: c, target: t,
+                              layerWeight: 1, composeWeight: 1, beta: beta)
+    }
+
+    // Небольшая тренировка, чтобы веса ушли от инициализации.
+    for step in 1...12 {
+        session.begin()
+        let c = vae.forward(session, image: x, w: w, h: h, deterministic: false, seed: 5)
+        let (_, g) = vae.backwardLayered(session, c, target: tg, beta: beta)
+        vae.applyAdam(session, grads: g, t: step, lr: 0.002)
+        _ = session.end()
+    }
+
+    session.begin()
+    let cache = vae.forward(session, image: x, w: w, h: h, deterministic: false, seed: 5)
+    let (_, grads) = vae.backwardLayered(session, cache, target: tg, beta: beta)
+    _ = session.end()
+
+    var maxGrad = 0.0
+    for g in grads {
+        maxGrad = max(maxGrad, g.toArray().map { abs(Double($0)) }.max() ?? 0)
+    }
+    expect(maxGrad > 1e-6,
+           String(format: "layered-градиенты невырождены (max |g| = %.2e)", maxGrad))
+
+    let eps: Float = 1e-2
+    var checked = 0
+    for layerIdx in [2, 3] {   // e3 — перед латентом, d1 — сразу после
+        let g = grads[layerIdx * 2].toArray()
+        let top = (0..<g.count).sorted { abs(g[$0]) > abs(g[$1]) }.prefix(2)
+        for weightIdx in top {
+            let layer = vae.layers[layerIdx]
+            let analytic = Double(g[weightIdx])
+            let orig = layer.W.getValue(weightIdx)
+            layer.W.setValue(weightIdx, orig + eps)
+            let lp = loss()
+            layer.W.setValue(weightIdx, orig - eps)
+            let lm = loss()
+            layer.W.setValue(weightIdx, orig)
+
+            let numeric = (lp - lm) / (2 * Double(eps))
+            let rel = abs(analytic - numeric) / max(1e-9, abs(analytic) + abs(numeric))
+            expect(rel < 0.12,
+                   String(format: "слой %d вес %d: аналит %.4e числ %.4e (отн %.1f%%)",
+                          layerIdx, weightIdx, analytic, numeric, rel * 100))
+            checked += 1
+        }
+    }
+    expectEqual(checked, 4, "проверено 4 точки")
+}
+
+// MARK: - 8-канальный layered VAE: тренер и пол качества
+
+func testLayeredTrainer() {
+    section("Layered trainer: сходимость + ворота качества")
+
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let report = trainLayeredVAE(steps: 60, w: 32, h: 24, seed: 2026)
+    expect(report.firstLoss.isFinite && report.lastLoss.isFinite,
+           "потери конечны на обоих концах обучения")
+    expect(report.lastLoss < report.firstLoss,
+           String(format: "потеря упала: %.5f → %.5f", report.firstLoss, report.lastLoss))
+    expect(report.psnr.isFinite, "PSNR собранного кадра конечен")
+    expect(report.ssim.isFinite && report.ssim >= 0 && report.ssim <= 1,
+           "SSIM собранного кадра в [0,1]")
+    // Ворота обязаны быть честными: короткий прогон на 32×24 не может
+    // выдавать 30 дБ, и «принят» должен совпадать с формальным порогом.
+    expectEqual(report.acceptedByFloor,
+                report.psnr >= 30 && report.ssim >= 0.90,
+                "ворота качества согласованы с порогом 30 дБ / 0.90")
+    expect(report.compositeChannels == 3, "выход сборки — RGB, 3 канала")
+}
+
+// MARK: - Жёсткий потолок 90% после перегрева
+
+func testDutyCap90() {
+    section("Предохранитель GPU: не выше 90%")
+
+    expectClose(safeDutyCap, 0.90, 1e-9, "потолок скважности = 90%")
+    expectEqual(defaultGpuPowerPercent, 90, "мощность по умолчанию = 90%")
+    expectClose(effectiveDutyCeiling(powerPercent: 100), 0.90, 1e-9,
+                "даже 100% в GUI упирается в 90%")
+    expectClose(effectiveDutyCeiling(powerPercent: 200), 0.90, 1e-9,
+                "некорректные 200% тоже упираются в 90%")
+    expect(effectiveDutyCeiling(powerPercent: 85) < safeDutyCap,
+           "85% остаётся ниже потолка")
+    expect(effectiveDutyCeiling(powerPercent: 100) <= maxSafeDuty,
+           "предохранитель не слабее физического предела")
+
+    let guard90 = GpuDutyGuard()
+    expectClose(guard90.duty, 0.90, 1e-9, "guard: скважность 90%")
+    let pause = guard90.pauseMs(gpuMs: 100)
+    expect(pause > 0, "guard: после шага 100 мс есть пауза")
+    expectClose(100.0 / (100.0 + pause), 0.90, 1e-6,
+                "guard: фактическая занятость GPU = 90%")
+    expectEqual(guard90.pauseMs(gpuMs: 0), 0, "guard: нулевой шаг → без паузы")
+    expectEqual(guard90.emergencyPauseMs(tempC: 70), 0, "guard: 70 °C без аварии")
+    expect(guard90.emergencyPauseMs(tempC: emergencyTempC + 1) > 0,
+           "guard: аварийная температура → принудительное остывание")
+    expect(Params().gpuPowerPercent == 90, "Params по умолчанию = 90%")
+}
+
 // MARK: - main
 
 func runAll() {
@@ -1768,6 +2062,12 @@ func runAll() {
     testLayerRenderer()
     testUniversalLayers()
     testSceneQuality()
+    testLayeredLossMath()
+    testLayeredLossGPU()
+    testLayeredVAEShape()
+    testLayeredVAEGradients()
+    testLayeredTrainer()
+    testDutyCap90()
 }
 
 let started = Date()

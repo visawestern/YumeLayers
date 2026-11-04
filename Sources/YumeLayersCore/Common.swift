@@ -133,7 +133,7 @@ public struct Params {
     /// 100 — работать на пределе, сколько карта держит по температуре.
     /// Фактическую скважность всегда задаёт контур: он держит 85 °C
     /// и не даёт уйти выше 89 °C (перезагрузка случалась на 93 °C).
-    public var gpuPowerPercent = 100
+    public var gpuPowerPercent = defaultGpuPowerPercent
     public var outPrefix: String
 }
 

@@ -843,6 +843,54 @@ public final class MetalEngine {
         float u2 = float(h2 >> 8) / 16777216.0f;
         OUT[gid] = sqrt(-2.0f * log(u1)) * cos(6.28318530718f * u2);
     }
+
+    // ---------- 8-канальный layered путь ----------
+    //
+    // RECON / TARGET / GRAD — (8, n) в CHW: канал c, пиксель i → c*n+i.
+    // COMP — (3, n) в CHW: таргет собранного кадра.
+    //
+    // L = wl·MSE(8 каналов) + wc·MSE(clamp((bg·(1−m)+ob·m)·l), COMP)
+    //
+    // Считаем dL/dRECON сразу целиком за один проход на пиксель: без
+    // промежуточных тензоров и без перекладки активаций на CPU. Это и есть
+    // градиент, который уходит в сигмоиду выходного слоя d3.
+    kernel void layered_grad_kernel(
+        device const float* RECON [[buffer(0)]],
+        device const float* TARGET [[buffer(1)]],
+        device const float* COMP [[buffer(2)]],
+        device float* GRAD [[buffer(3)]],
+        constant uint& n [[buffer(4)]],
+        constant float& wl [[buffer(5)]],
+        constant float& wc [[buffer(6)]],
+        uint gid [[thread_position_in_grid]])
+    {
+        if (gid >= n) return;
+        uint i = gid;
+        float m = RECON[6*n + i];
+        float light = RECON[7*n + i];
+        float im = 1.0f - m;
+        float dl = 2.0f * wl / (8.0f * float(n));
+        float dc = 2.0f * wc / (3.0f * float(n));
+        float dM = 0.0f, dL = 0.0f;
+        for (uint c = 0; c < 3; ++c) {
+            float bg = RECON[c*n + i];
+            float ob = RECON[(3+c)*n + i];
+            float base = bg*im + ob*m;
+            float v = base*light;
+            float y = clamp(v, 0.0f, 1.0f);
+            float e = y - COMP[c*n + i];
+            // Производная clamp равна нулю вне (0,1); в рабочей области
+            // значений сигмоиды она тождественно единица.
+            float active = (v > 0.0f && v < 1.0f) ? 1.0f : 0.0f;
+            float gc = dc * e * active;
+            GRAD[c*n + i]     = dl*(bg - TARGET[c*n + i]) + gc*light*im;
+            GRAD[(3+c)*n + i] = dl*(ob - TARGET[(3+c)*n + i]) + gc*light*m;
+            dM += gc*light*(ob - bg);
+            dL += gc*base;
+        }
+        GRAD[6*n + i] = dl*(m - TARGET[6*n + i]) + dM;
+        GRAD[7*n + i] = dl*(light - TARGET[7*n + i]) + dL;
+    }
     """
 
     let matmulPS: MTLComputePipelineState
@@ -895,6 +943,8 @@ public final class MetalEngine {
     let klPS: MTLComputePipelineState
     let randnPS: MTLComputePipelineState
     let vaeGradPS: MTLComputePipelineState
+    // 8-канальный путь: слой + композиция
+    let layeredGradPS: MTLComputePipelineState
 
     private static func makeLibrary(device: MTLDevice) throws -> MTLLibrary {
         if let l = try? device.makeLibrary(source: shaderSource, options: nil) {
@@ -998,6 +1048,7 @@ public final class MetalEngine {
             self.klPS = try ps("kl_reduce_kernel")
             self.randnPS = try ps("randn_kernel")
             self.vaeGradPS = try ps("vae_grad_kernel")
+            self.layeredGradPS = try ps("layered_grad_kernel")
         } catch {
             fatalError("ошибка компиляции Metal-шейдеров: \(error)")
         }

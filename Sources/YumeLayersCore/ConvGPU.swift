@@ -129,13 +129,15 @@ public struct VAECache {
 /// один слой. Прежняя формула учитывала лишь сам кадр (`3·hw` float'ов,
 /// 4.9 МБ) и потому разрешала пачку 16 — это ~8.6 ГБ активаций при 8.18 ГБ
 /// видеопамяти, то есть гарантированный OOM.
-public func convVAEBytesPerSample(w: Int, h: Int) -> Int {
+public func convVAEBytesPerSample(w: Int, h: Int, channels: Int = 3,
+                                  layered: Bool = false) -> Int {
     let hw = w * h
     let C = ConvVAEGPU.latentC   // каналов латента (столько же у mu и logvar)
+    let ic = max(channels, 1)
     var f = 0
-    // e1: 3 → 16, stride 2
+    // e1: channels → 16, stride 2
     f += 16 * hw / 4 * 2            // p1, a1
-    f += (3 * 9) * hw / 4           // cols1
+    f += (ic * 9) * hw / 4          // cols1 (im2col растёт с числом входных каналов)
     // e2: 16 → 32, stride 2
     f += 32 * hw / 16 * 2           // p2, a2
     f += (16 * 9) * hw / 16         // cols2
@@ -150,11 +152,12 @@ public func convVAEBytesPerSample(w: Int, h: Int) -> Int {
     f += 32 * hw / 4                // u2
     f += (32 * 9) * hw / 4          // cols5
     f += 16 * hw / 4 * 2            // p5, a5
-    // d3: 16 → 3, stride 1
+    // d3: 16 → channels, stride 1
     f += 16 * hw                    // u3
     f += (16 * 9) * hw              // cols6
-    f += 3 * hw * 2                 // p6, recon
-    return f * 4
+    f += ic * hw * 2                // p6, recon
+    // layered: таргет 8n + градиент 8n + композит 3n поверх активаций
+    return f * 4 + (layered ? layeredActivationBytes(w: w, h: h) : 0)
 }
 
 /// Доля рабочего набора видеопамяти под активации обучения.
@@ -175,8 +178,11 @@ public func activationBudgetBytes(workingSet: UInt64) -> Int {
 /// Ровно один кадр разрешён всегда: иначе обучение невозможно в принципе,
 /// и лучше упасть на явной проверке размера, чем молча не работать.
 public func effectiveBatchSize(requested: Int, w: Int, h: Int,
-                               budgetBytes: Int) -> Int {
-    let per = max(convVAEBytesPerSample(w: w, h: h), 1)
+                               budgetBytes: Int,
+                               channels: Int = 3,
+                               layered: Bool = false) -> Int {
+    let per = max(convVAEBytesPerSample(w: w, h: h, channels: channels,
+                                        layered: layered), 1)
     let fits = max(1, budgetBytes / per)
     return max(1, min(max(requested, 1), fits))
 }
@@ -219,11 +225,19 @@ public func vaeLoss(cache: VAECache, target: [Float], beta: Float = 1.0) -> Doub
     return mse + Double(beta) * ConvVAEGPU.klMean(cache)
 }
 
-/// Свёрточный VAE: 3 → 16 → 32 → 2·C (mu, logvar) → z (C) → C → 32 → 16 → 3.
+/// Свёрточный VAE: `channels` → 16 → 32 → 2·C (mu, logvar) → z (C) → C → 32 → 16 → `channels`.
 ///
 /// Сжатие 8× по каждой оси, латент (h/8, w/8). Веса — 6 слоёв × (W, b) = 12
 /// матриц в checkpoint; энкодерный слой e3 вдвое шире остальных, потому что
 /// содержит и средние, и логарифмы дисперсий.
+///
+/// Число каналов — параметр, а не константа:
+///   • `channels = 3` — прежний путь reconstruct-RGB (всё обучение в GUI,
+///     `convcheck`, `gpuheat` и старые чекпоинты продолжают работать);
+///   • `channels = 8` — layered-путь из `LayeredScene`: фон RGB, объекты RGB,
+///     маска, свет. Лосс по слоям + по композиции, см. `LayeredVAELoss.swift`.
+/// Переход НЕ совместим по весам: e1.W и d3.W меняют форму, поэтому старый
+/// 3-канальный чекпоинт честно отклоняется кодом 11 (`isIncompatibleCheckpoint`).
 public final class ConvVAEGPU {
     /// Каналов латента (столько же у `mu` и у `logvar`).
     ///
@@ -238,6 +252,14 @@ public final class ConvVAEGPU {
     /// Во сколько раз латент меньше исходного RGB-кадра по числу значений.
     static var compressionRatio: Double { 192.0 / Double(latentC) }
 
+    /// То же для 8-канального layered-входа: 8·hw / (C·hw/64) = 512/C.
+    /// Латент при этом НЕ растёт — факторизация по экспертам позволяет
+    /// держать то же сжатие при вдвое более богатом входе.
+    static var layeredCompressionRatio: Double { 512.0 / Double(latentC) }
+
+    /// Число входных/выходных каналов: 3 (RGB) или 8 (слои).
+    let channels: Int
+
     let e1: ConvLayerGPU
     let e2: ConvLayerGPU
     let e3: ConvLayerGPU
@@ -247,19 +269,24 @@ public final class ConvVAEGPU {
 
     /// - Parameter seed: seed инициализации весов. По умолчанию фиксирован,
     ///   чтобы обучение было воспроизводимым; тесты полагаются на это.
-    init(engine: MetalEngine, seed: UInt64 = 0x5EED_1234_ABCD_0001) {
+    init(engine: MetalEngine, channels: Int = 3,
+         seed: UInt64 = 0x5EED_1234_ABCD_0001) {
+        self.channels = channels
         let C = ConvVAEGPU.latentC
         var rng = SplitMix64(seed: seed)
-        e1 = ConvLayerGPU(engine: engine, ic: 3,  oc: 16, k: 3, stride: 2, pad: 1, rng: &rng)
+        e1 = ConvLayerGPU(engine: engine, ic: channels, oc: 16,
+                          k: 3, stride: 2, pad: 1, rng: &rng)
         e2 = ConvLayerGPU(engine: engine, ic: 16, oc: 32, k: 3, stride: 2, pad: 1, rng: &rng)
         e3 = ConvLayerGPU(engine: engine, ic: 32, oc: 2 * C, k: 3, stride: 2, pad: 1, rng: &rng)
         d1 = ConvLayerGPU(engine: engine, ic: C,  oc: 32, k: 3, stride: 1, pad: 1, rng: &rng)
         d2 = ConvLayerGPU(engine: engine, ic: 32, oc: 16, k: 3, stride: 1, pad: 1, rng: &rng)
         // Выходной слой — намеренно мелкий: p6 должен стартовать около нуля,
         // иначе сигмоида насыщается и градиент к декодеру исчезает.
+        // fanIn = ic·k·k = 16·9 и НЕ зависит от oc, так что масштаб один
+        // для 3- и 8-канальной модели.
         let outScale = 0.1 / sqrt(Float(16 * 3 * 3))
-        d3 = ConvLayerGPU(engine: engine, ic: 16, oc: 3, k: 3, stride: 1, pad: 1,
-                          scale: outScale, rng: &rng)
+        d3 = ConvLayerGPU(engine: engine, ic: 16, oc: channels,
+                          k: 3, stride: 1, pad: 1, scale: outScale, rng: &rng)
     }
 
     var layers: [ConvLayerGPU] { [e1, e2, e3, d1, d2, d3] }
@@ -325,11 +352,14 @@ public final class ConvVAEGPU {
     /// латента. Градиент по `z` идёт через перепараметризацию, по `mu`/`logvar`
     /// — плюс вклад KL-регуляризатора.
     func backward(_ s: GpuSession, _ cache: VAECache, target: GPUTensor,
-                  beta: Float = 1.0) -> ([GPUTensor], [GPUTensor]) {
+                  beta: Float = 1.0,
+                  dReconOverride: GPUTensor? = nil) -> ([GPUTensor], [GPUTensor]) {
         let w = cache.w, h = cache.h
-        let n = Float(3 * w * h)
-        // dL/d(recon) = 2(recon-target)/N, затем через сигмоиду
-        let dRecon = s.smul(2.0 / n, s.sub(cache.recon, target))
+        let n = Float(channels * w * h)
+        // dL/d(recon) = 2(recon-target)/N, затем через сигмоиду.
+        // `dReconOverride` подставляет градиент layered-лосса (слои + сборка),
+        // не ломая ни один из прежних вызовов backward.
+        let dRecon = dReconOverride ?? s.smul(2.0 / n, s.sub(cache.recon, target))
         let dP6 = s.sigmoidGrad(cache.p6, dRecon)
 
         let (dx6, gW6, gb6) = d3.backward(s, cache.c6, dOut: dP6)
@@ -356,6 +386,27 @@ public final class ConvVAEGPU {
 
         return ([dx1, dx2, dx3, dx4, dx5, dx6],
                 [gW1, gb1, gW2, gb2, gW3, gb3, gW4, gb4, gW5, gb5, gW6, gb6])
+    }
+
+    /// Обучение на 8-канальном layered-таргете.
+    ///
+    /// Отличается от обычного `backward` ТОЛЬКО градиентом по реконструкции:
+    /// вместо `MSE(recon, target)` считается
+    /// `MSE(8 слоёв) + MSE(собранный RGB, кадр)`. Всё остальное — сигмоида,
+    /// свёртки, перепараметризация и KL — тот же самый граф, так что
+    /// численная проверка градиентов проходит через оба пути одинаково.
+    func backwardLayered(_ s: GpuSession, _ cache: VAECache,
+                         target: LayeredTargetGPU,
+                         layerWeight: Float = 1,
+                         composeWeight: Float = 1,
+                         beta: Float = 1) -> ([GPUTensor], [GPUTensor]) {
+        precondition(channels == LayeredScene.layerChannels,
+                     "backwardLayered: нужна 8-канальная модель, а не \(channels)")
+        let dRecon = s.layeredGrad(recon: cache.recon, target: target,
+                                   layerWeight: layerWeight,
+                                   composeWeight: composeWeight)
+        return backward(s, cache, target: target.channels, beta: beta,
+                        dReconOverride: dRecon)
     }
 
     /// KL(N(mu, σ²)‖N(0,1)), усреднённая по элементам латента (Double для логов).

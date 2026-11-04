@@ -227,6 +227,71 @@ public func throttleDecision(gpuMs: Double,
 /// про скорость.
 public let maxSafeDuty = 0.98
 
+// MARK: - Жёсткий предохранитель 90% (после перегрева 4 ноября 2026)
+
+/// Рабочий потолок скважности GPU, запрошенный пользователем.
+///
+/// `maxSafeDuty = 0.98` — физический предел, при котором WindowServer ещё
+/// получает слоты между нашими command buffer'ами. Но 2% паузы оказалось
+/// недостаточно: карта держалась занятой 98–99% всё время, запас по
+/// температуре исчезал, и машина ушла в принудительную перезагрузку.
+///
+/// 0.90 — это и есть «видеокарта работает на 90% своей мощности»: 90%
+/// времени GPU считает, 10% уходит на остывание и композитинг окон.
+/// Потолок применяется ПОВЕРХ температурного контура: контур может только
+/// снижать нагрузку, но никогда не поднимет её выше 90%.
+public let safeDutyCap = 0.90
+
+/// Значение «мощности GPU» по умолчанию в GUI и CLI (проценты).
+public let defaultGpuPowerPercent = 90
+
+/// Потолок скважности с учётом предохранителя.
+///
+/// Прямая семантика, которую запросил пользователь: **90% мощности = GPU
+/// занята 90% времени**. Раньше процент мощности масштабировался через
+/// `maxSafeDuty` (`dutyCeiling`), и 90% превращались в 88,2%, а 100% — в 98%.
+/// Теперь процент — это сама скважность, жёстко ограниченная сверху
+/// `safeDutyCap = 0.90`. 100% и выше в интерфейсе всё равно упираются в 90%,
+/// меньшие значения проходят как есть.
+///
+/// `dutyCeiling` сохранён как историческая формула (её проверяют прежние
+/// тесты), но в обучающих циклах больше не используется.
+public func effectiveDutyCeiling(powerPercent: Int) -> Double {
+    let p = Double(min(max(powerPercent, 0), 100)) / 100.0
+    return min(max(p, 0.10), safeDutyCap)
+}
+
+/// Исполняемый предохранитель для ЛЮБОГО цикла обучения, включая короткие
+/// тестовые прогоны. Без него даже 60 шагов подряд занимают очередь GPU
+/// целиком — ровно так и начиналась авария 4 ноября.
+public struct GpuDutyGuard {
+    public let duty: Double
+    public let maxPauseMs: Double
+
+    public init(powerPercent: Int = defaultGpuPowerPercent,
+                maxPauseMs: Double = 2000) {
+        self.duty = effectiveDutyCeiling(powerPercent: powerPercent)
+        self.maxPauseMs = max(0, maxPauseMs)
+    }
+
+    /// Пауза после шага длительностью `gpuMs`, мс. Чистая функция — тестируется.
+    public func pauseMs(gpuMs: Double) -> Double {
+        dutySleepMs(gpuMs: gpuMs, duty: duty, maxPauseMs: maxPauseMs)
+    }
+
+    /// Применить паузу на реальном потоке.
+    public func wait(gpuMs: Double) {
+        let ms = pauseMs(gpuMs: gpuMs)
+        if ms > 0 { Thread.sleep(forTimeInterval: ms / 1000) }
+    }
+
+    /// Аварийное остывание, если датчик вышел за `emergencyTempC`.
+    public func emergencyPauseMs(tempC: Double?) -> Double {
+        guard let t = tempC, t.isFinite, t >= emergencyTempC else { return 0 }
+        return maxPauseMs
+    }
+}
+
 /// Скважность-потолок по пользовательской «мощности» в процентах.
 ///
 /// 100% → 0.99, 85% → 0.8415, 50% → 0.495. Ниже 10% не опускаемся:

@@ -31,7 +31,24 @@ case "layers":
     let scene = makeLayeredScene(w: lw, h: lh, seed: seed)
     try saveLayerPreview(scene: scene, prefix: p.outPrefix + "_layers")
     let objPixels = scene.mask.filter { $0 == 1 }.count
-    print("слои: \(lw)×\(lh) · объекты \(objPixels) пикс. (\(100.0 * Float(objPixels) / Float(lw * lh), specifier: "%.1f")%) → \(p.outPrefix)_layers_*.png")
+    // Раньше здесь был `specifier:` внутри интерполяции — это API SwiftUI,
+    // а не String. Выражение не типизировалось, и CLI не собирался вовсе.
+    let objPercent = Double(100.0 * Float(objPixels) / Float(lw * lh))
+    print(String(format: "слои: %d×%d · объекты %d пикс. (%.1f%%) → %@_layers_*.png",
+                 lw, lh, objPixels, objPercent, p.outPrefix))
+case "layered":
+    // Обучение 8-канальной факторизации: layered [шаги] [мощность %]
+    // Потолок GPU жёстко ограничен 90%, чтобы не повторить перегрев.
+    let steps = args.count > 2 ? (Int(args[2]) ?? 60) : 60
+    let power = args.count > 3 ? (Int(args[3]) ?? defaultGpuPowerPercent)
+                               : defaultGpuPowerPercent
+    print("layered VAE: 8 каналов (фон | объекты | маска | свет) · \(steps) шагов")
+    let report = trainLayeredVAE(steps: steps, powerPercent: power)
+    print(String(format: "loss %.5f → %.5f · PSNR %.2f дБ · SSIM %.4f · пол качества: %@",
+                 report.firstLoss, report.lastLoss, report.psnr, report.ssim,
+                 report.acceptedByFloor ? "принят" : "не пройден"))
+    print(String(format: "скважность GPU %.0f%% · сборка: %d канала (RGB)",
+                 report.duty * 100, report.compositeChannels))
 case "gpusensors":
     // Живая телеметрия дискретной GPU: температура, частота, загрузка, мощность.
     // Проверка, что IORegistry отдаёт данные и что контур по температуре
@@ -53,6 +70,8 @@ default:
     YumeLayers (чистый Swift, без PyTorch)
     GUI:  swift run -c release YumeLayersUI   (параметры задаются в окне)
     CLI:  swift run -c release YumeLayers conv   (480p, щадящий режим)
+          swift run -c release YumeLayers layered [шаги] [мощность %]  (8 каналов, ≤90% GPU)
+          swift run -c release YumeLayers layers [ш] [в] [seed]        (превью слоёв)
           swift run -c release YumeLayers check / convcheck / gpubench
     """)
 }
