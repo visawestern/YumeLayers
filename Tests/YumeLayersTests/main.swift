@@ -1473,6 +1473,135 @@ func testPureLogic() {
     expectEqual(frameOffsetForSlot(5), 0, "коллаж: слот 5 → смещение 0")
 }
 
+// MARK: - Рендер слоёв (ground-truth разметка)
+
+func testLayerRenderer() {
+    section("Рендер слоёв: процедурные сцены с разметкой")
+
+    // Детерминизм: один seed → побитово одна сцена.
+    do {
+        let a = makeLayeredScene(w: 96, h: 64, seed: 42)
+        let b = makeLayeredScene(w: 96, h: 64, seed: 42)
+        expectEqual(a.background, b.background, "детерминизм: фон")
+        expectEqual(a.objects, b.objects, "детерминизм: объекты")
+        expectEqual(a.mask, b.mask, "детерминизм: маска")
+        expectEqual(a.light, b.light, "детерминизм: свет")
+        expectEqual(a.composite, b.composite, "детерминизм: сборка")
+    }
+    // Разные seed → разные сцены.
+    do {
+        let a = makeLayeredScene(w: 96, h: 64, seed: 1)
+        let b = makeLayeredScene(w: 96, h: 64, seed: 2)
+        expect(a.background != b.background, "разные seed → разные фоны")
+        expect(a.mask != b.mask, "разные seed → разные маски")
+    }
+
+    let scene = makeLayeredScene(w: 128, h: 96, seed: 2026)
+    let n = scene.w * scene.h
+
+    // Диапазоны: всё конечно и в [0,1].
+    expect(scene.background.allSatisfy { $0.isFinite && $0 >= 0 && $0 <= 1 },
+           "фон: значения конечны и в [0,1]")
+    expect(scene.objects.allSatisfy { $0.isFinite && $0 >= 0 && $0 <= 1 },
+           "объекты: значения конечны и в [0,1]")
+    expect(scene.light.allSatisfy { $0.isFinite && $0 >= 0 && $0 <= 1 },
+           "свет: значения конечны и в [0,1]")
+    expect(scene.composite.allSatisfy { $0.isFinite && $0 >= 0 && $0 <= 1 },
+           "сборка: значения конечны и в [0,1]")
+
+    // Маска бинарна и непуста с обеих сторон.
+    expect(scene.mask.allSatisfy { $0 == 0 || $0 == 1 }, "маска бинарна {0,1}")
+    expect(scene.mask.contains(where: { $0 == 1 }), "маска: объекты есть")
+    expect(scene.mask.contains(where: { $0 == 0 }), "маска: фон есть")
+    let objPixels = scene.mask.filter { $0 == 1 }.count
+    expect(objPixels > 0 && objPixels < n, "маска покрывает часть, а не весь кадр")
+
+    // Композиция восстанавливается из слоёв ТОЧНО (формула декодера).
+    let rebuilt = composeLayers(w: scene.w, h: scene.h, background: scene.background,
+                                objects: scene.objects, mask: scene.mask, light: scene.light)
+    expectEqual(rebuilt, scene.composite, "composeLayers(слои) == кадр (побитово)")
+
+    // Формула сборки вручную на подмножестве пикселей.
+    do {
+        var ok = true
+        for i in stride(from: 0, to: n, by: 97) {
+            let m = scene.mask[i], l = scene.light[i]
+            for c in 0..<3 {
+                let v = (scene.background[i * 3 + c] * (1 - m) + scene.objects[i * 3 + c] * m) * l
+                let expectV = min(1, max(0, v))
+                if abs(scene.composite[i * 3 + c] - expectV) > 1e-6 { ok = false }
+            }
+        }
+        expect(ok, "rgb = (фон·(1−m)+obj·m)·свет — формула выполняется попиксельно")
+    }
+    // Вне маски объекты нулевые, кадр = фон·свет.
+    do {
+        var okBg = true, okZero = true
+        for i in 0..<n where scene.mask[i] == 0 {
+            if scene.objects[i * 3] != 0 || scene.objects[i * 3 + 1] != 0 || scene.objects[i * 3 + 2] != 0 {
+                okZero = false
+            }
+            for c in 0..<3 {
+                if abs(scene.composite[i * 3 + c] - min(1, scene.background[i * 3 + c] * scene.light[i])) > 1e-6 {
+                    okBg = false
+                }
+            }
+        }
+        expect(okZero, "вне маски объекты = 0")
+        expect(okBg, "вне маски кадр = фон·свет")
+    }
+
+    // Свет: направленный (у солнца ярче) + виньетка → есть перепад.
+    do {
+        var mn = Float.greatestFiniteMagnitude, mx = -Float.greatestFiniteMagnitude
+        for v in scene.light { mn = min(mn, v); mx = max(mx, v) }
+        expect(mx - mn > 0.1, "свет: перепад > 0.1 (есть направление)")
+        expect(mn >= 0.05, "свет: нет чёрных дыр (min ≥ 0.05)")
+    }
+
+    // CHW-раскладка: 8 каналов, порядок bgR..bgB objR..objB mask light.
+    do {
+        let ch = scene.channelsCHW()
+        expectEqual(ch.count, 8 * n, "CHW: размер 8·H·W")
+        var ok = true
+        for i in 0..<n {
+            if ch[6 * n + i] != scene.mask[i] { ok = false }
+            if abs(ch[7 * n + i] - scene.light[i]) > 0 { ok = false }
+            if abs(ch[0 * n + i] - scene.background[i * 3]) > 0 { ok = false }
+            if abs(ch[3 * n + i] - scene.objects[i * 3]) > 0 { ok = false }
+        }
+        expect(ok, "CHW: порядок каналов фон|объекты|маска|свет")
+    }
+
+    // 480p smoke: рендерится целиком, макет цел.
+    do {
+        let t0 = Date()
+        let big = makeLayeredScene(w: 854, h: 480, seed: 7)
+        let dt = Date().timeIntervalSince(t0)
+        expectEqual(big.background.count, 854 * 480 * 3, "480p: размер фона")
+        expectEqual(big.channelsCHW().count, 854 * 480 * 8, "480p: 8 каналов CHW")
+        expect(dt < 5, "480p: рендер < 5 с (фактически \(String(format: "%.2f", dt)) с)")
+    }
+
+    // Предпросмотр: 4 PNG создаются и не пустые.
+    do {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("yume_layers_\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let prefix = dir.appendingPathComponent("scene").path
+        try saveLayerPreview(scene: scene, prefix: prefix)
+        for name in ["scene_composite.png", "scene_background.png",
+                     "scene_objects.png", "scene_light.png"] {
+            let url = dir.appendingPathComponent(name)
+            let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+            expect(size > 100, "превью \(name) записано (\(size) байт)")
+        }
+    } catch {
+        expect(false, "превью слоёв: ошибка \(error)")
+    }
+}
+
 // MARK: - main
 
 func runAll() {
@@ -1495,6 +1624,7 @@ func runAll() {
     testThermalGovernor()
     testPowerController()
     testPureLogic()
+    testLayerRenderer()
 }
 
 let started = Date()

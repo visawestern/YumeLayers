@@ -23,6 +23,15 @@ case "gpuheat":
     let secs = args.count > 2 ? (Double(args[2]) ?? 60) : 60
     let duty = args.count > 3 ? (Double(args[3]) ?? 85) / 100 : 0.85
     runGpuHeat(seconds: secs, duty: duty)
+case "layers":
+    // Рендер слоёв с ground-truth разметкой: layers [ш] [в] [seed]
+    let lw = args.count > 2 ? (Int(args[2]) ?? p.width) : p.width
+    let lh = args.count > 3 ? (Int(args[3]) ?? p.height) : p.height
+    let seed = args.count > 4 ? (UInt64(args[4]) ?? 2026) : 2026
+    let scene = makeLayeredScene(w: lw, h: lh, seed: seed)
+    try saveLayerPreview(scene: scene, prefix: p.outPrefix + "_layers")
+    let objPixels = scene.mask.filter { $0 == 1 }.count
+    print("слои: \(lw)×\(lh) · объекты \(objPixels) пикс. (\(100.0 * Float(objPixels) / Float(lw * lh), specifier: "%.1f")%) → \(p.outPrefix)_layers_*.png")
 case "gpusensors":
     // Живая телеметрия дискретной GPU: температура, частота, загрузка, мощность.
     // Проверка, что IORegistry отдаёт данные и что контур по температуре
