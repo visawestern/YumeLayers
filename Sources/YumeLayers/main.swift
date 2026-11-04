@@ -121,10 +121,11 @@ default:
     print("""
     YumeLayers (чистый Swift, без PyTorch)
     GUI:  swift run -c release YumeLayersUI   (параметры задаются в окне)
-    CLI:  swift run -c release YumeLayers pipeline [видео.mp4] [кадры] [шаги] [ш] [в]
+    CLI:  swift run -c release YumeLayers pipeline [видео.mp4] [кадры] [шаги] [ш] [в] [отрывок с] [батч]
           swift run -c release YumeLayers conv   (480p, щадящий режим)
           swift run -c release YumeLayers layered [шаги] [мощность %]  (8 каналов, ≤90% GPU)
           swift run -c release YumeLayers layers [ш] [в] [seed]        (превью слоёв)
           swift run -c release YumeLayers check / convcheck / gpubench
+          swift run -c release YumeLayers gpusensors [секунды]    (контроль температуры GPU)
     """)
 }
