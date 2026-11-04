@@ -4,7 +4,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "== Сборка release =="
-swift build -c release
+# --disable-sandbox: SPM по умолчанию гоняет разбор манифеста в собственной
+# песочнице (sandbox-exec), которая на этой машине не может примениться
+# ("sandbox_apply: Operation not permitted"). Отключаем её — иначе сборка
+# падает ещё на Planning build.
+swift build -c release --disable-sandbox
 
 BIN=".build/release/YumeLayersUI"
 APP="YumeLayers.app"

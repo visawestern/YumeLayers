@@ -16,11 +16,6 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "YumeLayers",
-            dependencies: ["YumeLayersCore"],
-            path: "Sources/YumeLayers"
-        ),
-        .executableTarget(
             name: "YumeLayersUI",
             dependencies: ["YumeLayersCore"],
             path: "Sources/YumeLayersUI",
