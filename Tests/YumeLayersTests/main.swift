@@ -2338,6 +2338,38 @@ func testLayerPipeline() {
     }
 }
 
+func testLayeredBatching() {
+    section("Мини-батч: один command buffer на несколько сцен")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    // Корректная эквивалентность: ОДИНАКОВОЕ число обновлений Adam.
+    // Батч 2 по [S, S] (сцена продублирована) с 20 обновлениями должен дать
+    // ту же траекторию, что одиночный батч по [S] с теми же 20 обновлениями:
+    // среднее из двух ТОЖДЕСТВЕННЫХ градиентов равно самому градиенту.
+    // (Это изолирует проверку накопления/нормировки от разных расписаний лr:
+    // сравнение «батч 4 за 8 шагов vs одиночный за 32» было бы некорректно.)
+    let S = makeLayeredScene(w: 16, h: 16, seed: 99)
+    let dupe = [S, S]
+    let updates = 20
+    let rBatch = trainLayeredVAE(steps: updates, w: 16, h: 16,
+                                 scenes: dupe, latentChannels: 32,
+                                 cosineSchedule: true, batchSize: 2)
+    let rSingle = trainLayeredVAE(steps: updates, w: 16, h: 16,
+                                  scenes: [S], latentChannels: 32,
+                                  cosineSchedule: true, batchSize: 1)
+    expectEqual(rBatch.sceneCount, 2, "батч-тренер видел обе сцены")
+    expectEqual(rSingle.sceneCount, 1, "одиночный видел одну сцену")
+    expect(rBatch.lastLoss < rBatch.firstLoss, "батч: потеря упала")
+    expect(rSingle.lastLoss < rSingle.firstLoss, "одиночный: потеря упала")
+    // Допуск не жёсткий: шаги батча берут разные сэмплы z (seed на forward),
+    // так что дублированная пара не побитово равна одиночной, но статистика
+    // одинаковых градиентов обязана сойтись.
+    expectClose(rBatch.lastLoss, rSingle.lastLoss, 0.02,
+                String(format: "батч 2 по дупликату == одиночный: %.5f vs %.5f",
+                       rBatch.lastLoss, rSingle.lastLoss))
+    expectClose(rBatch.duty, 0.90, 1e-9, "батч сохраняет потолок 90%")
+    expect(rBatch.psnr.isFinite && rBatch.ssim.isFinite, "качество конечно")
+}
+
 func testDutyPacer() {
     section("Пейсер скважности: пакетные паузы без потери 90%")
     let pacer = GpuDutyPacer(powerPercent: 90, maxPauseMs: 2000, minSleepMs: 2.0)
@@ -2454,6 +2486,7 @@ func runAll() {
     testLayeredDatasetTraining()
     testLayerPipeline()
     testDutyPacer()
+    testLayeredBatching()
     testFrameStabilization()
 }
 

@@ -65,17 +65,19 @@ case "pipeline":
     let pw = args.count > 5 ? (Int(args[5]) ?? 96) : 96
     let ph = args.count > 6 ? (Int(args[6]) ?? 72) : 72
     let win = args.count > 7 ? (Double(args[7]) ?? 2.0) : 2.0
+    let batch = args.count > 8 ? (Int(args[8]) ?? 1) : 1
     let ckptDir = home + "/YumeLayers/checkpoints"
     try? FileManager.default.createDirectory(atPath: ckptDir,
                                               withIntermediateDirectories: true)
     let ckpt = ckptDir + "/layered.safetensors"
 
     print("pipeline: \(video)")
-    print("  кадры \(frames) · \(pw)×\(ph) · отрывок \(win) с · шагов \(steps) · латент C=32 · GPU ≤90%")
+    print("  кадры \(frames) · \(pw)×\(ph) · отрывок \(win) с · шагов \(steps) · батч \(batch) · латент C=32 · GPU ≤90%")
     do {
         let r = try runLayerPipeline(videoPath: video, w: pw, h: ph,
                                      frameCount: frames, steps: steps,
                                      latentChannels: 32,
+                                     batchSize: batch,
                                      windowSeconds: win,
                                      checkpointPath: ckpt,
                                      previewPrefix: p.outPrefix + "_pipeline")

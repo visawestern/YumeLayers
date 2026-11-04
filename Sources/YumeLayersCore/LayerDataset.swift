@@ -334,6 +334,7 @@ public func runLayerPipeline(
     steps: Int = 200,
     latentChannels: Int = 32,
     lr: Float = 0.01,
+    batchSize: Int = 1,
     windowSeconds: Double = 2.0,
     maxShift: Int = 8,
     checkpointPath: String? = nil,
@@ -373,6 +374,7 @@ public func runLayerPipeline(
                                 lr: lr,
                                 latentChannels: latentChannels,
                                 cosineSchedule: true,
+                                batchSize: batchSize,
                                 checkpointPath: checkpointPath,
                                 powerPercent: powerPercent)
 
