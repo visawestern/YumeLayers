@@ -83,6 +83,8 @@ public func padToMultipleOf8(_ img: [Float], w: Int, h: Int) -> ([Float], Int, I
 final class FrameCache {
     let w: Int
     let h: Int
+    private let realW: Int
+    private let realH: Int
     private let frames: [MemoryFrame]
     private let chunkSize: Int
     private let per: Int
@@ -100,11 +102,15 @@ final class FrameCache {
 
     var count: Int { _count }
 
-    init?(frames: [MemoryFrame], w: Int, h: Int, budgetBytes: Int = 1 << 30) {
+    init?(frames: [MemoryFrame], w: Int, h: Int, realW: Int? = nil, realH: Int? = nil,
+          budgetBytes: Int = 1 << 30) {
         guard !frames.isEmpty else { return nil }
         self.frames = frames
         self.w = w
         self.h = h
+        // Канонический декод: истинный размер + padToMultipleOf8 (см. GPUFramePool).
+        self.realW = realW ?? w
+        self.realH = realH ?? h
         self.per = w * h * 3
         self._count = frames.count
         // Чанк ~1024 кадра: два буфера ≈ 2.5 ГБ — умещается в RAM и даёт
@@ -112,7 +118,8 @@ final class FrameCache {
         self.chunkSize = min(frames.count, max(1, min(1024, budgetBytes / max(2 * per, 1))))
 
         let firstEnd = min(chunkSize, frames.count)
-        self.active = Self.decodeChunk(frames: frames, start: 0, end: firstEnd, w: w, h: h)
+        self.active = Self.decodeChunk(frames: frames, start: 0, end: firstEnd,
+                                       w: w, h: h, realW: self.realW, realH: self.realH)
         self.activeStart = 0
         if firstEnd < frames.count {
             startPrefetch(nextIndex: firstEnd)
@@ -137,7 +144,8 @@ final class FrameCache {
             lock.unlock()
             activeStart = desiredStart
             active = prefetched ?? Self.decodeChunk(frames: frames, start: desiredStart,
-                end: min(desiredStart + chunkSize, _count), w: w, h: h)
+                end: min(desiredStart + chunkSize, _count), w: w, h: h,
+                realW: realW, realH: realH)
             let following = activeStart + active.count
             if following < _count { startPrefetch(nextIndex: following) }
         }
@@ -163,9 +171,10 @@ final class FrameCache {
             return
         }
         let f = frames
-        let ww = w, hh = h
+        let ww = w, hh = h, rw = realW, rh = realH
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let chunk = Self.decodeChunk(frames: f, start: s, end: e, w: ww, h: hh)
+            let chunk = Self.decodeChunk(frames: f, start: s, end: e, w: ww, h: hh,
+                                         realW: rw, realH: rh)
             guard let self = self else { return }
             self.lock.lock()
             self.next = chunk
@@ -178,15 +187,17 @@ final class FrameCache {
 
     /// Декодирует диапазон кадров [start, end) в RGB8, параллельно.
     private static func decodeChunk(frames: [MemoryFrame], start: Int, end: Int,
-                                    w: Int, h: Int) -> [[UInt8]] {
+                                    w: Int, h: Int, realW: Int, realH: Int) -> [[UInt8]] {
         let n = end - start
         guard n > 0 else { return [] }
         let lock = NSLock()
         var out = [[UInt8]](repeating: [], count: n)
         DispatchQueue.concurrentPerform(iterations: n) { j in
             let i = start + j
+            // Декод в истинном размере + паддинг (канонический путь).
             guard i < frames.count,
-                  let img = loadImageRGB(data: frames[i].jpeg, w: w, h: h) else { return }
+                  let img = loadImageRGB(data: frames[i].jpeg, w: realW, h: realH)
+                      .map({ padToMultipleOf8($0, w: realW, h: realH).0 }) else { return }
             var row = [UInt8](repeating: 0, count: img.count)
             for k in 0..<img.count {
                 row[k] = UInt8(min(255, max(0, Int(img[k] * 255 + 0.5))))
@@ -311,6 +322,7 @@ public func generateReconstructions(p: Params, onProgress: ((Int, Int) -> Void)?
 
     if !useSecondary {
         return try runReconsOn(engine: engine, items: items, pw: pw, ph: ph,
+                               realW: p.width, realH: p.height,
                                convPath: p.convPath, onProgress: onProgress)
     }
 
@@ -329,6 +341,7 @@ public func generateReconstructions(p: Params, onProgress: ((Int, Int) -> Void)?
             defer { group.leave() }
             do {
                 let part = try runReconsOn(engine: eng, items: Array(chunk), pw: pw, ph: ph,
+                                           realW: p.width, realH: p.height,
                                            convPath: p.convPath, onProgress: nil)
                 lock.lock()
                 out.merge(part) { _, new in new }
@@ -353,8 +366,11 @@ public func generateReconstructions(p: Params, onProgress: ((Int, Int) -> Void)?
 /// Возвращает словарь «имя кадра → PNG-данные реконструкции» В ПАМЯТИ
 /// (без записи на диск).
 private func runReconsOn(engine: MetalEngine, items: [(name: String, jpeg: Data)],
-                         pw: Int, ph: Int, convPath: String,
+                         pw: Int, ph: Int, realW: Int? = nil, realH: Int? = nil,
+                         convPath: String,
                          onProgress: ((Int, Int) -> Void)?) throws -> [String: Data] {
+    // Канонический декод: истинный размер + паддинг (не растяжение).
+    let decW = realW ?? pw, decH = realH ?? ph
     let session = GpuSession(engine)
     let vae = ConvVAEGPU(engine: engine)
     // Датчик температуры на этот прогон: решение о паузе принимается по
@@ -379,7 +395,8 @@ private func runReconsOn(engine: MetalEngine, items: [(name: String, jpeg: Data)
             workingSet: engine.device.recommendedMaxWorkingSetSize))))
     var result: [String: Data] = [:]
     var done = 0
-    var lastLoggedPercent = -1
+    var lastLoggedPercent = 0
+    if !items.isEmpty { yumeLog("Реконструкции: старт, \(items.count) кадров") }
     for range in batchRanges(total: items.count, batch: batchSize) {
         // «Стоп»: прерываем реконструкции (как и обучение).
         if TrainingControl.shared.isCancelled {
@@ -391,9 +408,13 @@ private func runReconsOn(engine: MetalEngine, items: [(name: String, jpeg: Data)
         // и продолжаем (без остановки).
         switch ProcessInfo.processInfo.thermalState {
         case .critical:
-            // Минута паузы, затем проверка каждые 30 с до нормы.
-            yumeLog("⚠️ реконструкции: критический перегрев — пауза 60 с")
-            while ProcessInfo.processInfo.thermalState == .critical && !TrainingControl.shared.isCancelled {
+            // Пауза до нормы, но с дедлайном: раньше цикл был без ограничения,
+            // и застрявший .critical (сторонняя нагрузка на GPU) вешал
+            // реконструкции навсегда — без единой строки в журнале.
+            yumeLog("⚠️ реконструкции: критический перегрев — пауза до остывания (не дольше 5 мин)")
+            let coolDeadline = Date().addingTimeInterval(300)
+            while ProcessInfo.processInfo.thermalState == .critical,
+                  !TrainingControl.shared.isCancelled, Date() < coolDeadline {
                 Thread.sleep(forTimeInterval: 0.25)
             }
         case .serious:
@@ -406,7 +427,8 @@ private func runReconsOn(engine: MetalEngine, items: [(name: String, jpeg: Data)
         var imgs = [[Float]?](repeating: nil, count: chunkItems.count)
         let decodeLock = NSLock()
         DispatchQueue.concurrentPerform(iterations: chunkItems.count) { j in
-            let image = loadImageRGB(data: chunkItems[j].jpeg, w: pw, h: ph)
+            let image = loadImageRGB(data: chunkItems[j].jpeg, w: decW, h: decH)
+                .map { padToMultipleOf8($0, w: decW, h: decH).0 }
             decodeLock.lock(); imgs[j] = image; decodeLock.unlock()
         }
 
@@ -438,12 +460,17 @@ private func runReconsOn(engine: MetalEngine, items: [(name: String, jpeg: Data)
         let reconSleep = dutySleepMs(gpuMs: reconGpuMs, duty: duty, maxPauseMs: 2000)
         if reconSleep > 0 { Thread.sleep(forTimeInterval: reconSleep / 1000) }
 
-        for (k, t) in recons.enumerated() {
-            let r = t.toArray()
-            let item = chunkItems[targetToItem[k]]
-            // Реконструкция — сразу в память (PNG), без записи на диск.
-            if let png = encodePNG(width: pw, height: ph, rgb: r) {
-                result[item.name] = png
+        let reconByItem = Dictionary(uniqueKeysWithValues: zip(targetToItem, recons))
+        for (j, item) in chunkItems.enumerated() {
+            // Кадр мог не декодироваться (битый JPEG) — он всё равно прошёл
+            // через пайплайн: раньше done рос только по успешным декодам,
+            // и прогресс навсегда замирал на X-1 из N, не доходя до финиша.
+            if let t = reconByItem[j] {
+                let r = t.toArray()
+                // Реконструкция — сразу в память (PNG), без записи на диск.
+                if let png = encodePNG(width: pw, height: ph, rgb: r) {
+                    result[item.name] = png
+                }
             }
             done += 1
             onProgress?(done, items.count)
@@ -451,8 +478,7 @@ private func runReconsOn(engine: MetalEngine, items: [(name: String, jpeg: Data)
             if shouldLogProgress(done: done, total: items.count,
                                  lastLoggedPercent: lastLoggedPercent) {
                 lastLoggedPercent = Int((Double(done) / Double(max(items.count, 1))) * 100)
-                let pct = Int(Double(done) / Double(max(items.count, 1)) * 100)
-                yumeLog("Реконструкции: \(done)/\(items.count) кадров (\(pct)%)")
+                yumeLog("Реконструкции: \(done)/\(items.count) кадров (\(lastLoggedPercent)%)")
             }
         }
     }
@@ -463,6 +489,16 @@ private func runReconsOn(engine: MetalEngine, items: [(name: String, jpeg: Data)
 
 /// Колбэк прогресса: (эпоха, loss, psnr, путь превью, максимум эпох) -> Void
 public typealias TrainProgress = (Int, Double, Double, String?) -> Void
+
+/// Аварийная остановка обучения: loss стал NaN/Inf.
+/// Отличается от отмены пользователем (CancellationError), чтобы вызывающий
+/// код мог показать честную причину, а не «остановлено».
+public struct ConvTrainingNaNError: Error, LocalizedError {
+    public init() {}
+    public var errorDescription: String? {
+        "обучение остановлено: loss = NaN (чекпоинт не записан)"
+    }
+}
 
 /// Потокобезопасное управление обучением (для остановки из GUI).
 public final class TrainingControl {
@@ -521,9 +557,21 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
     let engine = MetalEngine.shared
     let session = GpuSession(engine)
 
+    // Краевые входы public API: интерфейс зажимает значения, но функцию
+    // вызывают и тесты/скрипты — вырождения ловим явно, а не крашем
+    // диапазона «Range requires lowerBound ≤ upperBound».
+    guard p.epochs >= 0 else {
+        throw NSError(domain: "Yume", code: 12,
+                      userInfo: [NSLocalizedDescriptionKey: "epochs < 0 (\(p.epochs))"])
+    }
     let realW = p.width, realH = p.height
     let pw = ((realW + 7) / 8) * 8
     let ph = ((realH + 7) / 8) * 8
+    guard pw >= 8, ph >= 8 else {
+        throw NSError(domain: "Yume", code: 12,
+                      userInfo: [NSLocalizedDescriptionKey:
+                        "кадр слишком мал: \(p.width)×\(p.height) — минимум 8×8"])
+    }
 
     var source: DataSource
     var frameCache: FrameCache? = nil
@@ -543,13 +591,14 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
     // Пул кадров в VRAM (строим первым — он заменяет CPU-кэш и быстрее).
     var gpuPool: GPUFramePool? = nil
     if let mem = p.memoryFrames, !mem.isEmpty {
-        gpuPool = GPUFramePool(engine: engine, frames: mem, w: pw, h: ph) { loaded, total in
+        gpuPool = GPUFramePool(engine: engine, frames: mem, w: pw, h: ph,
+                               realW: realW, realH: realH) { loaded, total in
             emitStatus(trainVRAMLoadNote(loaded: loaded, total: total),
                        isPreparing ? .preparing : .training)
         }
         if gpuPool == nil {
             // Если пул не построился (память) — обычный CPU-кэш.
-            frameCache = FrameCache(frames: mem, w: pw, h: ph)
+            frameCache = FrameCache(frames: mem, w: pw, h: ph, realW: realW, realH: realH)
         }
         source = DataSource(files: [], memFrames: mem, cache: frameCache,
                             w: pw, h: ph, realW: realW, realH: realH)
@@ -719,7 +768,9 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
     var epochSteps = max(1, p.steps)
     if let mem = p.memoryFrames, !mem.isEmpty, p.steps == mem.count, effBatch > 1 {
         epochSteps = max(1, Int((Double(mem.count) / Double(effBatch)).rounded(.up)))
-        yumeLog("Шагов за эпоху (авто под пачку): \(epochSteps) × \(effBatch) кадров = \(mem.count)")
+        // ceil обычно даёт шагов чуть больше, чем mem.count/effBatch —
+        // пишем честно, а не «= mem.count».
+        yumeLog("Шагов за эпоху (авто под пачку): \(epochSteps) шагов × \(effBatch) кадров (набор \(mem.count), последний шаг неполный)")
     }
 
     // Эпохи НИКОГДА не пропускаются: полный прогон с эпохи 0 по всем
@@ -817,6 +868,14 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
                 }
             }
             lastMse = mseSum / Double(effBatch)
+            // Детект NaN ДО накопления метрик: раньше шаг с NaN успевал
+            // попасть в lossSum/stepsDone, и средняя потеря эпохи печаталась
+            // как «loss nan».
+            if !lastMse.isFinite {
+                stableRun = false
+                yumeLog("⚠️ loss = NaN на эпохе \(ep) — аварийная остановка обучения (чекпоинт не сохраняется)")
+                throw ConvTrainingNaNError()
+            }
             lossSum += lastMse
             psnrSum += -10.0 * log10(max(lastMse, 1e-12))
             stepsDone += 1
@@ -856,14 +915,6 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
                 scanNaN("recon", c0.recon)
                 yumeLog(String(format: "debug step0: mse=%.6f recon0=%.4f img0=%.4f",
                                lastMse, firstR![0], firstImg![0]))
-            }
-
-            // детект NaN: останавливаем обучение до того, как NaN попадёт в чекпоинт
-            if !lastMse.isFinite {
-                stableRun = false
-                yumeLog("⚠️ loss = NaN на эпохе \(ep) — остановка обучения (чекпоинт не сохраняется)")
-                TrainingControl.shared.cancel()
-                break
             }
 
             // Санация: NaN/Inf в градиентах → 0; глобальный клиппинг нормы.
@@ -914,9 +965,14 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
                     // Предохранитель: выше 86 °C обучение уходит на остывание,
                     // что бы ни решил контур. Перезагрузка случалась на 93 °C.
                     if s.temperatureC >= emergencyTempC {
-                        yumeLog(String(format: "🔥 GPU %.0f °C — принудительное остывание 20 с",
+                        // Остывание — прерываемое: раньше Thread.sleep(20)
+                        // игнорировал «Стоп», и интерфейс подвисал до 20 с.
+                        yumeLog(String(format: "🔥 GPU %.0f °C — принудительное остывание до 20 с",
                                        s.temperatureC))
-                        Thread.sleep(forTimeInterval: 20)
+                        let coolDeadline = Date().addingTimeInterval(20)
+                        while Date() < coolDeadline, !TrainingControl.shared.isCancelled {
+                            Thread.sleep(forTimeInterval: 0.25)
+                        }
                         currentDuty = max(power.duty * 0.5, 0.05)
                     }
                     if Date().timeIntervalSince(lastSensorLog) > 60 {
@@ -1021,7 +1077,11 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
             if coolMs > 0 {
                 yumeLog(String(format: "🌡️ пауза между эпохами: %.0f мс на остывание (GPU %.0f °C)",
                                coolMs, hotTemp ?? 0))
-                Thread.sleep(forTimeInterval: coolMs / 1000)
+                // Прерываемая: раньше «Стоп» ждал конца паузы.
+                let coolDeadline = Date().addingTimeInterval(coolMs / 1000)
+                while Date() < coolDeadline, !TrainingControl.shared.isCancelled {
+                    Thread.sleep(forTimeInterval: min(0.25, coolMs / 1000))
+                }
             }
         }
     }
@@ -1124,7 +1184,8 @@ public func runGpuBench() {
     yumeLog("Рекомендуемый рабочий набор: \(dev.recommendedMaxWorkingSetSize / 1024 / 1024) МБ")
     yumeLog("Макс. потоков в группе: \(dev.maxThreadsPerThreadgroup.width)")
 
-    // Пропускная способность: relu над 32 млн float (128 МБ), 3 повтора
+    // Пропускная способность: relu над 8.4 млн float (32 МиБ буфера,
+    // 64 МиБ трафика читаем+пишем), 3 повтора
     let n = 32 * 1024 * 1024 / 4
     let a = GPUTensor(engine: engine, rows: 1, cols: n)
     session.begin()
@@ -1138,7 +1199,8 @@ public func runGpuBench() {
     }
     var dt = Date().timeIntervalSince(t0) / 3
     let gb = Double(n * 4 * 2) / 1e9
-    yumeLog(String(format: "Память (relu 128 МБ): %.2f ГБ/с, %.2f мс", gb / dt, dt * 1000))
+    yumeLog(String(format: "Память (relu, буфер 32 МиБ, трафик %.0f МиБ): %.2f ГБ/с, %.2f мс",
+                   gb * 1024, gb / dt, dt * 1000))
 
     // Вычисления: тайловый matmul 512³
     let m = 512, k = 512, nn = 512
@@ -1254,11 +1316,11 @@ public func profileConv(w: Int, h: Int) {
         _ = recon.toArray()
     }
 
-    time("аллокация 236 МБ", 5) {
+    time("аллокация \(16 * w * h * 4 / 1_048_576) МБ (16×\(w)×\(h))", 5) {
         _ = GPUTensor(engine: engine, rows: 16, cols: w * h)
     }
 
-    time("заполнение 236 МБ (relu)", 5) {
+    time("заполнение \(16 * w * h * 4 / 1_048_576) МБ (relu)", 5) {
         let a = GPUTensor(engine: engine, rows: 16, cols: w * h)
         session.begin()
         _ = session.relu(a)
@@ -1958,6 +2020,8 @@ final class GPUFramePool {
     private var frames: [MemoryFrame]
     private let w: Int
     private let h: Int
+    private let realW: Int
+    private let realH: Int
     private let size: Int
     private var tensors: [GPUTensor] = []
     private var windowStart = -1
@@ -1969,12 +2033,19 @@ final class GPUFramePool {
     private let onChunk: ((Int, Int) -> Void)?
 
     init?(engine: MetalEngine, frames: [MemoryFrame], w: Int, h: Int,
+          realW: Int? = nil, realH: Int? = nil,
           size: Int = 1024, onChunk: ((Int, Int) -> Void)? = nil) {
         guard !frames.isEmpty else { return nil }
         self.engine = engine
         self.frames = frames
         self.w = w
         self.h = h
+        // Истинный размер кадра (до паддинга до кратного 8). Декод всегда
+        // идёт в него, затем padToMultipleOf8: раньше кадр 854×480
+        // растягивался интерполяцией в 856×480, и одна и та же выборка
+        // выглядела по-разному в пуле VRAM и на CPU-пути (продление края).
+        self.realW = realW ?? w
+        self.realH = realH ?? h
         self.onChunk = onChunk
         // Бюджет пула — 60% рабочего набора GPU (см. gpuFramePoolCapacity).
         self.size = gpuFramePoolCapacity(
@@ -1997,11 +2068,16 @@ final class GPUFramePool {
     }
 
     /// Следующий кадр по порядку (циклически по всему набору).
+    ///
+    /// Вся операция — под замком: раньше `windowStart` читался после
+    /// `lock.unlock()`, и параллельный `next()` мог между этими шагами
+    /// перезагрузить окно — индекс `tensors[g - windowStart]` становился
+    /// отрицательным (крэш), а две параллельные `loadWindow` интерливирали
+    /// запись тензоров.
     func next() -> GPUTensor {
-        lock.lock()
+        lock.lock(); defer { lock.unlock() }
         let i = cursorGlobal
         cursorGlobal += 1
-        lock.unlock()
 
         let g = i % frames.count
         let ws = (g / size) * size
@@ -2029,8 +2105,17 @@ final class GPUFramePool {
                                        availableRAM: UInt64(ProcessInfo.processInfo.physicalMemory),
                                        maxWorkingSet: engine.device.recommendedMaxWorkingSetSize))
         // Переиспользуемые staging-буферы: пик памяти ≈ batch × кадр.
+        // (без `!`: при OOM пользователь получал падение на разыменовании nil
+        // без единого слова о том, чего не хватило)
         let staging = (0..<batch).map { _ in
-            engine.device.makeBuffer(length: frameBytes, options: .storageModeShared)!
+            guard let b = engine.device.makeBuffer(length: frameBytes, options: .storageModeShared) else {
+                fatalError(allocationFailureMessage(
+                    bytes: frameBytes,
+                    availableBytes: Int(engine.device.recommendedMaxWorkingSetSize)
+                        - engine.device.currentAllocatedSize,
+                    what: "staging-буфер кадра \(frameBytes / 1024) КиБ"))
+            }
+            return b
         }
 
         yumeLog("GPUFramePool: дозагрузка чанка \(s)..<\(e) — \(n) кадров, порциями по \(batch)")
@@ -2042,16 +2127,32 @@ final class GPUFramePool {
             var imgs = [[Float]?](repeating: nil, count: cnt)
             let decodeLock = NSLock()
             DispatchQueue.concurrentPerform(iterations: cnt) { k in
-                let image = loadImageRGB(data: frames[s + j + k].jpeg, w: w, h: h)
+                // Канонический путь: декод в истинном размере, затем
+                // паддинг до кратного 8 (не растяжение интерполяцией).
+                let image = loadImageRGB(data: frames[s + j + k].jpeg, w: realW, h: realH)
+                    .map { padToMultipleOf8($0, w: realW, h: realH).0 }
                 decodeLock.lock(); imgs[k] = image; decodeLock.unlock()
             }
 
-            let cmd = engine.queue.makeCommandBuffer()!
-            let blit = cmd.makeBlitCommandEncoder()!
+            guard let cmd = engine.queue.makeCommandBuffer(),
+                  let blit = cmd.makeBlitCommandEncoder() else {
+                fatalError(allocationFailureMessage(
+                    bytes: 0,
+                    availableBytes: Int(engine.device.recommendedMaxWorkingSetSize)
+                        - engine.device.currentAllocatedSize,
+                    what: "command buffer дозагрузки окна пула"))
+            }
             for k in 0..<cnt {
-                guard let img = imgs[k], img.count * 4 == frameBytes else { continue }
-                img.withUnsafeBytes { raw in
-                    staging[k].contents().copyMemory(from: raw.baseAddress!, byteCount: frameBytes)
+                if let img = imgs[k], img.count * 4 == frameBytes {
+                    img.withUnsafeBytes { raw in
+                        staging[k].contents().copyMemory(from: raw.baseAddress!, byteCount: frameBytes)
+                    }
+                } else {
+                    // Битый кадр: раньше слот пула оставался с байтами ПРЕДЫДУЩЕГО
+                    // окна — обучение молча шло по «фантому». Теперь это явный
+                    // чёрный кадр + запись в журнал.
+                    yumeLog("⚠️ GPUFramePool: кадр \(frames[s + j + k].name) не декодирован — чёрная заглушка")
+                    memset(staging[k].contents(), 0, frameBytes)
                 }
                 blit.copy(from: staging[k], sourceOffset: 0, to: tensors[j + k].buf,
                           destinationOffset: 0, size: frameBytes)

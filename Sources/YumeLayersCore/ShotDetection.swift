@@ -25,7 +25,10 @@ public func detectSceneShots(url: URL, w: Int, h: Int,
         throw LayerDatasetError.unreadableVideo(url.path)
     }
     let n = max(scanCount, 8)
-    let times = (0..<n).map { duration * Double($0) / Double(n - 1) }
+    // Полуинтервал [0, duration): сэмпл в точности `duration` — seek за
+    // последний кадр, декод проваливается (а раньше ещё и fallback
+    // подставлял произвольный кадр из середины фильма).
+    let times = (0..<n).map { duration * Double($0) / Double(n) }
     // Многопоточный программный декод всех точек сканирования сразу.
     let frames = try FrameRGBExtractor.loadFrames(url: url, times: times,
                                                   w: w, h: h)
@@ -47,6 +50,10 @@ public func detectSceneShots(url: URL, w: Int, h: Int,
     let thr = max(median * 6.0, cutThreshold)
 
     var cuts: [Int] = [0]
+    // diffs[0] — скачок между сэмплами 0 и 1: без этой проверки склейка в
+    // первых секундах ролика не находилась никогда (первый шот глотал
+    // начало следующей сцены).
+    if !diffs.isEmpty, diffs[0] > thr { cuts.append(1) }
     for i in 1..<diffs.count where diffs[i] > thr {
         if i - cuts.last! >= 2 { cuts.append(i) }
     }

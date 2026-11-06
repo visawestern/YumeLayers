@@ -27,6 +27,10 @@ public func trainAutoencoderGPU(p: Params) throws {
         print("Для 480p используйте свёрточный VAE: YumeLayers conv --data <папка>")
         return
     }
+    // Один источник геометрии: диффузия и генерация кодируют латент при
+    // p.imageSize — рассинхрон с p.width/height давал молча неверный matmul.
+    precondition(p.imageSize == W && p.imageSize == H,
+                 "trainAutoencoderGPU: imageSize (\(p.imageSize)) должен совпадать с кадром \(W)×\(H)")
 
     let W1 = GPUTensor(engine: engine, data: randArr(I * H, scale: 0.03), rows: I)
     let b1 = GPUTensor(engine: engine, data: randArr(H, scale: 0.03), rows: 1)
@@ -43,6 +47,14 @@ public func trainAutoencoderGPU(p: Params) throws {
         ms.append(GPUTensor(engine: engine, rows: prm.rows, cols: prm.cols))
         vs.append(GPUTensor(engine: engine, rows: prm.rows, cols: prm.cols))
     }
+    // Моменты Adam — аккумуляторы: приватный буфер Metal не гарантированно
+    // нулевой, а adam_kernel читает m/v до записи. Обнуляем явно.
+    session.begin()
+    for i in 0..<params.count {
+        session.zeroFill(ms[i])
+        session.zeroFill(vs[i])
+    }
+    session.end()
 
     var t = 0
     for ep in 0..<p.epochs {
@@ -117,9 +129,13 @@ public func encodeLatentsGPU(session: GpuSession, engine: MetalEngine, p: Params
         session.begin()
         let H1 = session.addBias(session.matmul(X, W1), b1)
         let A1 = session.tanh(H1)
-        let Z = session.addBias(session.matmul(A1, W2), b2)
+        let H2 = session.addBias(session.matmul(A1, W2), b2)
+        // Латент = то, что ест декодер при обучении AE: tanh(H2). Раньше
+        // возвращался H2 до tanh — диффузия училась на одном распределении,
+        // а декодер при генерации получал другое (потерянный tanh).
+        let A2 = session.tanh(H2)
         session.end()
-        latents.append(Z)
+        latents.append(A2)
     }
     return latents
 }
@@ -132,6 +148,10 @@ public func trainDiffusionGPU(p: Params) throws {
     let B = p.batch
     let lr: Float = 0.001
     let stepsCount = p.noiseSteps
+    guard stepsCount > 0 else {
+        print("noiseSteps должен быть > 0 (получено \(stepsCount))")
+        return
+    }
 
     // VAE-веса для энкодинга
     let ae = try loadState(path: p.vaePath)
@@ -154,6 +174,13 @@ public func trainDiffusionGPU(p: Params) throws {
         ms.append(GPUTensor(engine: engine, rows: prm.rows, cols: prm.cols))
         vs.append(GPUTensor(engine: engine, rows: prm.rows, cols: prm.cols))
     }
+    // Моменты Adam — аккумуляторы: обнуляем явно (см. trainAutoencoderGPU).
+    session.begin()
+    for i in 0..<params.count {
+        session.zeroFill(ms[i])
+        session.zeroFill(vs[i])
+    }
+    session.end()
 
     var t = 0
     for ep in 0..<p.epochs {

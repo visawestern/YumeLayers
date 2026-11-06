@@ -57,7 +57,10 @@ public func stabilizeFrames(_ frames: [[Float]], w: Int, h: Int,
                                      height: h, shifts: [], droppedFrames: 0,
                                      meanResidual: 0))
     }
-    let m = min(max(maxShift, 0), min(w, h) / 4)
+    // Сдвиг ограничен и сверху «запасом на кратность 8»: раньше при кадре
+    // 12×12 кламп `max(8, availW/8*8)` делал cw > availW, offX уходил в
+    // минус, и выборка выходила за границы буфера (крэш).
+    let m = min(max(maxShift, 0), min(w, h) / 4, max(0, (w - 8) / 2), max(0, (h - 8) / 2))
     guard m > 0 else {
         return (frames, w, h,
                 FrameAlignmentReport(sourceWidth: w, sourceHeight: h, width: w,
@@ -279,7 +282,9 @@ public func loadVideoFrames(url: URL, w: Int, h: Int,
         }
         return frames
     } catch {
-        throw LayerDatasetError.badFrame(url.lastPathComponent)
+        // Причина (какой кадр, почему) не глотается — иначе диагностика
+        // битого видео сводится к «не декодировался» без деталей.
+        throw LayerDatasetError.badFrame("\(url.lastPathComponent): \((error as NSError).localizedDescription)")
     }
 }
 

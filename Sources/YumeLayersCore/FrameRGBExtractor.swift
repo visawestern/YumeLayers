@@ -103,14 +103,16 @@ public enum FrameRGBExtractor {
 
     /// Один кадр в момент `time`: отдельный процесс ffmpeg, rawvideo RGB24.
     /// Если после запрошенной точки уже нет кадров (конец ролика), берём
-    /// ближайший предыдущий — так же, как это делал AVAssetImageGenerator.
+    /// ближайший ПРЕДЫДУЩИЙ — так же, как это делал AVAssetImageGenerator.
+    /// Кандидаты строго монотонно убывают: раньше тут были `time*0.5` и `0`,
+    /// подменявшие кадр произвольной точкой из середины/начала ролика
+    /// (склейки на хвосте переставали находиться).
     private static func decodeFrame(ffmpeg: String, url: URL, time: Double,
                                     w: Int, h: Int,
                                     expectedBytes: Int) throws -> [Float] {
         var candidates = [max(0, time)]
         if time > 0.3 { candidates.append(time - 0.3) }
-        if time > 1.0 { candidates.append(time * 0.5) }
-        candidates.append(0)
+        if time > 1.3 { candidates.append(time - 1.3) }
 
         for t in candidates {
             if let data = try decode(ffmpeg: ffmpeg, url: url, time: t,
@@ -211,9 +213,12 @@ public enum FrameRGBExtractor {
 
     static func rgbToFloats(_ bytes: Data, pixels: Int) -> [Float] {
         var out = [Float](repeating: 0, count: pixels * 3)
+        // Короткий буфер — читаем сколько есть, остальное остаётся нулями:
+        // без guard любой будущий вызов с недокодированным кадром — trap.
+        let available = min(pixels * 3, bytes.count)
         bytes.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
             guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-            for i in 0..<(pixels * 3) {
+            for i in 0..<available {
                 out[i] = Float(base[i]) / 255.0
             }
         }

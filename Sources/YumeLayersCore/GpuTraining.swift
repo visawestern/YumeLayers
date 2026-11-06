@@ -27,15 +27,23 @@ public final class GPUTensor {
     }
 
     init(engine: MetalEngine, data: [Float], rows: Int) {
+        precondition(rows > 0 && data.count % rows == 0,
+                     "GPUTensor: rows=\(rows) должен делить \(data.count) элементов")
         self.engine = engine
         self.rows = rows; self.cols = data.count / rows; self.n = data.count
-        let bytes = data.count * 4
-        let staging = engine.device.makeBuffer(bytes: data, length: bytes,
-                                               options: .storageModeShared)!
-        let priv = engine.device.makeBuffer(length: bytes, options: .storageModePrivate)!
-        let cmd = engine.queue.makeCommandBuffer()!
-        let blit = cmd.makeBlitCommandEncoder()!
-        blit.copy(from: staging, sourceOffset: 0, to: priv, destinationOffset: 0, size: bytes)
+        let bytes = max(data.count, 1) * 4
+        guard let staging = engine.device.makeBuffer(bytes: data, length: data.count * 4,
+                                               options: .storageModeShared),
+              let priv = engine.device.makeBuffer(length: bytes, options: .storageModePrivate),
+              let cmd = engine.queue.makeCommandBuffer(),
+              let blit = cmd.makeBlitCommandEncoder() else {
+            fatalError(allocationFailureMessage(
+                bytes: bytes,
+                availableBytes: Int(engine.device.recommendedMaxWorkingSetSize)
+                    - engine.device.currentAllocatedSize,
+                what: "тензор \(rows)×\(data.count / max(rows, 1)) (с данными)"))
+        }
+        blit.copy(from: staging, sourceOffset: 0, to: priv, destinationOffset: 0, size: data.count * 4)
         blit.endEncoding()
         cmd.commit()
         cmd.waitUntilCompleted()
@@ -43,25 +51,37 @@ public final class GPUTensor {
     }
 
     func toArray() -> [Float] {
-        let bytes = n * 4
-        let staging = engine.device.makeBuffer(length: bytes, options: .storageModeShared)!
-        let cmd = engine.queue.makeCommandBuffer()!
-        let blit = cmd.makeBlitCommandEncoder()!
-        blit.copy(from: buf, sourceOffset: 0, to: staging, destinationOffset: 0, size: bytes)
+        let bytes = max(n, 1) * 4
+        guard let staging = engine.device.makeBuffer(length: bytes, options: .storageModeShared),
+              let cmd = engine.queue.makeCommandBuffer(),
+              let blit = cmd.makeBlitCommandEncoder() else {
+            fatalError(allocationFailureMessage(
+                bytes: bytes,
+                availableBytes: Int(engine.device.recommendedMaxWorkingSetSize)
+                    - engine.device.currentAllocatedSize,
+                what: "staging-буфер чтения тензора \(rows)×\(cols)"))
+        }
+        blit.copy(from: buf, sourceOffset: 0, to: staging, destinationOffset: 0, size: n * 4)
         blit.endEncoding()
         cmd.commit()
         cmd.waitUntilCompleted()
-        return Array(UnsafeBufferPointer(start: staging.contents().bindMemory(to: Float.self, capacity: n),
+        return Array(UnsafeBufferPointer(start: staging.contents().bindMemory(to: Float.self, capacity: max(n, 1)),
                                          count: n))
     }
 
     /// Запись данных с CPU (staging → private).
     func setData(_ data: [Float]) {
         precondition(data.count == n)
-        let staging = engine.device.makeBuffer(bytes: data, length: n * 4,
-                                               options: .storageModeShared)!
-        let cmd = engine.queue.makeCommandBuffer()!
-        let blit = cmd.makeBlitCommandEncoder()!
+        guard let staging = engine.device.makeBuffer(bytes: data, length: n * 4,
+                                               options: .storageModeShared),
+              let cmd = engine.queue.makeCommandBuffer(),
+              let blit = cmd.makeBlitCommandEncoder() else {
+            fatalError(allocationFailureMessage(
+                bytes: n * 4,
+                availableBytes: Int(engine.device.recommendedMaxWorkingSetSize)
+                    - engine.device.currentAllocatedSize,
+                what: "staging-буфер записи тензора \(rows)×\(cols)"))
+        }
         blit.copy(from: staging, sourceOffset: 0, to: buf, destinationOffset: 0, size: n * 4)
         blit.endEncoding()
         cmd.commit()
@@ -70,8 +90,14 @@ public final class GPUTensor {
 
     func copyFrom(_ src: GPUTensor) {
         precondition(src.n == n)
-        let cmd = engine.queue.makeCommandBuffer()!
-        let blit = cmd.makeBlitCommandEncoder()!
+        guard let cmd = engine.queue.makeCommandBuffer(),
+              let blit = cmd.makeBlitCommandEncoder() else {
+            fatalError(allocationFailureMessage(
+                bytes: n * 4,
+                availableBytes: Int(engine.device.recommendedMaxWorkingSetSize)
+                    - engine.device.currentAllocatedSize,
+                what: "command buffer копирования тензора \(rows)×\(cols)"))
+        }
         blit.copy(from: src.buf, sourceOffset: 0, to: buf, destinationOffset: 0, size: n * 4)
         blit.endEncoding()
         cmd.commit()
@@ -80,10 +106,17 @@ public final class GPUTensor {
 
     /// Точечная запись (для численной проверки градиентов).
     func setValue(_ index: Int, _ value: Float) {
+        precondition(index >= 0 && index < n, "setValue: индекс \(index) вне тензора из \(n)")
         var v = value
-        let staging = engine.device.makeBuffer(bytes: &v, length: 4, options: .storageModeShared)!
-        let cmd = engine.queue.makeCommandBuffer()!
-        let blit = cmd.makeBlitCommandEncoder()!
+        guard let staging = engine.device.makeBuffer(bytes: &v, length: 4, options: .storageModeShared),
+              let cmd = engine.queue.makeCommandBuffer(),
+              let blit = cmd.makeBlitCommandEncoder() else {
+            fatalError(allocationFailureMessage(
+                bytes: 4,
+                availableBytes: Int(engine.device.recommendedMaxWorkingSetSize)
+                    - engine.device.currentAllocatedSize,
+                what: "staging-буфер точечной записи"))
+        }
         blit.copy(from: staging, sourceOffset: 0, to: buf, destinationOffset: index * 4, size: 4)
         blit.endEncoding()
         cmd.commit()
@@ -91,9 +124,16 @@ public final class GPUTensor {
     }
 
     func getValue(_ index: Int) -> Float {
-        let staging = engine.device.makeBuffer(length: 4, options: .storageModeShared)!
-        let cmd = engine.queue.makeCommandBuffer()!
-        let blit = cmd.makeBlitCommandEncoder()!
+        precondition(index >= 0 && index < n, "getValue: индекс \(index) вне тензора из \(n)")
+        guard let staging = engine.device.makeBuffer(length: 4, options: .storageModeShared),
+              let cmd = engine.queue.makeCommandBuffer(),
+              let blit = cmd.makeBlitCommandEncoder() else {
+            fatalError(allocationFailureMessage(
+                bytes: 4,
+                availableBytes: Int(engine.device.recommendedMaxWorkingSetSize)
+                    - engine.device.currentAllocatedSize,
+                what: "staging-буфер точечного чтения"))
+        }
         blit.copy(from: buf, sourceOffset: index * 4, to: staging, destinationOffset: 0, size: 4)
         blit.endEncoding()
         cmd.commit()
@@ -251,10 +291,17 @@ public final class GpuSession {
         enc.setBuffer(target.buf, offset: 0, index: 1)
         enc.setBuffer(out, offset: 0, index: 2)
         enc.setBytes(&nv, length: 4, index: 3)
-        let tg = MTLSize(width: 1024, height: 1, depth: 1)
+        let tg = MTLSize(width: reduceTGWidth, height: 1, depth: 1)
         let groups = MTLSize(width: 1, height: 1, depth: 1)
         enc.dispatchThreadgroups(groups, threadsPerThreadgroup: tg)
         return out
+    }
+
+    /// Потолок threadgroup для редукций: на GPU с малым лимитом потоков
+    /// жёсткие 1024 давали ошибку валидации при энкоде. Ядра редукций
+    /// стридовые — корректны при любом размере группы.
+    private var reduceTGWidth: Int {
+        min(1024, max(1, engine.device.maxThreadsPerThreadgroup.width))
     }
 
     private func setBuffers(_ buf: [MTLBuffer?]) {
@@ -318,6 +365,7 @@ public final class GpuSession {
 
     // R = A + B (поэлементно)
     func add(_ A: GPUTensor, _ B: GPUTensor) -> GPUTensor {
+        precondition(A.n == B.n, "add: \(A.rows)×\(A.cols) и \(B.rows)×\(B.cols) не совпадают")
         let C = GPUTensor(engine: engine, rows: A.rows, cols: A.cols)
         enc.setComputePipelineState(engine.addPS)
         setBuffers([A.buf, B.buf, C.buf])
@@ -337,6 +385,7 @@ public final class GpuSession {
 
     // R = A * B (поэлементно)
     func mul(_ A: GPUTensor, _ B: GPUTensor) -> GPUTensor {
+        precondition(A.n == B.n, "mul: \(A.rows)×\(A.cols) и \(B.rows)×\(B.cols) не совпадают")
         let C = GPUTensor(engine: engine, rows: A.rows, cols: A.cols)
         enc.setComputePipelineState(engine.mulPS)
         setBuffers([A.buf, B.buf, C.buf])
@@ -346,6 +395,7 @@ public final class GpuSession {
 
     // R = A - B (поэлементно)
     func sub(_ A: GPUTensor, _ B: GPUTensor) -> GPUTensor {
+        precondition(A.n == B.n, "sub: \(A.rows)×\(A.cols) и \(B.rows)×\(B.cols) не совпадают")
         let C = GPUTensor(engine: engine, rows: A.rows, cols: A.cols)
         enc.setComputePipelineState(engine.subPS)
         setBuffers([A.buf, B.buf, C.buf])
@@ -424,7 +474,9 @@ public final class GpuSession {
                     _ m: GPUTensor, _ v: GPUTensor, t: Int, lr: Float) {
         enc.setComputePipelineState(engine.adamPS)
         setBuffers([param.buf, grad.buf, m.buf, v.buf])
-        var tv = UInt32(t), lrv = lr
+        // t=0 даёт в ядре знаменатель 1-b^0 = 0 → NaN: bias-correction
+        // определён только с первого шага.
+        var tv = UInt32(max(t, 1)), lrv = lr
         enc.setBytes(&tv, length: 4, index: 4)
         enc.setBytes(&lrv, length: 4, index: 5)
         dispatch(256, 1, param.n, 1)
@@ -604,6 +656,7 @@ public final class GpuSession {
     }
 
     func reluGrad(_ Y: GPUTensor, _ G: GPUTensor) -> GPUTensor {
+        precondition(Y.n == G.n, "reluGrad: \(Y.rows)×\(Y.cols) и \(G.rows)×\(G.cols) не совпадают")
         let C = GPUTensor(engine: engine, rows: Y.rows, cols: Y.cols)
         enc.setComputePipelineState(engine.reluGradPS)
         setBuffers([Y.buf, G.buf, C.buf])
@@ -620,6 +673,7 @@ public final class GpuSession {
     }
 
     func sigmoidGrad(_ Z: GPUTensor, _ G: GPUTensor) -> GPUTensor {
+        precondition(Z.n == G.n, "sigmoidGrad: \(Z.rows)×\(Z.cols) и \(G.rows)×\(G.cols) не совпадают")
         let C = GPUTensor(engine: engine, rows: Z.rows, cols: Z.cols)
         enc.setComputePipelineState(engine.sigmoidGradPS)
         setBuffers([Z.buf, G.buf, C.buf])
@@ -628,6 +682,7 @@ public final class GpuSession {
     }
 
     func addInPlace(_ A: GPUTensor, _ B: GPUTensor) {
+        precondition(A.n == B.n, "addInPlace: \(A.rows)×\(A.cols) и \(B.rows)×\(B.cols) не совпадают")
         enc.setComputePipelineState(engine.addInPlacePS)
         setBuffers([A.buf, B.buf])
         dispatch(256, 1, A.n, 1)
@@ -718,7 +773,7 @@ public final class GpuSession {
         setBuffers([mu.buf, logvar.buf, out])
         setUInt(UInt32(mu.n), index: 3)
         enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
-                                 threadsPerThreadgroup: MTLSize(width: 1024, height: 1, depth: 1))
+                                 threadsPerThreadgroup: MTLSize(width: reduceTGWidth, height: 1, depth: 1))
         return out
     }
 

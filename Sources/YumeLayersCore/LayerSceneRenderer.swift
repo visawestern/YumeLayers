@@ -195,8 +195,14 @@ public func composeLayers(w: Int, h: Int, background: [Float], objects: [Float],
 
 @inline(__always)
 func smoothstep(_ e0: Float, _ e1: Float, _ t: Float) -> Float {
-    let x = min(1, max(0, (t - e0) / max(e1 - e0, 1e-6)))
-    return x * x * (3 - 2 * x)
+    // Поддержка обращённых краёв (e0 > e1): раньше знаменатель клампился
+    // как max(e1-e0, 1e-6), и вызов smoothstep(sunR, sunR*0.6, d) для
+    // «солнца» инвертировался — диск не закрашивался, а всё небо вокруг
+    // заливалось солнечным цветом.
+    let lo = min(e0, e1), hi = max(e0, e1)
+    let x = min(1, max(0, (t - lo) / max(hi - lo, 1e-6)))
+    let s = x * x * (3 - 2 * x)
+    return e1 < e0 ? 1 - s : s
 }
 
 @inline(__always)

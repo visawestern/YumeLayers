@@ -154,7 +154,13 @@ public func prepareCheckpointForTraining(convPath: String,
     if resume { return .keep }
     guard isNonEmptyFile(convPath) else { return .fresh }
     guard let backup = createCheckpointBackup(fromPath: convPath) else { return .fresh }
-    try? FileManager.default.removeItem(atPath: convPath)
+    // Неудавшееся удаление — не «гарантированный старт с новых весов»:
+    // старый файл остался на месте, и resume-логика подхватила бы его.
+    do {
+        try FileManager.default.removeItem(atPath: convPath)
+    } catch {
+        return .fresh
+    }
     return .removed(backup: backup)
 }
 

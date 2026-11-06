@@ -31,7 +31,9 @@ public func buildLargeLayerDataset(url: URL, w: Int, h: Int,
         guard !ds.scenes.isEmpty else { continue }
         if dw == 0 { dw = ds.w; dh = ds.h }
         if ds.w != dw || ds.h != dh { continue }   // все шоты одного размера
-        for (i, sc) in ds.scenes.enumerated() {
+        // Проверка лимита ДО добавления: раньше шот добавлял до
+        // framesPerShot кадров поверх уже набранного лимита (до +11 лишних).
+        for (i, sc) in ds.scenes.enumerated() where allFrames.count < targetFrames {
             allScenes.append(sc)
             allFrames.append(ds.frames[i])
             totalCoverage += objectCoverage(sc)

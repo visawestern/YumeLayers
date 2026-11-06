@@ -54,6 +54,16 @@ public final class ConvLayerGPU {
         self.vW = GPUTensor(engine: engine, rows: oc, cols: fanIn)
         self.mb = GPUTensor(engine: engine, rows: oc, cols: 1)
         self.vb = GPUTensor(engine: engine, rows: oc, cols: 1)
+        // Моменты Adam — такие же аккумуляторы, как eps ниже: приватный
+        // буфер Metal не гарантирует нулевым, а adam_kernel читает m/v до
+        // записи. Обнуляем явно, а не «по счастливой случайности» ОС.
+        let s0 = GpuSession(engine)
+        s0.begin()
+        s0.zeroFill(self.mW)
+        s0.zeroFill(self.vW)
+        s0.zeroFill(self.mb)
+        s0.zeroFill(self.vb)
+        s0.end()
     }
 
     func forward(_ s: GpuSession, _ x: GPUTensor, ih: Int, iw: Int) -> (GPUTensor, ConvCache) {
@@ -465,10 +475,15 @@ public final class ConvVAEGPU {
     }
 
     /// Загрузка весов из checkpoint. Формат: W0,b0,W1,b1,...
+    ///
+    /// Два прохода: сначала валидируются формы ВСЕХ слоёв, и только потом
+    /// копируются веса. Иначе при несовместимом чекпоинте часть слоёв
+    /// успевала перезаписаться до первой ошибки — модель оставалась в
+    /// невалидной смеси старых и случайных весов под лог «старт с новых».
     func load(from mats: [Matrix]) throws {
-        guard mats.count >= 12 else {
+        guard mats.count >= layers.count * 2 else {
             throw NSError(domain: "Yume", code: 10,
-                          userInfo: [NSLocalizedDescriptionKey: "checkpoint: нужно 12 матриц, найдено \(mats.count)"])
+                          userInfo: [NSLocalizedDescriptionKey: "checkpoint: нужно \(layers.count * 2) матриц, найдено \(mats.count)"])
         }
         for (i, layer) in layers.enumerated() {
             let wm = mats[i * 2], bm = mats[i * 2 + 1]
@@ -477,6 +492,9 @@ public final class ConvVAEGPU {
                 throw NSError(domain: "Yume", code: 11,
                               userInfo: [NSLocalizedDescriptionKey: "checkpoint: несовпадение формы слоя \(i)"])
             }
+        }
+        for (i, layer) in layers.enumerated() {
+            let wm = mats[i * 2], bm = mats[i * 2 + 1]
             layer.W.copyFrom(GPUTensor(engine: layer.W.engine, data: wm.data, rows: wm.rows))
             layer.b.copyFrom(GPUTensor(engine: layer.b.engine, data: bm.data, rows: bm.rows))
         }

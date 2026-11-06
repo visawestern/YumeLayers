@@ -568,7 +568,7 @@ public final class MetalEngine {
         C[i] = A[i] + b[gid.y];
     }
 
-    // Прямой backprop входа свёртки: dx[c,y,x] = Σ_{oc,ky,kx} W[oc,c,ky,kx]·dOut[oc, (y+pad-ky)/stride, (x+pad-kx)/stride]
+    // Прямой backprop входа свёртки: dx[c,y,x] = Σ_{oc,ky,kx} W[oc,c,ky,kx]·dOut[oc, y+pad-ky, x+pad-kx] (stride 1)
     // Заменяет материализацию dcols + col2im (шаг 1, без делений на stride).
     kernel void conv_back_input_s1_kernel(
         device const float* dOut [[buffer(0)]],
@@ -584,17 +584,22 @@ public final class MetalEngine {
         uint3 gid [[thread_position_in_grid]])
     {
         uint x = gid.x, y = gid.y, c = gid.z;
+        // Размер ВЫХОДА свёртки, а не входа: раньше границы проверялись по
+        // ih/iw, и при pad != (k-1)/2 читалось за пределами dOut (pad=0,
+        // чтение до 2 лишних строк) либо терялись слагаемые градиента (pad=2).
+        uint oh = ih + 2 * pad - kh + 1;
+        uint ow = iw + 2 * pad - kw + 1;
         float acc = 0.0f;
         for (uint o = 0; o < oc; ++o) {
             uint woff = o * (ic * kh * kw) + c * (kh * kw);
             for (uint ky = 0; ky < kh; ++ky) {
                 int oy = int(y) + int(pad) - int(ky);
-                if (oy < 0 || oy >= int(ih)) continue;
-                uint row = uint(oy) * iw;
+                if (oy < 0 || oy >= int(oh)) continue;
+                uint row = uint(oy) * ow;
                 for (uint kx = 0; kx < kw; ++kx) {
                     int ox = int(x) + int(pad) - int(kx);
-                    if (ox < 0 || ox >= int(iw)) continue;
-                    acc += dOut[o * (ih * iw) + row + uint(ox)] * W[woff + ky * kw + kx];
+                    if (ox < 0 || ox >= int(ow)) continue;
+                    acc += dOut[o * (oh * ow) + row + uint(ox)] * W[woff + ky * kw + kx];
                 }
             }
         }
@@ -1055,10 +1060,15 @@ public final class MetalEngine {
 
     /// C = A (m×k) × B (k×n). Возвращает row-major [Float].
     func multiply(_ a: [Float], _ b: [Float], m: Int, k: Int, n: Int) -> [Float] {
+        // Форма входов проверяется явно: `makeBuffer(bytes:length:)` копирует
+        // ровно m·k·4 байт, и с коротким массивом это было чтение за границей.
+        precondition(a.count == m * k, "multiply: a.count \(a.count) != m·k = \(m * k)")
+        precondition(b.count == k * n, "multiply: b.count \(b.count) != k·n = \(k * n)")
         guard m > 0, k > 0, n > 0,
               let abuf = device.makeBuffer(bytes: a, length: m * k * 4, options: []),
               let bbuf = device.makeBuffer(bytes: b, length: k * n * 4, options: []),
               let cbuf = device.makeBuffer(length: m * n * 4, options: []) else {
+            assertionFailure("multiply: не удалось выделить буферы — возвращаю нули")
             return [Float](repeating: 0, count: m * n)
         }
         guard let cmd = queue.makeCommandBuffer(),

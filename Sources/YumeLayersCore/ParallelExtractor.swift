@@ -335,7 +335,12 @@ final class ParallelExtractor {
 
             let args = [
                 "-hide_banner", "-loglevel", "error",
-                "-ss", String(format: "%.4f", range.start),
+                "-nostdin",
+                // Seek с запасом в полкадра в прошлое и точностью до микросекунды:
+                // округление «вверх» до 0.1 мс отбрасывало кадр ровно на границе
+                // чанка (29.97 fps и т.п.), а дубли не страшны — предыдущий чанк
+                // ограничен своим -frames:v и до этой точки не доходит.
+                "-ss", String(format: "%.6f", max(0, range.start - 0.5 / plan.outputFPS)),
                 "-i", url.path,
                 "-vf", vf,
                 "-frames:v", "\(chunk.frameCount)",
@@ -360,11 +365,26 @@ final class ParallelExtractor {
                 buffer.markFailed()
                 return
             }
+            var gotFrames = 0
             Self.readJpegs(handle: pipe.fileHandleForReading,
                            maxFrames: chunk.frameCount,
                            onCancel: { [self] in isCancelled },
-                           onFrame: { buffer.append($0, at: c) })
+                           onFrame: { jpeg in
+                               gotFrames += 1
+                               buffer.append(jpeg, at: c)
+                           })
             proc.waitUntilExit()
+            // Ошибка декодирования внутри чанка (битые данные, сбой seek)
+            // раньше оставляла чанк «законченным» с нулём кадров — недобор
+            // никто не замечал, completion уходил с успехом.
+            if proc.terminationStatus != 0, !isCancelled {
+                if gotFrames == 0 {
+                    yumeLog("⚠️ ffmpeg: чанк \(c) не выдал ни одного кадра (код \(proc.terminationStatus))")
+                    buffer.markFailed()
+                    return
+                }
+                yumeLog("⚠️ ffmpeg: чанк \(c) завершился с кодом \(proc.terminationStatus), получено \(gotFrames)/\(chunk.frameCount) кадров")
+            }
             buffer.finish(at: c)
         }
 
@@ -449,9 +469,16 @@ final class ParallelExtractor {
         }
         let args = [
             "-hide_banner", "-loglevel", "error",
+            "-nostdin",
             "-threads", "12",
             "-i", url.path,
             "-vf", vf,
+            // Жёсткий предел вывода: без него VFR-источник (screen recording
+            // с заниженным номинальным fps) выдаёт заметно больше кадров, чем
+            // plan.targetFrames; читатель останавливается на лимите, хвост
+            // переполняет буфер пайпа, ffmpeg блокируется на записи —
+            // waitUntilExit висит вечно.
+            "-frames:v", "\(plan.targetFrames)",
             "-f", "image2pipe",
             "-vcodec", "mjpeg",
             "-q:v", "\(Self.jpegQuality)",
@@ -515,6 +542,10 @@ final class ParallelExtractor {
         var count = 0
         var buffer = Data()
         var scan = 0
+        // Защита от битого потока без SOI: без маркера буфер рос до конца
+        // процесса (гигабайты RAM). Кадр в максимуме ~10 МБ — 64 МБ хватает
+        // с многократным запасом.
+        let maxBufferBytes = 64 * 1024 * 1024
         while count < maxFrames {
             if onCancel() { break }
             let chunk = handle.readData(ofLength: 65536)
@@ -537,6 +568,7 @@ final class ParallelExtractor {
                 buffer.removeSubrange(0..<(end + 2))
                 scan = 0
             }
+            if buffer.count > maxBufferBytes { break }
         }
     }
 

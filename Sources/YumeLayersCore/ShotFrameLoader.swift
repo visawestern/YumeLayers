@@ -11,7 +11,10 @@ public func loadShotFrames(url: URL, w: Int, h: Int,
                            start: Double, end: Double,
                            count: Int = 12) throws -> [[Float]] {
     let n = max(count, 2)
-    let times = (0..<n).map { start + (end - start) * Double($0) / Double(n - 1) }
+    // Полуинтервал [start, end): сэмпл с индексом `cut` у детектора — это
+    // ПЕРВЫЙ кадр новой сцены, и сэмпл ровно в `end` давал сцене чужой кадр
+    // (маска против медианы ≈ весь кадр).
+    let times = (0..<n).map { start + (end - start) * Double($0) / Double(n) }
     // Многопоточный программный декод: кадры шота тянутся параллельно.
     let frames = try FrameRGBExtractor.loadFrames(url: url, times: times,
                                                   w: w, h: h)

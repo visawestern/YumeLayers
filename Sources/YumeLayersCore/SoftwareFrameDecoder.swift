@@ -107,10 +107,18 @@ final class SoftwareFrameDecoder {
             if frameNo % 32 == 0 {
                 switch ProcessInfo.processInfo.thermalState {
                 case .critical:
-                    yumeLog("⚠️ извлечение: критический перегрев — пауза 60 с")
-                    Thread.sleep(forTimeInterval: 60)
-                    while ProcessInfo.processInfo.thermalState == .critical {
-                        Thread.sleep(forTimeInterval: 30)
+                    // Пауза до нормы с дедлайном и проверкой отмены: раньше
+                    // cancel() игнорировался минутами, пока не спадёт нагрев.
+                    yumeLog("⚠️ извлечение: критический перегрев — пауза до остывания (не дольше 5 мин)")
+                    let coolDeadline = Date().addingTimeInterval(300)
+                    while ProcessInfo.processInfo.thermalState == .critical,
+                          !isCancelled, Date() < coolDeadline {
+                        Thread.sleep(forTimeInterval: 0.25)
+                    }
+                    if isCancelled {
+                        reader.cancelReading()
+                        completion(.failure(FrameExtractError.cancelled))
+                        return
                     }
                 case .serious:
                     Thread.sleep(forTimeInterval: 0.02)
@@ -134,7 +142,10 @@ final class SoftwareFrameDecoder {
                     let ordinal = writtenSeen + startIndex
                     writtenSeen += 1
                     taken += 1
-                    onFrame(frameNo, target, ordinal, jpeg)
+                    // Контракт onFrame — «номер по порядку» в выдаче, а не
+                    // номер кадра потока: при stride > 1 у frameNo дырки, и
+                    // контрольная выборка по isControlFrame сбивалась с фазы.
+                    onFrame(taken - 1, target, ordinal, jpeg)
                 }
             }
 

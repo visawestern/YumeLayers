@@ -66,6 +66,10 @@ public func runCheck() {
         let mGpu = GPUTensor(engine: engine, rows: 1, cols: 8)
         let vGpu = GPUTensor(engine: engine, rows: 1, cols: 8)
         session.begin()
+        // Эталон предполагает m=v=0 на первом шаге — обнуляем явно: приватный
+        // буфер Metal не гарантированно нулевой.
+        session.zeroFill(mGpu)
+        session.zeroFill(vGpu)
         session.adamUpdate(pGpu, gGpu, mGpu, vGpu, t: 1, lr: 0.001)
         session.end()
         let pNew = pGpu.toArray()
