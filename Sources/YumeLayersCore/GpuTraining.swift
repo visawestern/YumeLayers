@@ -216,6 +216,7 @@ public final class GpuSession {
     /// Синхронное завершение: отправить и дождаться. Сохранён для обратной
     /// совместимости (тесты, eval, короткие прогоны). Семантически равно
     /// `commit().wait()`.
+    @discardableResult
     func end() -> Double {
         return commit().wait()
     }

@@ -63,13 +63,17 @@ final class SoftwareFrameDecoder {
             completion(.failure(FrameExtractError.cancelled)); return
         }
 
-        let duration = CMTimeGetSeconds(asset.duration)
+        guard let time = try? loadAssetDuration(asset) else {
+            completion(.failure(FrameExtractError.unreadableAsset)); return
+        }
+        let duration = CMTimeGetSeconds(time)
         guard duration.isFinite, duration > 0.01 else {
             completion(.failure(FrameExtractError.unreadableAsset)); return
         }
 
+        let tracks = (try? loadVideoTracks(of: asset)) ?? []
         // fps из видео-трека
-        let fps = asset.tracks(withMediaType: .video).first?.nominalFrameRate ?? 24
+        let fps = tracks.first.flatMap { try? loadNominalFrameRate(of: $0) } ?? 24
         let allFrames = max(1, Int(duration * Double(fps)))
 
         // сколько реально берём
@@ -80,7 +84,7 @@ final class SoftwareFrameDecoder {
         let stride = max(1, allFrames / max(target, 1))
 
         let reader = try AVAssetReader(asset: asset)
-        guard let track = asset.tracks(withMediaType: .video).first else {
+        guard let track = tracks.first else {
             completion(.failure(FrameExtractError.unreadableAsset)); return
         }
         // БЕЗ outputSettings: читаем сжатые семплы (как есть), декодируем сами
@@ -153,7 +157,7 @@ final class SoftwareFrameDecoder {
 
     /// Сессия программного декодера: аппаратное ускорение запрещено.
     private static func makeSoftwareSession(formatDescription fmt: CMFormatDescription) throws -> VTDecompressionSession {
-        var spec: [CFString: Any] = [
+        let spec: [CFString: Any] = [
             kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: false
         ]
         var outSession: VTDecompressionSession?

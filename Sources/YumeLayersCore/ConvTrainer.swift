@@ -216,7 +216,7 @@ public struct DataSource {
             if cursor >= c.count { cursor = 0 }
             let idx = cursor
             cursor += 1
-            if var img = c.floatRow(at: idx) {
+            if let img = c.floatRow(at: idx) {
                 return img
             }
             // кадр не декодировался — честно сообщаем и уходим на синтетику
@@ -427,7 +427,7 @@ private func runReconsOn(engine: MetalEngine, items: [(name: String, jpeg: Data)
         }
         let reconGpuMs = session.end()
 
-        // Скважность реконструкций — по фактической температуре, а не
+        // Доля работы реконструкций — по фактической температуре, а не
         // константой. Раньше здесь стояло targetDuty(for: .nominal), то есть
         // жёсткие 55%: ровно та же ошибка, что и с фиксированной паузой между
         // эпохами — карта холодная, а мы её «остужаем» впустую.
@@ -612,10 +612,10 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
     var t = 0
     let start = Date()
     var stepTimes: [Double] = []
-    var pauseMs = Double(max(p.pauseMs, 0))
+    let pauseMs = Double(max(p.pauseMs, 0))
     var stableRun = true   // false, если обнаружен NaN — чекпоинт сохранять нельзя
 
-    // Термо-регулятор. Работает НА КАЖДОМ шаге и управляет скважностью GPU,
+    // Термо-регулятор. Работает НА КАЖДОМ шаге и управляет долей работы GPU,
     // а не только «уровнем тревоги»: 4 ноября 2026 система ушла в панику
     // watchdogd, потому что GPU была занята почти непрерывно и WindowServer
     // не мог получить доступ к тому же устройству 120 секунд подряд.
@@ -633,7 +633,7 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
     var lastTempC: Double? = nil
 
     // Замкнутый контур по температуре GPU. Читаем телеметрию из IORegistry
-    // (без root) раз в 2 секунды и подстраиваем скважность так, чтобы карта
+    // (без root) раз в 2 секунды и подстраиваем долю работы так, чтобы карта
     // держалась ниже порога троттлинга. Пользователь задаёт только потолок
     // («мощность, %»); фактическую нагрузку находит сам контур.
     let gpuSensor = GpuSensor()
@@ -642,7 +642,7 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
     var lastSensorAt = Date.distantPast
     var lastSensorLog = Date.distantPast
     var lastDutyCutAt = Date.distantPast
-    yumeLog(String(format: "Нагрузка GPU: потолок %.0f%% (скважность ≤ %.0f%%), цель %.0f °C",
+    yumeLog(String(format: "Нагрузка GPU: потолок %.0f%% (доля работы ≤ %.0f%%), цель %.0f °C",
                    Double(p.gpuPowerPercent), power.ceiling * 100, power.targetTempC))
 
     // Термо-регулятор: решение принимается НА КАЖДОМ шаге.
@@ -662,7 +662,7 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
             // floorMs — это НЕ «минимальная пауза вообще», а фиксированный
             // режим: он нужен только когда авто-регулятор выключен и нагрузку
             // задаёт поле «Пауза, мс». Если авто включён, полом служит сама
-            // скважность, иначе 250 мс из интерфейса перекрывали бы решение
+            // доля работы, иначе 250 мс из интерфейса перекрывали бы решение
             // контура: при 99% расчётная пауза 1.7 мс, а floor поднимал её
             // до 250 мс — фактическая нагрузка падала до ~40%, и карта
             // не могла догреться до рабочей точки ни при каких настройках.
@@ -711,7 +711,7 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
         yumeLog("Батч: \(effBatch) кадров за шаг (потолок стабильности \(maxSafeBatch); по памяти влезает \(vramBudgetFrames), \(convVAEBytesPerSample(w: pw, h: ph) / 1_048_576) МБ на кадр)")
     }
     // Тензоры под пачку — создаются один раз и живут весь прогон.
-    var inputPool = (0..<effBatch).map { _ in GPUTensor(engine: engine, rows: 3, cols: pw * ph) }
+    let inputPool = (0..<effBatch).map { _ in GPUTensor(engine: engine, rows: 3, cols: pw * ph) }
 
     // «Полный проход» по набору: при пачке >1 число оптимизаторских шагов
     // автоматически сокращается (кадры за шаг = effBatch). Пользовательский
@@ -904,7 +904,7 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
             }
 
             // Термо-регулятор: решение на КАЖДОМ шаге по фактическому времени GPU.
-            // Раз в 2 с пересчитываем скважность по живой температуре карты.
+            // Раз в 2 с пересчитываем долю работы по живой температуре карты.
             if Date().timeIntervalSince(lastSensorAt) >= 2.0 {
                 lastSensorAt = Date()
                 let stats = gpuSensor.read()
@@ -949,7 +949,7 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
             // срезал нагрузку на 10%, а контур тут же возвращал её к потолку,
             // потому что карта холодная (64 °C). В журнале это выглядело как
             // «снижаю нагрузку» без единого реального изменения — ручка
-            // дёргалась туда-сюда, а скважность оставалась 99%.
+            // дёргалась туда-сюда, а доля работы оставалась 99%.
             if lastTempC == nil, decision.level >= .hot,
                Date().timeIntervalSince(lastDutyCutAt) > 120 {
                 lastDutyCutAt = Date()
@@ -1032,11 +1032,11 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
 
 // ---------- Бенчмарк железа ----------
 
-/// Прогрев GPU тем же циклом, что и обучение, с заданной скважностью.
+/// Прогрев GPU тем же циклом, что и обучение, с заданной долей работы.
 ///
 /// Нужен, чтобы откалибровать порог температуры: пока нет замеров, любой
 /// «безопасный процент» — это догадка. Запускает настоящий forward+backward
-/// свёрточного VAE на кадре 856×480, держит скважность `duty` и печатает
+/// свёрточного VAE на кадре 856×480, держит долю работы `duty` и печатает
 /// температуру, частоту и мощность каждые 2 секунды.
 public func runGpuHeat(seconds: Double = 60, duty: Double = 0.85,
                        w: Int = 856, h: Int = 480) {
@@ -1049,8 +1049,8 @@ public func runGpuHeat(seconds: Double = 60, duty: Double = 0.85,
 
     // duty <= 0 — автоматический режим: нагрузку задаёт контур по температуре,
     // ровно как в обучении. Это и есть проверка «работает на грани».
-    // В ОБОИХ режимах потолок — жёсткие 90%: диагностика не имеет права
-    // быть опаснее обучения. Раньше здесь стояло 98% в авто и 100% в ручном.
+    // В ОБОИХ режимах потолок — физический предел 98%: диагностика не имеет
+    // права быть опаснее обучения. Раньше здесь стояло 98% в авто и 100% в ручном.
     let auto = duty <= 0
     let requestedDuty = clampedGpuDuty(duty)
     var power = PowerController(ceiling: safeDutyCap,
@@ -1060,9 +1060,9 @@ public func runGpuHeat(seconds: Double = 60, duty: Double = 0.85,
     yumeLog(String(format: "Прогрев: %@, %d×%d, %@, %.0f с",
                    engine.deviceName, w, h,
                    auto ? String(format: "авто (цель %.0f °C)", power.targetTempC)
-                        : String(format: "скважность %.0f%%", requestedDuty * 100),
+                        : String(format: "доля работы %.0f%%", requestedDuty * 100),
                    seconds))
-    yumeLog(String(format: "Потолок скважности %.0f%% · запрос %.0f%%",
+    yumeLog(String(format: "Потолок доли работы %.0f%% · запрос %.0f%%",
                    safeDutyCap * 100, duty * 100))
     let start = Date()
     var t = 0
@@ -1093,7 +1093,7 @@ public func runGpuHeat(seconds: Double = 60, duty: Double = 0.85,
         }
 
         // Финальный клэмп на месте применения: даже если контур или ручной
-        // запрос когда-нибудь вернут больше, до GPU дойдёт не выше 90%.
+        // запрос когда-нибудь вернут больше, до GPU дойдёт не выше 98%.
         currentDuty = clampedGpuDuty(currentDuty)
         let sleepMs = dutySleepMs(gpuMs: gpuMs, duty: currentDuty, maxPauseMs: 5000)
         if sleepMs > 0 { Thread.sleep(forTimeInterval: sleepMs / 1000) }

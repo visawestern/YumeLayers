@@ -28,9 +28,11 @@ final class ApiServer {
     private var _isExtracting = false
     private var _extractProgress: Double = 0
 
-    var onTrain: (() -> Void)?
+    var onTrain: ((Int, Bool) -> Void)?
     var onStop: (() -> Void)?
     var onExtract: (([String], Int?) -> Void)?
+    /// Прогон проверки текущих кадров: возвращает JSON-отчёт.
+    var testFramesProvider: ((Int) -> String)?
     var screenshotProvider: (() -> String?)?
     var layoutProvider: (() -> String)?
     var stateProvider: (() -> String)?
@@ -182,10 +184,21 @@ final class ApiServer {
             }
         case ("POST", "/api/train"):
             // Обучение запускается ТОЙ ЖЕ функцией и с ТЕМИ ЖЕ параметрами,
-            // что и кнопка «Обучить VAE» в интерфейсе. Никаких параметров из
-            // тела запроса — чтобы изменить параметры, их правят в UI
-            // (кнопка редактирования). Это исключает расхождение API и кнопки.
-            onTrain?()
+            // что и кнопка «Обучить VAE» в интерфейсе. Параметры из тела:
+            // {"maxFrames": N} — учиться только на первых N кадрах
+            // (0 — все кадры); {"resume": true} — продолжить с чекпоинта
+            // без диалога (нужно для API: диалог никто не нажмёт).
+            let limit: Int
+            let resume: Bool
+            if let data = body.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                limit = (obj["maxFrames"] as? Int) ?? 0
+                resume = (obj["resume"] as? Bool) ?? false
+            } else {
+                limit = 0
+                resume = false
+            }
+            onTrain?(limit, resume)
             send(status: 200, body: "{\"ok\":true}", to: conn)
         case ("POST", "/api/stop"):
             onStop?()
@@ -207,6 +220,21 @@ final class ApiServer {
             let maxFrames = obj["maxFrames"] as? Int
             onExtract?(paths, maxFrames)
             send(status: 200, body: "{\"ok\":true}", to: conn)
+        case ("POST", "/api/test-frames"):
+            // Проверка текущих кадров в памяти. Тело: {"count": N}
+            // (0 — все кадры). Отчёт возвращается сразу.
+            let count: Int
+            if let data = body.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                count = (obj["count"] as? Int) ?? 0
+            } else {
+                count = 0
+            }
+            if let provider = testFramesProvider {
+                send(status: 200, body: provider(count), to: conn)
+            } else {
+                send(status: 500, body: "{\"error\":\"no frames\"}", to: conn)
+            }
         default:
             send(status: 404, body: "{\"error\":\"not found\"}", to: conn)
         }

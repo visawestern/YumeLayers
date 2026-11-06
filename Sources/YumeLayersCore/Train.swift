@@ -3,7 +3,6 @@ import Foundation
 
 /// Генератор синтетических сцен: фон-градиент + фигуры + «свет» (одна линия).
 public func makeSyntheticScene<R: RandomNumberGenerator>(w: Int, h: Int, rng: inout R) -> [Float] {
-    let size = min(w, h)
     var img = [Float](repeating: 0, count: w * h * 3)
     let r = Float.random(in: 0.3...0.9, using: &rng)
     let g = Float.random(in: 0.3...0.9, using: &rng)

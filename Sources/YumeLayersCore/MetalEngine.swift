@@ -965,7 +965,6 @@ public final class MetalEngine {
         return lib
     }
 
-    @discardableResult
     private static func runExternal(_ path: String, _ args: [String]) throws {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)

@@ -17,31 +17,27 @@ public func detectSceneShots(url: URL, w: Int, h: Int,
                              scanCount: Int = 240,
                              cutThreshold: Double = 0.18) throws -> [(start: Double, end: Double)] {
     let asset = AVURLAsset(url: url)
-    let duration = CMTimeGetSeconds(asset.duration)
+    guard let time = try? loadAssetDuration(asset) else {
+        throw LayerDatasetError.unreadableVideo(url.path)
+    }
+    let duration = CMTimeGetSeconds(time)
     guard duration.isFinite, duration > 0.5 else {
         throw LayerDatasetError.unreadableVideo(url.path)
     }
     let n = max(scanCount, 8)
-    let gen = AVAssetImageGenerator(asset: asset)
-    gen.appliesPreferredTrackTransform = true
-    gen.maximumSize = CGSize(width: w, height: h)
-    gen.requestedTimeToleranceBefore = .zero
-    gen.requestedTimeToleranceAfter = .zero
+    let times = (0..<n).map { duration * Double($0) / Double(n - 1) }
+    // Многопоточный программный декод всех точек сканирования сразу.
+    let frames = try FrameRGBExtractor.loadFrames(url: url, times: times,
+                                                  w: w, h: h)
 
     var lumas: [Float] = []
     lumas.reserveCapacity(n)
     let px = w * h
-    for i in 0..<n {
-        let t = duration * Double(i) / Double(n - 1)
-        let time = CMTime(seconds: t, preferredTimescale: 600)
-        if let cg = try? gen.copyCGImage(at: time, actualTime: nil),
-           let rgb = decodeImageRGB(cg, w: w, h: h) {
-            var s: Float = 0
-            for p in 0..<px { s += lumaAt(rgb, p) }
-            lumas.append(s / Float(px))
-        } else {
-            lumas.append(0)
-        }
+    for rgb in frames {
+        guard !rgb.isEmpty else { lumas.append(0); continue }
+        var s: Float = 0
+        for p in 0..<px { s += lumaAt(rgb, p) }
+        lumas.append(s / Float(px))
     }
     var diffs: [Double] = []
     diffs.reserveCapacity(n)

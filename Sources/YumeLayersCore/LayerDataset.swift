@@ -253,37 +253,34 @@ public func loadVideoFrames(url: URL, w: Int, h: Int,
                             windowSeconds: Double = 2.0,
                             startSeconds: Double? = nil) throws -> [[Float]] {
     let asset = AVURLAsset(url: url)
-    let duration = CMTimeGetSeconds(asset.duration)
+    guard let time = try? loadAssetDuration(asset) else {
+        throw LayerDatasetError.unreadableVideo(url.path)
+    }
+    let duration = CMTimeGetSeconds(time)
     guard duration.isFinite, duration > 0.01 else {
         throw LayerDatasetError.unreadableVideo(url.path)
     }
-    guard !asset.tracks(withMediaType: .video).isEmpty else {
+    guard let tracks = try? loadVideoTracks(of: asset), !tracks.isEmpty else {
         throw LayerDatasetError.unreadableVideo(url.path)
     }
-    let gen = AVAssetImageGenerator(asset: asset)
-    gen.appliesPreferredTrackTransform = true
-    gen.maximumSize = CGSize(width: w, height: h)
-    gen.requestedTimeToleranceBefore = .zero
-    gen.requestedTimeToleranceAfter = .zero
-
     // Жёсткий потолок на число кадров. Прежний GUI держал 43 187 кадров в
     // оперативке и ронял машину (exit 137); датасет хранит и RGB, и 8 слоёв,
     // так что 64 кадра — осознанная граница, а не случайное число.
     let n = min(max(count, 1), 64)
-    var frames: [[Float]] = []
-    frames.reserveCapacity(n)
-    for t in sampleVideoTimes(count: n, duration: duration,
-                              windowSeconds: windowSeconds,
-                              startSeconds: startSeconds) {
-        var actual = CMTime.zero
-        let time = CMTime(seconds: t, preferredTimescale: 600)
-        let cg = try gen.copyCGImage(at: time, actualTime: &actual)
-        guard let rgb = decodeImageRGB(cg, w: w, h: h) else {
+    let times = sampleVideoTimes(count: n, duration: duration,
+                                 windowSeconds: windowSeconds,
+                                 startSeconds: startSeconds)
+    // Многопоточный программный декод: кадры тянутся параллельно, а не по одному.
+    do {
+        let frames = try FrameRGBExtractor.loadFrames(url: url, times: times,
+                                                      w: w, h: h)
+        guard frames.count == times.count, frames.allSatisfy({ !$0.isEmpty }) else {
             throw LayerDatasetError.badFrame(url.lastPathComponent)
         }
-        frames.append(rgb)
+        return frames
+    } catch {
+        throw LayerDatasetError.badFrame(url.lastPathComponent)
     }
-    return frames
 }
 
 // MARK: - Конвейер под ключ

@@ -3,6 +3,7 @@
 import AppKit
 import AVKit
 import Metal
+import ImageIO
 import UniformTypeIdentifiers
 
 final class FlippedView: NSView { override var isFlipped: Bool { true } }
@@ -149,7 +150,7 @@ final class EditableValueControl: NSView {
     let controlWidth: CGFloat
     var onCommit: ((String) -> Void)?
 
-    init(value: String, width: CGFloat = 120) {
+    init(value: String, width: CGFloat = 150) {
         controlWidth = width
         super.init(frame: .zero)
         committedValue = value
@@ -238,7 +239,12 @@ final class EditableValueControl: NSView {
         if controlWidth > 0 {
             constraints.append(widthAnchor.constraint(equalToConstant: controlWidth))
             constraints.append(fieldContainer.widthAnchor.constraint(equalToConstant: max(60, controlWidth - 34)))
-            constraints.append(field.widthAnchor.constraint(equalToConstant: max(30, controlWidth - 34 - 58)))
+            // Поле внутри контейнера растягивается на всю доступную ширину
+            // (между кнопками ✓/✕), а не зажато в 30px — иначе даже
+            // 2 цифры не видны при редактировании.
+            field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            constraints.append(field.widthAnchor.constraint(greaterThanOrEqualToConstant: 44))
         } else {
             // Гибкая ширина (для длинных путей): значение и поле тянутся на всю строку.
             valueLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -483,7 +489,25 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
     private var extractStartTime = Date()
     private var trainStartTime = Date()
     private var lastCollageRender = Date.distantPast
-    private var lastExtractBigRender = Date.distantPast
+
+    // Асинхронная выдача извлечённых кадров: фон складывает кадры в буфер,
+    // main thread забирает их пачками по таймеру. Так на 44 000 кадров
+    // не приходится 44 000 обновлений интерфейса.
+    private struct PendingExtractFrame {
+        let name: String
+        let jpeg: Data
+        let source: String
+        let isControl: Bool
+    }
+    private let extractBatch = ExtractBatchPolicy()
+    private let pendingExtractLock = NSLock()
+    private var pendingExtractFrames: [PendingExtractFrame] = []
+    private var pendingExtractProgress: Double = 0
+    private var pendingExtractDone = 0
+    private var extractTotalAll = 0
+    private var extractFlushTimer: Timer?
+    private var lastExtractFlush = Date.distantPast
+    private var flushedFirstExtractBatch = false
     private let carouselPrev = NSButton(image: NSImage(systemSymbolName: "chevron.left", accessibilityDescription: "Назад")!, target: nil, action: nil)
     private let carouselNext = NSButton(image: NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Вперёд")!, target: nil, action: nil)
     private let carouselFirst = NSButton(image: NSImage(systemSymbolName: "chevron.left.to.line", accessibilityDescription: "В начало")!, target: nil, action: nil)
@@ -534,7 +558,7 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
     private var lastEpoch = 0
     private let api = ApiServer()
     private var layoutViews: [String: NSView] = [:]
-    private var debugGrids: [NSGridView] = []
+    private var debugGrids: [NSView] = []
     private var lastParams = Params()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -548,8 +572,8 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
         }
         // API /api/train запускает ТУ ЖЕ функцию, что и кнопка «Обучить VAE»
         // (та же логика бэкапа/диалога и те же параметры из интерфейса).
-        api.onTrain = { [weak self] in
-            DispatchQueue.main.async { self?.startTraining() }
+        api.onTrain = { [weak self] maxFrames, resume in
+            DispatchQueue.main.async { self?.startTraining(maxFrames: maxFrames, resume: resume) }
         }
         api.onStop = { [weak self] in
             DispatchQueue.main.async { self?.stopTraining() }
@@ -564,6 +588,37 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
                 // Тот же запуск извлечения, что и у кнопки «Вытащить кадры».
                 self.startExtraction(urls: self.videoURLs, append: false, maxFrames: maxFrames ?? 0)
             }
+        }
+        // /api/test-frames: проверка текущих кадров в памяти (JPEG-сигнатура,
+        // декодирование, имена). count — сколько кадров проверить (0 — все).
+        api.testFramesProvider = { [weak self] count in
+            guard let self = self else { return "{\"error\":\"no window\"}" }
+            var report = ""
+            DispatchQueue.main.sync {
+                func decodeJPEG(_ data: Data) -> Bool {
+                    guard let src = CGImageSourceCreateWithData(data as CFData, nil)
+                    else { return false }
+                    return CGImageSourceCreateImageAtIndex(src, 0, nil) != nil
+                }
+                let r = frameValidation(frames: self.framesStore, limit: count,
+                                        decode: decodeJPEG)
+                self.log("Проверка кадров: \(r.checked) проверено, \(r.passed) ок, \(r.failed) провалов")
+                for issue in r.issues.prefix(10) {
+                    self.log("  \(issue)")
+                }
+                let obj: [String: Any] = [
+                    "ok": true,
+                    "total": self.framesStore.count,
+                    "requested": r.requested,
+                    "checked": r.checked,
+                    "passed": r.passed,
+                    "failed": r.failed,
+                    "issues": Array(r.issues.prefix(20)),
+                ]
+                report = (try? String(data: JSONSerialization.data(withJSONObject: obj),
+                                      encoding: .utf8)) ?? "{}"
+            }
+            return report
         }
         api.screenshotProvider = { [weak self] in
             guard let self = self else { return nil }
@@ -739,15 +794,20 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
         return l
     }
 
-    /// Единая сетка строк: подпись + кнопка info + поле (все поля выровнены по одной линии).
+    /// Строка формы, которая растягивается на всю ширину карточки:
+    /// [надпись | ⓘ | …поле…] — поле занимает всё расстояние от кнопки
+    /// info до правого края строки/колонки.
+    private final class StretchRow: NSStackView {}
+
+    /// Строка формы: [надпись | ⓘ | …поле…] — кнопка info сразу после
+    /// надписи, поле растягивается на всё расстояние до правого края.
     /// `info` — полное описание для выпадающей карточки.
     private let labelW: CGFloat = 141
-    private let fieldW: CGFloat = 106
     private let rowGap: CGFloat = 6
     private let accW: CGFloat = 76
     private let infoW: CGFloat = 16
 
-    private func fieldRow(_ label: String, _ field: NSTextField, tooltip: String? = nil, accessory: NSView? = nil, info: String? = nil) -> NSGridView {
+    private func fieldRow(_ label: String, _ field: NSTextField, tooltip: String? = nil, accessory: NSView? = nil, info: String? = nil) -> StretchRow {
         let l = NSTextField(labelWithString: label)
         l.font = NSFont.systemFont(ofSize: 12)
         l.textColor = .secondaryLabelColor
@@ -756,54 +816,64 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
         field.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)
         field.alignment = .natural
         field.bezelStyle = .roundedBezel
-        field.widthAnchor.constraint(equalToConstant: fieldW).isActive = true
         field.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        // Поле занимает всё расстояние от кнопки info до правого края строки.
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        field.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
         if let tip = tooltip { field.toolTip = tip }
-        // Сетка: [лейбл | поле | кнопка | ⓘ] — поле и кнопка в одной
-        // колонке по всем карточкам, подсказка ⓘ — по правому краю.
-        var row: [NSView] = [l, field]
+
+        var views: [NSView] = [l]
+        if let infoText = info {
+            views.append(makeInfoButton(infoText))
+        }
+        views.append(field)
         if let acc = accessory {
             acc.widthAnchor.constraint(equalToConstant: accW).isActive = true
             acc.heightAnchor.constraint(equalToConstant: 26).isActive = true
-            row.append(acc)
+            views.append(acc)
         }
-        if let infoText = info {
-            row.append(makeInfoButton(infoText))
-        }
-        let g = NSGridView(views: [row])
-        g.column(at: 0).width = labelW
-        g.rowSpacing = 8
-        g.columnSpacing = rowGap
-        var total = labelW + rowGap + fieldW
-        if info != nil { total += rowGap + infoW }
-        if accessory != nil { total += rowGap + accW }
-        g.widthAnchor.constraint(equalToConstant: total).isActive = true
-        debugGrids.append(g)
-        return g
+        return makeStretchRow(views)
     }
 
-    /// Строка с редактируемым значением (лейбл-значение ⇄ текстбокс + ✓/✕).
-    /// Сетка: [лейбл | значение ✏️ | ⓘ] — значения всех строк выровнены
-    /// по одной колонке, подсказка ⓘ стоит по правому краю карточки.
-    private func valueRow(_ label: String, _ ctl: EditableValueControl, info: String? = nil) -> NSGridView {
+    /// Строка с редактируемым значением: [надпись | ⓘ | …поле…].
+    /// Кнопка info — сразу после надписи, значение/поле занимают всё
+    /// расстояние от неё до правого края строки.
+    private func valueRow(_ label: String, _ ctl: EditableValueControl, info: String? = nil) -> StretchRow {
         let l = NSTextField(labelWithString: label)
         l.font = NSFont.systemFont(ofSize: 12)
         l.textColor = .secondaryLabelColor
         l.alignment = .left
         l.lineBreakMode = .byTruncatingTail
-        var row: [NSView] = [l, ctl]
+        var views: [NSView] = [l]
         if let infoText = info {
-            row.append(makeInfoButton(infoText))
+            views.append(makeInfoButton(infoText))
         }
-        let g = NSGridView(views: [row])
-        g.column(at: 0).width = labelW
-        g.rowSpacing = 8
-        g.columnSpacing = rowGap
-        var total = labelW + rowGap + ctl.controlWidth
-        if info != nil { total += rowGap + infoW }
-        g.widthAnchor.constraint(equalToConstant: total).isActive = true
-        debugGrids.append(g)
-        return g
+        // Разделитель с низким приоритетом: всё свободное расстояние
+        // скапливается между кнопкой info и полем (justify-space-between),
+        // а поле прижато к правому краю строки.
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        views.append(spacer)
+        views.append(ctl)
+        return makeStretchRow(views)
+    }
+
+    private func makeStretchRow(_ views: [NSView]) -> StretchRow {
+        let row = StretchRow(views: views)
+        row.orientation = .horizontal
+        row.distribution = .fill
+        row.alignment = .centerY
+        row.spacing = rowGap
+        row.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        // Надпись не ужимается: вся лишняя ширина уходит разделителю.
+        if let l = views.first as? NSTextField {
+            l.setContentHuggingPriority(.required, for: .horizontal)
+            l.setContentCompressionResistancePriority(.required, for: .horizontal)
+        }
+        debugGrids.append(row)
+        return row
     }
 
     /// Компактная строка переключателя (как в web-admin-panels): switch + лейбл.
@@ -938,8 +1008,11 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
         browseButton.imagePosition = .imageLeading
         browseButton.controlSize = .small
 
-        // Карточка-группа в стиле Apple (группировка как в Vuexy/AdminLTE)
-        func groupCard(title: String, content: NSView) -> NSView {
+        // Карточка-группа в стиле Apple (группировка как в Vuexy/AdminLTE).
+        // Раскладка — вручную через ограничения, без промежуточного стека:
+        // так строки формы гарантированно растягиваются на всю ширину
+        // карточки (никаких круговых зависимостей NSStackView).
+        func groupCard(title: String, contentViews: [NSView], spacing: CGFloat) -> NSView {
             let card = NSVisualEffectView()
             card.material = .contentBackground
             card.blendingMode = .withinWindow
@@ -951,20 +1024,35 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
             card.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.45).cgColor
 
             let titleLabel = sectionHeader(title)
-            let stack = NSStackView(views: [titleLabel, content])
-            stack.orientation = .vertical
-            stack.spacing = 12
-            stack.alignment = .leading
-            stack.translatesAutoresizingMaskIntoConstraints = false
-            card.addSubview(stack)
-            // Горизонтально — к левому краю. Содержимое компактно, поэтому вертикально
-            // оно центрируется само: карточка по высоте равна контенту.
+            titleLabel.translatesAutoresizingMaskIntoConstraints = false
+            card.addSubview(titleLabel)
             NSLayoutConstraint.activate([
-                stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 16),
-                stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -16),
-                stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
-                stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+                titleLabel.topAnchor.constraint(equalTo: card.topAnchor, constant: 16),
+                titleLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+                titleLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
             ])
+
+            var previous: NSView = titleLabel
+            for v in contentViews {
+                card.addSubview(v)
+                v.translatesAutoresizingMaskIntoConstraints = false
+                NSLayoutConstraint.activate([
+                    v.topAnchor.constraint(equalTo: previous.bottomAnchor, constant: spacing),
+                    v.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+                ])
+                // Строки формы растягиваются на всю ширину карточки; всё
+                // остальное (кнопки, блоки прогресса, подсказки) прижато
+                // к левому краю без растяжения.
+                if v is StretchRow {
+                    v.trailingAnchor.constraint(equalTo: card.trailingAnchor,
+                                                constant: -16).isActive = true
+                }
+                previous = v
+            }
+            if let last = contentViews.last {
+                last.bottomAnchor.constraint(equalTo: card.bottomAnchor,
+                                            constant: -16).isActive = true
+            }
             return card
         }
 
@@ -1005,16 +1093,10 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
                                                  eta: extractEtaLabel)
         extractProgressBlock.widthAnchor.constraint(equalToConstant: 340).isActive = true
 
-        let dataContent = NSStackView(views: [
-            folderRow,
-            extractRow,
-            extractProgressBlock,
-            extractHint,
-        ])
-        dataContent.orientation = .vertical
-        dataContent.spacing = 12
-        dataContent.alignment = .leading
-        let dataPage = groupCard(title: "1. Видео", content: dataContent)
+        let dataPage = groupCard(title: "1. Видео",
+                                 contentViews: [folderRow, extractRow,
+                                                extractProgressBlock, extractHint],
+                                 spacing: 12)
 
         // Шаг 2 — Параметры обучения
         resetParamsButton.target = self
@@ -1033,8 +1115,8 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
         epochsCtl.onCommit = { [weak self] _ in self?.epochsEditedByUser = true }
         stepsCtl.onCommit = { [weak self] _ in self?.stepsEditedByUser = true }
         lrCtl.onCommit = { [weak self] _ in self?.lrEditedByUser = true }
-        let paramsContent = NSStackView(views: [
-            // «Продолжить» — в самом верху, чтобы сразу было ясно продолжаем или нет.
+        let paramsPage = groupCard(title: "2. Параметры обучения",
+                                   contentViews: [
             switchRow("Продолжить обучение", resumeSwitch,
                       tooltip: "Продолжить с чекпоинта: обучение начнётся с последнего сохранения"),
             valueRow("Эпохи:", epochsCtl,
@@ -1042,25 +1124,21 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
             valueRow("Шагов за эпоху:", stepsCtl,
                      info: "Сколько обновлений весов выполняется за одну эпоху. Один шаг = обработка одного кадра + обновление весов."),
             valueRow("Размер батча:", batchCtl,
-                     info: "Сколько кадров обрабатывается за один шаг обучения. Больший батч быстрее проходит эпоху при той же тепловой нагрузке: регулятор держит скважность GPU, а не число шагов. Верхняя граница — по свободной памяти GPU."),
+                     info: "Сколько кадров обрабатывается за один шаг обучения. Больший батч быстрее проходит эпоху при той же тепловой нагрузке: регулятор держит долю работы GPU, а не число шагов. Верхняя граница — по свободной памяти GPU."),
             valueRow("Скорость обучения:", lrCtl,
                      info: "Размер шага градиентного спуска (learning rate). Слишком большое значение — расходимость/NaN, слишком малое — очень медленное обучение. По умолчанию 0.0003."),
             valueRow("Пауза, мс:", pauseCtl,
                      info: "Фиксированная пауза после каждого шага, в миллисекундах. Работает только когда «Авто-пауза (нагрев)» выключена: тогда нагрузка постоянная и равна этой паузе. При включённом авто-режиме паузу считает регулятор по температуре, и это поле не используется."),
-            valueRow("Нагрузка GPU, % (≤90):", powerCtl,
-                     info: "Потолок нагрузки. 90 — GPU занята 90% времени, 10% оставлено системе и WindowServer; это жёсткий предохранитель после перезагрузки из-за перегрева 4 ноября 2026, значения выше 90 игнорируются. Фактическую нагрузку регулятор подбирает сам по температуре видеокарты: держит рабочую точку 82 °C, потолок 85 °C, при 86 °C уходит на принудительное остывание."),
+            valueRow("Нагрузка GPU, % (≤98):", powerCtl,
+                     info: "Потолок нагрузки: сколько процентов времени GPU занята работой. Значение читается как есть (например, 98 — GPU занята 98% времени). Верхняя граница 98% — физический предел, при котором WindowServer получает слоты между нашими command buffer'ами; полностью непрерывная очередь приводила к перезагрузке 4 ноября 2026. Фактическую нагрузку регулятор подбирает по температуре: рабочая точка 82 °C, потолок 85 °C, при 86 °C — принудительное остывание."),
             switchRow("Авто-пауза (нагрев)", adaptiveSwitch,
                       tooltip: "Авто-пауза при перегреве: регулятор сам подбирает нагрузку по температуре GPU — держит максимум, который не ведёт к перезагрузке"),
             autoTuneButton,
             resetParamsButton,
-        ])
-        paramsContent.orientation = .vertical
-        paramsContent.spacing = 10
-        paramsContent.alignment = .leading
-        let paramsPage = groupCard(title: "2. Параметры обучения", content: paramsContent)
+        ], spacing: 10)
 
         trainButton.target = self
-        trainButton.action = #selector(startTraining)
+        trainButton.action = #selector(startTraining as () -> Void)
         trainButton.bezelStyle = .rounded
         trainButton.keyEquivalent = "\r"
         trainButton.controlSize = .large
@@ -1132,7 +1210,8 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
         hint.widthAnchor.constraint(equalToConstant: 360).isActive = true
 
         // Шаг 3 — Запуск
-        let runContent = NSStackView(views: [
+        let runPage = groupCard(title: "3. Запуск",
+                                contentViews: [
             runButtons,
             trainProgressBlock,
             trainLiveBlock,
@@ -1140,11 +1219,7 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
             pathBlock("Файл VAE:", convPathCtl,
                       info: "Путь к файлу, в который сохраняется обученная модель (чекпоинт, safetensors). Можно указать любой файл, например ~/YumeLayers/checkpoints/my_vae.safetensors."),
             hint,
-        ])
-        runContent.orientation = .vertical
-        runContent.spacing = 10
-        runContent.alignment = .leading
-        let runPage = groupCard(title: "3. Запуск", content: runContent)
+        ], spacing: 10)
 
         for p in [dataPage, paramsPage, runPage] {
             p.widthAnchor.constraint(equalToConstant: 392).isActive = true
@@ -2075,6 +2150,8 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
         extractedCount = 0
         skippedBlackTotal = 0
         extractStartTime = Date()
+        resetExtractBatch()
+        startExtractFlushTimer()
         log("=== Извлечение кадров ===")
         for (i, u) in urls.enumerated() {
             log("Видео \(i + 1)/\(urls.count): \(u.lastPathComponent)")
@@ -2092,6 +2169,7 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
                 }
                 return
             }
+            DispatchQueue.main.async { self.extractTotalAll = totalAll }
 
             let sem = DispatchSemaphore(value: 0)
             var lastResult: Result<Void, Error> = .success(())
@@ -2119,27 +2197,16 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
                     onFrame: { [weak self] idx, _, ordinal, jpeg in
                         guard let self = self else { return }
                         globalDone += 1
-                        let delivered = globalDone
-                        DispatchQueue.main.async {
-                            self.extractedCount += 1
-                            let p = Double(delivered) / Double(totalAll)
-                            self.setExtractProgress(p, done: self.extractedCount, total: totalAll)
-                            self.api.updateExtractProgress(p)
-                            let name = String(format: "frame_%04d.jpg", ordinal)
-                            self.addCarouselItem(name: name, jpeg: jpeg, source: u.lastPathComponent,
-                                                 epoch: delivered - 1)
+                        // Только складываем в буфер: интерфейс забирает
+                        // кадры пачками по таймеру, а не на каждый кадр.
+                        let name = String(format: "frame_%04d.jpg", ordinal)
+                        self.enqueueExtractedFrame(
+                            name: name, jpeg: jpeg, source: u.lastPathComponent,
                             // Контрольная выборка: первый кадр каждой секунды видео.
-                            if isControlFrame(index: idx, fps: fps) {
-                                self.controlFramesStore.append(MemoryFrame(name: name, jpeg: jpeg,
-                                                                          source: u.lastPathComponent))
-                            }
-                        }
+                            isControl: isControlFrame(index: idx, fps: fps))
                     },
-                    progress: { p in
-                        DispatchQueue.main.async {
-                            self.setExtractProgress(p, done: Int(p * Double(totalAll)), total: totalAll)
-                            self.api.updateExtractProgress(p)
-                        }
+                    progress: { [weak self] p in
+                        self?.storeExtractProgress(p, done: Int(p * Double(totalAll)))
                     },
                     completion: { result in
                         DispatchQueue.main.async { self.skippedBlackTotal += extractor.skippedLeadingBlack }
@@ -2160,6 +2227,9 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
 
     /// Финализация извлечения: общий статус, кнопки, лог.
     private func finishExtraction(_ result: Result<Void, Error>) {
+        stopExtractFlushTimer()
+        // Забираем остаток буфера, чтобы ни один кадр не потерялся.
+        flushExtractBatch(force: true)
         isExtracting = false
         currentExtractor = nil
         api.setExtractingActive(false)
@@ -2177,9 +2247,11 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
                 log("Пропущено чёрных кадров в начале видео: \(skippedBlackTotal)")
             }
             autoTuneParams(frames: framesStore.count)
-            // Показываем последний добавленный кадр в центре коллажа.
+            // Остаёмся на первой странице: в коллаже первые 10 кадров,
+            // остальные доступны через пагинацию.
             if !framesStore.isEmpty {
-                selectedFrameIndex = framesStore.count - 1
+                carouselPage = 0
+                selectedFrameIndex = min(pageSize - 1, framesStore.count - 1)
                 renderCollagePage()
             }
         case .failure(FrameExtractError.cancelled):
@@ -2191,42 +2263,111 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Добавление кадра в память. `processed` = true только когда кадр обработан
-    /// моделью (тогда ставится галочка ✓).
-    /// Во время извлечения используется лёгкий рендер (только большая картинка
-    /// текущим кадром раз в секунду) — полный коллаж не перерисовывается.
-    private func addCarouselItem(name: String, jpeg: Data, source: String = "",
-                                 epoch: Int, processed: Bool = false) {
-        framesStore.append(MemoryFrame(name: name, jpeg: jpeg, source: source))
-        processedFrames.append(processed)
-        selectedFrameIndex = framesStore.count - 1
-        if ProcessInfo.processInfo.environment["YUME_NO_RENDER"] == nil {
-            if isExtracting {
-                renderExtractLive()
-            } else {
-                renderCollagePage()
-            }
-        }
+    /// Кладём кадр в буфер, который main thread забирает пачками.
+    /// Вызывается из фонового потока извлечения — без обновления UI.
+    private func enqueueExtractedFrame(name: String, jpeg: Data, source: String,
+                                       isControl: Bool) {
+        pendingExtractLock.lock()
+        pendingExtractFrames.append(PendingExtractFrame(name: name, jpeg: jpeg,
+                                                        source: source,
+                                                        isControl: isControl))
+        pendingExtractLock.unlock()
     }
 
-    /// Лёгкий рендер во время извлечения: первые 10 кадров показываем полным
-    /// коллажем, дальше — только большую картинку текущего кадра, не чаще
-    /// раза в секунду (экономит ресурсы на десятках тысяч кадров).
-    private func renderExtractLive() {
-        framesChip.setCount(framesStore.count)
-        let n = framesStore.count
-        if n <= 10 {
-            renderCollagePage()
-            lastExtractBigRender = Date()
-            return
+    private func storeExtractProgress(_ p: Double, done: Int) {
+        pendingExtractLock.lock()
+        pendingExtractProgress = p
+        pendingExtractDone = done
+        pendingExtractLock.unlock()
+    }
+
+    private func resetExtractBatch() {
+        pendingExtractLock.lock()
+        pendingExtractFrames.removeAll()
+        pendingExtractProgress = 0
+        pendingExtractDone = 0
+        pendingExtractLock.unlock()
+        extractTotalAll = 0
+        lastExtractFlush = Date.distantPast
+        flushedFirstExtractBatch = false
+    }
+
+    /// Таймер на main thread забирает накопленные кадры пачками.
+    /// 200 мс достаточно, чтобы первые кадры появились почти сразу,
+    /// и при этом на 44 000 кадров не приходится 44 000 обновлений UI.
+    private func startExtractFlushTimer() {
+        stopExtractFlushTimer()
+        lastExtractFlush = Date()
+        let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
+            self?.flushExtractBatch()
         }
+        RunLoop.main.add(timer, forMode: .common)
+        extractFlushTimer = timer
+    }
+
+    private func stopExtractFlushTimer() {
+        extractFlushTimer?.invalidate()
+        extractFlushTimer = nil
+    }
+
+    /// Забирает пачку из буфера и добавляет кадры в интерфейс.
+    /// - Parameter force: забрать всё, даже неполную пачку (финализация/остановка).
+    private func flushExtractBatch(force: Bool = false) {
         let now = Date()
-        guard now.timeIntervalSince(lastExtractBigRender) >= 1.0 else { return }
-        lastExtractBigRender = now
-        let sel = min(max(0, selectedFrameIndex), framesStore.count - 1)
-        collageBig.image = NSImage(data: framesStore[sel].jpeg)
-        collageBig.toolTip = "Кадр \(sel + 1)"
-        collageBigBadge.isHidden = !processedFrames[sel]
+        let elapsedMs = now.timeIntervalSince(lastExtractFlush) * 1000
+
+        pendingExtractLock.lock()
+        let pending = pendingExtractFrames.count
+        let due = force || extractBatch.shouldFlush(pending: pending,
+                                                    sinceLastFlushMs: elapsedMs,
+                                                    flushedFirstBatch: flushedFirstExtractBatch)
+        var batch: [PendingExtractFrame] = []
+        if due && pending > 0 {
+            batch = pendingExtractFrames
+            pendingExtractFrames.removeAll(keepingCapacity: true)
+        }
+        let progress = pendingExtractProgress
+        let done = pendingExtractDone
+        pendingExtractLock.unlock()
+
+        if !batch.isEmpty {
+            lastExtractFlush = now
+            flushedFirstExtractBatch = true
+            appendExtractedFrames(batch)
+        }
+        // Прогресс обновляем на тике таймера, а не на каждый кадр.
+        setExtractProgress(progress, done: done, total: extractTotalAll)
+        api.updateExtractProgress(progress)
+    }
+
+    /// Добавление пачки кадров в память. `processed` = true только когда кадр
+    /// обработан моделью (тогда ставится галочка ✓).
+    private func appendExtractedFrames(_ batch: [PendingExtractFrame]) {
+        let totalBefore = framesStore.count
+        for item in batch {
+            framesStore.append(MemoryFrame(name: item.name, jpeg: item.jpeg,
+                                           source: item.source))
+            processedFrames.append(false)
+            if item.isControl {
+                controlFramesStore.append(MemoryFrame(name: item.name, jpeg: item.jpeg,
+                                                      source: item.source))
+            }
+        }
+        extractedCount += batch.count
+        if selectedFrameIndex < 0 && !framesStore.isEmpty {
+            selectedFrameIndex = 0
+        }
+        // Пока заполняется первая страница — показываем кадры по мере
+        // поступления. Дальше только пагинация: остальные кадры грузятся
+        // по клику, а не на каждый извлечённый кадр.
+        if extractBatch.shouldRenderCollage(page: carouselPage,
+                                            totalBefore: totalBefore,
+                                            totalAfter: framesStore.count,
+                                            pageSize: pageSize) {
+            renderCollagePage()
+        } else {
+            updatePagination()
+        }
     }
 
     private func clearCarousel() {
@@ -2316,6 +2457,21 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
         carouselLast.isEnabled = carouselPage < pages - 1
     }
 
+    /// Обновляет счётчик кадров и пагинацию, не трогая картинки.
+    /// Используется во время извлечения: новые кадры сразу доступны
+    /// по страницам, но коллаж не перерисовывается на каждый кадр.
+    private func updatePagination() {
+        framesChip.setCount(framesStore.count)
+        let total = framesStore.count
+        let pages = max(1, (total + pageSize - 1) / pageSize)
+        carouselPage = min(max(0, carouselPage), pages - 1)
+        renderPageDots(pages: pages)
+        carouselPrev.isEnabled = carouselPage > 0
+        carouselNext.isEnabled = carouselPage < pages - 1
+        carouselFirst.isEnabled = carouselPage > 0
+        carouselLast.isEnabled = carouselPage < pages - 1
+    }
+
     /// Клик по малому кадру — ставит его в центр коллажа.
     @objc private func thumbClicked(_ sender: NSButton) {
         let off = frameOffset(forSlot: sender.tag)
@@ -2341,6 +2497,16 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func startTraining() {
+        startTraining(maxFrames: 0, resume: false)
+    }
+
+    /// Запуск обучения. `maxFrames` > 0 — учиться только на первых N кадрах
+    /// (для тестов вместо полного датасета). 0 — все кадры.
+    /// `resume` = true — продолжить с существующего чекпоинта без диалога
+    /// (используется API; в UI решение принимает человек).
+    private func startTraining(maxFrames: Int, resume: Bool) {
+        log("startTraining(maxFrames=\(maxFrames), resume=\(resume))")
+        log("guards: isTraining=\(isTraining) isReconstructing=\(isReconstructing) isExtracting=\(isExtracting) sheet=\(window.attachedSheet != nil)")
         guard !isTraining, !isReconstructing, !isExtracting, window.attachedSheet == nil else { return }
         window.makeFirstResponder(nil)
         var p = Params()
@@ -2351,11 +2517,12 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
         p.batch = max(1, batchCtl.intValue(def: 1))
         p.lr = Float(lrCtl.doubleValue(def: 0.0005))
         p.pauseMs = max(0, pauseCtl.intValue(def: 250))
-        // Жёсткий потолок 90%: поле не должно обещать то, что регулятор
-        // всё равно не даст. Раньше 100% молча превращались в 90%.
+        // Поле читается как есть; ограничиваем только физическим пределом,
+        // чтобы интерфейс не обещал недостижимое.
         p.gpuPowerPercent = min(max(powerCtl.intValue(def: defaultGpuPowerPercent), 10),
                                 Int(safeDutyCap * 100))
         p.resume = resumeSwitch.state == .on
+        if resume { p.resume = true }   // API: продолжить с чекпоинта без диалога
         p.adaptiveThrottle = adaptiveSwitch.state == .on
         p.convPath = (convPathCtl.stringValue as NSString).expandingTildeInPath
 
@@ -2365,39 +2532,25 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Перед стартом новой сессии — бэкап существующих чекпоинтов (всегда),
-        // чтобы случайно не занулить накопленные вычисления при забытом resume.
-        if existingNonEmptyCheckpoint(p.convPath), createCheckpointBackup(fromPath: p.convPath) == nil {
-            log("Не удалось создать резервную копию модели. Проверьте права доступа и свободное место.")
-            return
+        // Подготовка чекпоинта: при resume=false старый чекпоинт удаляется
+        // (с бэкапом), и обучение всегда начинается с новых весов — без
+        // диалогов. При resume=true файл сохраняется для дообучения.
+        switch prepareCheckpointForTraining(convPath: p.convPath, resume: p.resume) {
+        case .keep:
+            log("Режим: продолжение с чекпоинта")
+        case .fresh:
+            log("Чекпоинт отсутствует — обучение начнётся с новых весов")
+        case .removed(let backup):
+            log("Старый чекпоинт удалён — обучение с нуля (бэкап: \(backup))")
         }
 
-        // Если существует непустой чекпоинт и resume не включён — спрашиваем:
-        // перезаписать (начать с нуля) или дополнить (resume).
-        if !p.resume && existingNonEmptyCheckpoint(p.convPath) {
-            let alert = NSAlert()
-            alert.messageText = "Найден существующий чекпоинт VAE"
-            alert.informativeText = "\(p.convPath)\n\nПродолжить обучение с него (resume) или перезаписать с нуля? Бэкап уже создан."
-            alert.addButton(withTitle: "Дополнить (resume)")
-            alert.addButton(withTitle: "Перезаписать с нуля")
-            alert.addButton(withTitle: "Отмена")
-            alert.alertStyle = .warning
-            alert.beginSheetModal(for: (self.window ?? NSWindow())) { resp in
-                guard resp == .alertFirstButtonReturn || resp == .alertSecondButtonReturn else { return }
-                if resp == .alertFirstButtonReturn {
-                    p.resume = true
-                }
-                self.startTrainingInternal(p)
-            }
-            return
-        }
-
-        startTrainingInternal(p)
+        startTrainingInternal(p, maxFrames: maxFrames)
     }
 
     /// Единая точка входа обучения: и кнопка «Обучить», и API вызывают её.
     /// Кадры для обучения всегда берутся из памяти (единый источник).
-    private func startTrainingInternal(_ pIn: Params) {
+    /// `maxFrames` > 0 — обучаться только на первых N кадрах.
+    private func startTrainingInternal(_ pIn: Params, maxFrames: Int = 0) {
         guard !isTraining, !isReconstructing else { return }
         // Нельзя запускать обучение, пока идёт раскадровка: оба процесса
         // будут мешать друг другу (кнопка «Стоп» извлечения оставалась бы
@@ -2407,9 +2560,21 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         var p = pIn
-        p.memoryFrames = framesStore.isEmpty ? nil : framesStore
-        // Контрольная выборка (1 кадр/сек) для реконструкций на итоговой модели.
-        p.controlFrames = controlFramesStore.isEmpty ? nil : controlFramesStore
+        if maxFrames > 0 {
+            let limit = min(maxFrames, framesStore.count)
+            guard limit > 0 else {
+                log("Обучение: нет кадров для лимита \(maxFrames)")
+                return
+            }
+            p.memoryFrames = Array(framesStore.prefix(limit))
+            let names = Set(p.memoryFrames!.map { $0.name })
+            p.controlFrames = controlFramesStore.filter { names.contains($0.name) }
+            log("Обучение ограничено первыми \(limit) кадрами из \(framesStore.count)")
+        } else {
+            p.memoryFrames = framesStore.isEmpty ? nil : framesStore
+            // Контрольная выборка (1 кадр/сек) для реконструкций на итоговой модели.
+            p.controlFrames = controlFramesStore.isEmpty ? nil : controlFramesStore
+        }
         lastParams = p
         TrainingControl.shared.reset()
         isTraining = true
@@ -2453,7 +2618,6 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
         log(p.adaptiveThrottle
             ? "Авто-пауза при перегреве: включена (снижает нагрузку при подходе к стоп-порогу)"
             : "Авто-пауза при перегреве: выключена (нагрузка держится постоянной)")
-        if p.resume { log("Режим: продолжение с чекпоинта") }
         log("API: http://127.0.0.1:17851 (только локальные запросы)")
 
         DispatchQueue.global(qos: .userInitiated).async {
@@ -2656,18 +2820,6 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
-    }
-
-    /// Бэкап чекпоинтов (safetensors) перед стартом новой сессии — чтобы случайно
-    /// не занулить накопленные вычисления при забытом resume. Использует чистую
-    /// протестированную функцию createCheckpointBackup (TDD).
-    private func backupAllCheckpoints(p: Params) -> [String] {
-        createBackups(forPaths: [p.convPath, p.vaePath])
-    }
-
-    /// Есть ли непустой существующий чекпоинт (conv/vae) по указанному пути.
-    private func existingNonEmptyCheckpoint(_ path: String) -> Bool {
-        isNonEmptyFile(path)
     }
 
     private func log(_ s: String) {

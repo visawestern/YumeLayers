@@ -131,6 +131,33 @@ public func createBackups(forPaths paths: [String]) -> [String] {
     paths.compactMap { createCheckpointBackup(fromPath: $0) }
 }
 
+/// Итог подготовки чекпоинта к старту обучения.
+public enum CheckpointPrepareOutcome: Equatable {
+    /// Файла не было — обучение начнётся с новых весов.
+    case fresh
+    /// Старый чекпоинт удалён; рядом создан бэкап по пути `backup`.
+    case removed(backup: String)
+    /// resume=true — файл сохранён и будет использован для дообучения.
+    case keep
+}
+
+/// Готовит чекпоинт к старту обучения:
+/// - `resume=true` — файл не трогаем (`.keep`);
+/// - `resume=false` и существует непустой файл — делаем бэкап и удаляем
+///   оригинал, чтобы обучение гарантированно началось с новых весов
+///   (`.removed`);
+/// - иначе — `.fresh`.
+/// Если бэкап не удался, оригинал НЕ удаляется (возвращаем `.fresh`).
+/// Чистая функция — покрыта тестами.
+public func prepareCheckpointForTraining(convPath: String,
+                                         resume: Bool) -> CheckpointPrepareOutcome {
+    if resume { return .keep }
+    guard isNonEmptyFile(convPath) else { return .fresh }
+    guard let backup = createCheckpointBackup(fromPath: convPath) else { return .fresh }
+    try? FileManager.default.removeItem(atPath: convPath)
+    return .removed(backup: backup)
+}
+
 // ---------- Редактируемое значение: видимость элементов в режиме правки ----------
 
 /// Состояние видимости элементов редактируемого поля: в обычном режиме показываем

@@ -10,3 +10,6 @@ DerivedData/
 
 # App bundle is rebuilt by scripts/build-app-direct.sh
 YumeLayers.app/
+
+# Local code index (codegraph)
+.codegraph/

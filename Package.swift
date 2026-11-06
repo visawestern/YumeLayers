@@ -1,9 +1,9 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.2
 import PackageDescription
 
 let package = Package(
     name: "YumeLayers",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS(.v26)],
     targets: [
         .testTarget(name: "YumeLayersCoreTests", dependencies: ["YumeLayersCore"]),
         .target(
@@ -25,5 +25,6 @@ let package = Package(
                 .linkedFramework("AVFoundation"),
             ]
         )
-    ]
+    ],
+    swiftLanguageModes: [.v5]
 )

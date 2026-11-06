@@ -18,7 +18,7 @@ public func trainAutoencoderGPU(p: Params) throws {
     let engine = MetalEngine.shared
     let session = GpuSession(engine)
     let W = max(p.width, 8), H = max(p.height, 8)
-    let I = W * H * 3, HID = 64, L = p.latentDim
+    let I = W * H * 3, L = p.latentDim
     let B = p.batch
     let lr: Float = 0.0008
 
@@ -128,7 +128,7 @@ public func encodeLatentsGPU(session: GpuSession, engine: MetalEngine, p: Params
 public func trainDiffusionGPU(p: Params) throws {
     let engine = MetalEngine.shared
     let session = GpuSession(engine)
-    let S = p.imageSize, I = S * S * 3, L = p.latentDim
+    let L = p.latentDim
     let B = p.batch
     let lr: Float = 0.001
     let stepsCount = p.noiseSteps
@@ -222,7 +222,7 @@ public func trainDiffusionGPU(p: Params) throws {
 public func generateGPU(p: Params) throws {
     let engine = MetalEngine.shared
     let session = GpuSession(engine)
-    let S = p.imageSize, I = S * S * 3, L = p.latentDim
+    let S = p.imageSize, L = p.latentDim
     let stepsCount = p.noiseSteps
 
     let ae = try loadState(path: p.vaePath)
@@ -233,12 +233,12 @@ public func generateGPU(p: Params) throws {
     let D2 = GPUTensor(engine: engine, data: ae[6].data, rows: ae[6].rows)
     let c2 = GPUTensor(engine: engine, data: ae[7].data, rows: ae[7].rows)
 
-    var DW1 = GPUTensor(engine: engine, data: diff[0].data, rows: diff[0].rows)
-    var Db1 = GPUTensor(engine: engine, data: diff[1].data, rows: 1)
-    var DW2 = GPUTensor(engine: engine, data: diff[2].data, rows: diff[2].rows)
-    var Db2 = GPUTensor(engine: engine, data: diff[3].data, rows: 1)
-    var DW3 = GPUTensor(engine: engine, data: diff[4].data, rows: diff[4].rows)
-    var Db3 = GPUTensor(engine: engine, data: diff[5].data, rows: 1)
+    let DW1 = GPUTensor(engine: engine, data: diff[0].data, rows: diff[0].rows)
+    let Db1 = GPUTensor(engine: engine, data: diff[1].data, rows: 1)
+    let DW2 = GPUTensor(engine: engine, data: diff[2].data, rows: diff[2].rows)
+    let Db2 = GPUTensor(engine: engine, data: diff[3].data, rows: 1)
+    let DW3 = GPUTensor(engine: engine, data: diff[4].data, rows: diff[4].rows)
+    let Db3 = GPUTensor(engine: engine, data: diff[5].data, rows: 1)
 
     var zData = [Float](repeating: 0, count: L)
     for i in 0..<L { zData[i] = Float.random(in: -1...1) }

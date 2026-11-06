@@ -14,7 +14,11 @@ import Metal
 var gChecks = 0
 var gFailures = 0
 var gCurrentSection = ""
-var gFilter: String? = CommandLine.arguments.dropFirst().first
+var gFilter: String? = {
+    let args = Array(CommandLine.arguments.dropFirst())
+    if let i = args.firstIndex(of: "--filter"), i + 1 < args.count { return args[i + 1] }
+    return args.isEmpty ? nil : args[0]
+}()
 
 func section(_ name: String) {
     gCurrentSection = name
@@ -207,6 +211,47 @@ func testBackups() {
     expect(createCheckpointBackup(fromPath: missing) == nil, "отсутствующий не бэкапится")
     expectEqual(createBackups(forPaths: [existing, empty, missing]).count, 1,
                 "createBackups бэкапит только непустые")
+}
+
+func testPrepareCheckpointForTraining() {
+    section("Подготовка чекпоинта: resume=false → старый удаляется")
+
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("yume_ckpt_prep_\(UUID().uuidString)")
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let existing = dir.appendingPathComponent("conv.safetensors").path
+    let payload = Data("weights".utf8)
+    try? payload.write(to: URL(fileURLWithPath: existing))
+
+    // resume=true: файл НЕ трогается.
+    let kept = prepareCheckpointForTraining(convPath: existing, resume: true)
+    guard case .keep = kept else {
+        expect(false, "resume=true → чекпоинт сохраняется"); return
+    }
+    expect(FileManager.default.fileExists(atPath: existing),
+           "resume=true: файл не удалён")
+
+    // resume=false + файл есть: старый удаляется, бэкап создаётся.
+    let outcome = prepareCheckpointForTraining(convPath: existing, resume: false)
+    guard case .removed(let backup) = outcome else {
+        expect(false, "resume=false с существующим файлом → удаление"); return
+    }
+    expect(!FileManager.default.fileExists(atPath: existing),
+           "старый чекпоинт удалён")
+    expect(FileManager.default.fileExists(atPath: backup),
+           "бэкап создан")
+    expect((try? Data(contentsOf: URL(fileURLWithPath: backup))) == payload,
+           "содержимое бэкапа совпадает")
+
+    // resume=false + файла нет: свежий старт, без ошибок.
+    let missing = dir.appendingPathComponent("missing.safetensors").path
+    guard case .fresh = prepareCheckpointForTraining(convPath: missing, resume: false) else {
+        expect(false, "нет файла → свежий старт"); return
+    }
+    expect(!FileManager.default.fileExists(atPath: missing),
+           "файл не создавался")
 }
 
 // MARK: - 4. GPU: базовые операции
@@ -1036,7 +1081,6 @@ func testCheckpointCompat() {
     guard gHasMetal else { skip("Metal недоступен"); return }
     let engine = MetalEngine.shared
     let vae = ConvVAEGPU(engine: engine)
-    let C = ConvVAEGPU.latentC
 
     // Корректный набор: W0,b0..W5,b5 в формах текущей модели.
     func correctMats() -> [Matrix] {
@@ -1127,7 +1171,7 @@ func testTrainStepLogging() {
 func testThermalGovernor() {
     section("Термо-регулятор GPU")
 
-    // --- Скважность: сколько спать после шага ---
+    // --- Доля работы: сколько спать после шага ---
     // GPU занят `gpuMs`, значит доля занятости = gpu/(gpu+sleep).
     // Чтобы уложиться в duty: sleep = gpu·(1/duty − 1).
     expectClose(dutySleepMs(gpuMs: 170, duty: 0.55, maxPauseMs: 2000), 170 * (1 / 0.55 - 1),
@@ -1137,7 +1181,7 @@ func testThermalGovernor() {
 
     // Главная регрессия: пауза не должна быть нулевой на штатном режиме.
     // Раньше в цикле шага стоял жёсткий Thread.sleep(0.03) — 30 мс на кадр
-    // 854×480 при 170 мс работы, то есть скважность ~85% на много часов.
+    // 854×480 при 170 мс работы, то есть доля работы ~85% на много часов.
     expect(dutySleepMs(gpuMs: 170, duty: 0.55, maxPauseMs: 2000) > 100,
            "на штатном режиме пауза больше 100 мс, а не 30")
 
@@ -1155,18 +1199,18 @@ func testThermalGovernor() {
 
     // 99% — это действительно 99%, а не «почти 99%»: на шаге 170 мс пауза
     // выходит 1.7 мс, то есть ~1% времени. Проверка ловит случай, когда
-    // потолок скважности урезали, а расчёт паузы остался прежним.
+    // потолок доли работы урезали, а расчёт паузы остался прежним.
     let sleepAt99 = dutySleepMs(gpuMs: 170, duty: 0.99, maxPauseMs: 5000)
     expectClose(sleepAt99, 170 * (1 / 0.99 - 1), 1e-9, "99% → пауза по формуле")
     expect(sleepAt99 < 2.5, "99% → пауза меньше 2.5 мс на шаге 170 мс")
 
-    // --- Целевая скважность по уровню нагрева ---
+    // --- Целевая доля работы по уровню нагрева ---
     let dn = targetDuty(for: .nominal)
     let dw = targetDuty(for: .warm)
     let dh = targetDuty(for: .hot)
     let dc = targetDuty(for: .critical)
-    expect(dn < 1 && dn > 0.2, "штатная скважность в разумных пределах")
-    expect(dn > dw && dw > dh && dh > dc, "чем жарче, тем ниже скважность")
+    expect(dn < 1 && dn > 0.2, "штатная доля работы в разумных пределах")
+    expect(dn > dw && dw > dh && dh > dc, "чем жарче, тем ниже доля работы")
     expect(dc > 0, "критический уровень всё же не 0 — обучение не встаёт навсегда")
 
     // --- Уровень нагрева ---
@@ -1241,12 +1285,12 @@ func testThermalGovernor() {
     expectEqual(d1.sleepMs, 250, "пауза не меньше пользовательской")
     expectClose(d1.baselineMs, 170, 1e-9, "база запомнила первый замер")
 
-    // Без пользовательской паузы работает чистая скважность.
+    // Без пользовательской паузы работает чистая доля работы.
     let d2 = throttleDecision(gpuMs: 170, wallMs: 170, baselineMs: 0, thermalRaw: 0,
                               floorMs: 0, maxPauseMs: 2000)
-    expectClose(d2.sleepMs, 139.09, 0.01, "пауза по скважности 55%")
+    expectClose(d2.sleepMs, 139.09, 0.01, "пауза по доле работы 55%")
 
-    // Тот же кадр, но GPU разогрелась: тепловой уровень режет скважность.
+    // Тот же кадр, но GPU разогрелась: тепловой уровень режет долю работы.
     let d3 = throttleDecision(gpuMs: 170, wallMs: 170, baselineMs: 170, thermalRaw: 3,
                               floorMs: 0, maxPauseMs: 2000)
     expectEqual(d3.level, .critical, "critical по показаниям ОС")
@@ -1284,11 +1328,11 @@ func testPowerController() {
     expectClose(dutyCeiling(powerPercent: 200), 0.98, 1e-9, "больше 100% → 0.98")
     // 100% — это не «без паузы вообще»: 2% простоя оставлены WindowServer.
     expect(maxSafeDuty < 1.0, "даже 100% оставляет слоты WindowServer")
-    expectClose(maxSafeDuty, 0.98, 1e-9, "100% мощности → 98% скважности")
+    expectClose(maxSafeDuty, 0.98, 1e-9, "100% мощности → 98% доли работы")
 
     // Без телеметрии режим не меняем: гадать хуже, чем держать текущий.
     var none = PowerController(ceiling: 0.765, startDuty: 0.5)
-    expectClose(none.update(stats: nil), 0.5, 1e-9, "нет датчика — скважность та же")
+    expectClose(none.update(stats: nil), 0.5, 1e-9, "нет датчика — доля работы та же")
 
     // Перегрев: вниз, но не больше 5% за замер — иначе нагрузка «дёргается».
     var hot = PowerController(ceiling: 0.9, startDuty: 0.6)
@@ -1325,7 +1369,7 @@ func testPowerController() {
     // Core Clock в PerformanceStatistics скачет 0…468 МГц на реальной
     // нагрузке (срезы попадают в промежутки между command buffer'ами).
     // Решение по такому сигналу — реакция на шум, поэтому проверяем,
-    // что шум частоты скважность НЕ меняет.
+    // что шум частоты долю работы НЕ меняет.
     var noise = PowerController(ceiling: 0.9, startDuty: 0.8)
     _ = noise.update(stats: GpuStats(temperatureC: 65, coreClockMHz: 1400,
                                      activityPercent: 95, powerW: 40))
@@ -2008,24 +2052,28 @@ func testLayeredTrainer() {
     expect(report.compositeChannels == 3, "выход сборки — RGB, 3 канала")
 }
 
-// MARK: - Жёсткий потолок 90% после перегрева
+// MARK: - Потолок GPU: изменяемый параметр (до физического предела 98%)
 
-func testDutyCap90() {
-    section("Предохранитель GPU: не выше 90%")
+func testDutyCap() {
+    section("Предохранитель GPU: параметр мощности соблюдается")
 
-    expectClose(safeDutyCap, 0.90, 1e-9, "потолок скважности = 90%")
+    expectClose(safeDutyCap, 0.98, 1e-9, "физический потолок доли работы = 98%")
     expectEqual(defaultGpuPowerPercent, 90, "мощность по умолчанию = 90%")
-    expectClose(effectiveDutyCeiling(powerPercent: 100), 0.90, 1e-9,
-                "даже 100% в GUI упирается в 90%")
-    expectClose(effectiveDutyCeiling(powerPercent: 200), 0.90, 1e-9,
-                "некорректные 200% тоже упираются в 90%")
+    expectClose(effectiveDutyCeiling(powerPercent: 98), 0.98, 1e-9,
+                "запрошенные 98% не режутся до 90%")
+    expectClose(effectiveDutyCeiling(powerPercent: 100), 0.98, 1e-9,
+                "100% упираются только в физический предел 98%")
+    expectClose(effectiveDutyCeiling(powerPercent: 200), 0.98, 1e-9,
+                "некорректные 200% тоже упираются в 98%")
+    expectClose(effectiveDutyCeiling(powerPercent: 85), 0.85, 1e-9,
+                "85% проходят как есть")
     expect(effectiveDutyCeiling(powerPercent: 85) < safeDutyCap,
            "85% остаётся ниже потолка")
     expect(effectiveDutyCeiling(powerPercent: 100) <= maxSafeDuty,
            "предохранитель не слабее физического предела")
 
     let guard90 = GpuDutyGuard()
-    expectClose(guard90.duty, 0.90, 1e-9, "guard: скважность 90%")
+    expectClose(guard90.duty, 0.90, 1e-9, "guard по умолчанию: доля работы 90%")
     let pause = guard90.pauseMs(gpuMs: 100)
     expect(pause > 0, "guard: после шага 100 мс есть пауза")
     expectClose(100.0 / (100.0 + pause), 0.90, 1e-6,
@@ -2034,6 +2082,12 @@ func testDutyCap90() {
     expectEqual(guard90.emergencyPauseMs(tempC: 70), 0, "guard: 70 °C без аварии")
     expect(guard90.emergencyPauseMs(tempC: emergencyTempC + 1) > 0,
            "guard: аварийная температура → принудительное остывание")
+
+    let guard98 = GpuDutyGuard(powerPercent: 98)
+    expectClose(guard98.duty, 0.98, 1e-9, "guard: запрошенные 98% соблюдаются")
+    let pause98 = guard98.pauseMs(gpuMs: 100)
+    expectClose(100.0 / (100.0 + pause98), 0.98, 1e-6,
+                "guard: фактическая занятость GPU = 98%")
     expect(Params().gpuPowerPercent == 90, "Params по умолчанию = 90%")
 }
 
@@ -2041,14 +2095,14 @@ func testDutyCap90() {
 /// forward+backward, что и обучение, и поэтому не имеет права обходить потолок.
 /// До исправления там стоял `ceiling: auto ? maxSafeDuty : 1.0`, то есть 98–100%.
 func testHeatDutyCap() {
-    section("Прогрев GPU: 90% без обходных путей")
+    section("Прогрев GPU: физический потолок без обходных путей")
 
     expectClose(clampedGpuDuty(1.0), safeDutyCap, 1e-9,
-                "gpuheat: ручной режим 100% упирается в 90%")
+                "gpuheat: ручной режим 100% упирается в 98%")
     expectClose(clampedGpuDuty(0.99), safeDutyCap, 1e-9,
-                "gpuheat: 99% упирается в 90%")
-    expectClose(clampedGpuDuty(0.90), safeDutyCap, 1e-9,
-                "gpuheat: ровно 90% разрешены")
+                "gpuheat: 99% упирается в 98%")
+    expectClose(clampedGpuDuty(0.90), 0.90, 1e-9,
+                "gpuheat: ровно 90% проходят как есть")
     expectClose(clampedGpuDuty(0.75), 0.75, 1e-9,
                 "gpuheat: 75% проходят как есть")
     let autoDuty = clampedGpuDuty(-1)
@@ -2058,23 +2112,23 @@ func testHeatDutyCap() {
     expect(nanDuty.isFinite && nanDuty <= safeDutyCap,
            "gpuheat: NaN не превращается в полную нагрузку")
 
-    // Сам регулятор с новым потолком не должен выходить за 90% ни при
+    // Сам регулятор с новым потолком не должен выходить за 98% ни при
     // каких показаниях датчика, включая «холодно» (там он разгоняется).
     var power = PowerController(ceiling: safeDutyCap, startDuty: 0.5)
     expectClose(power.ceiling, safeDutyCap, 1e-9,
-                "PowerController: потолок = 90%")
+                "PowerController: потолок = 98%")
     for temp in stride(from: 40.0, through: 100.0, by: 5.0) {
         let stats = GpuStats(temperatureC: temp, coreClockMHz: 400,
                              activityPercent: 90, powerW: 30)
         let d = power.update(stats: stats)
         expect(d <= safeDutyCap + 1e-9,
-               "PowerController при \(Int(temp)) °C не выше 90%")
+               "PowerController при \(Int(temp)) °C не выше 98%")
     }
     expect(power.duty <= safeDutyCap + 1e-9,
-           "PowerController после 13 замеров не выше 90%")
+           "PowerController после 13 замеров не выше 98%")
 
-    // Пауза при 90% обязана быть положительной: именно она отдаёт 10%
-    // времени WindowServer и не даёт повториться watchdog-перезагрузке.
+    // Пауза при 98% обязана быть положительной: 2% времени уходят системе
+    // и это не даёт повториться watchdog-перезагрузке.
     let guard90 = GpuDutyGuard(powerPercent: 100)
     expect(guard90.pauseMs(gpuMs: 150) > 0,
            "даже запрос 100% оставляет паузу на остывание")
@@ -2402,21 +2456,21 @@ func testLayeredOverlap() {
 }
 
 func testDutyPacer() {
-    section("Пейсер скважности: пакетные паузы без потери 90%")
+    section("Пейсер доли работы: пакетные паузы без потери 90%")
     let pacer = GpuDutyPacer(powerPercent: 90, maxPauseMs: 2000, minSleepMs: 2.0)
     expectClose(pacer.duty, 0.90, 1e-9, "пейсер наследует жёсткие 90%")
     // Короткий шаг: пауза копится в долг, но НЕ будит планировщик каждый раз.
     _ = pacer.wait(gpuMs: 1.0)
     expect(pacer.pendingPauseMs > 0, "короткий шаг копит долг паузы")
     expectEqual(pacer.sleepCalls, 0, "на коротком шаге сна ещё нет")
-    // Накопим до порога и проверим, что суммарная скважность всё та же.
+    // Накопим до порога и проверим, что суммарная доля работы всё та же.
     for _ in 0..<200 { _ = pacer.wait(gpuMs: 1.0) }
     _ = pacer.sleepDebt()
     expectEqual(pacer.pendingPauseMs, 0, "после сброса долга нет")
     expect(pacer.sleepCalls < 20,
            "201 шаг обошёлся \(pacer.sleepCalls) снами вместо 201")
     expectClose(pacer.measuredDuty, 0.90, 0.02,
-                "фактическая скважность осталась ~90%")
+                "фактическая доля работы осталась ~90%")
     expectEqual(pacer.emergency(tempC: 70), 0, "при 70 °C аварии нет")
     expectEqual(pacer.emergencyPauses, 0, "нормальная температура не считается аварией")
     // Отдельный пейсер с паузой 1 мс, чтобы тест не спал 2 секунды.
@@ -2480,46 +2534,483 @@ func testFrameStabilization() {
     expectEqual(stab.scenes.count, frames.count, "все кадры остались в датасете")
 }
 
+// MARK: - Извлечение кадров: многопоточный ffmpeg в RAM
+
+func testFrameExtractionPlan() {
+    section("Извлечение кадров: план чанков, fps и JPEG 85%")
+
+    let full = ParallelExtractor.makePlan(duration: 10, sourceFPS: 24,
+                                          maxFrames: 0, cores: 4)
+    expectClose(full.sourceFPS, 24, 1e-9, "fps берётся из исходного видео")
+    expectEqual(full.allFrames, 240, "все кадры = длительность × fps")
+    expectEqual(full.targetFrames, 240, "без лимита извлекаются все кадры")
+    expectClose(full.outputFPS, 24, 1e-9, "выходной fps равен исходному")
+
+    // Чанки идут подряд без дыр и перекрытий и покрывают ролик целиком.
+    var nextFrame = 0
+    for chunk in full.chunks {
+        expectEqual(chunk.startFrame, nextFrame,
+                    "чанк начинается там, где закончился предыдущий")
+        expect(chunk.frameCount > 0, "чанк не пустой")
+        nextFrame += chunk.frameCount
+    }
+    expectEqual(nextFrame, 240, "чанки покрывают весь ролик")
+
+    // Первый чанк маленький: первые кадры видны в интерфейсе почти сразу,
+    // а не после декодирования всего ролика.
+    expectEqual(full.chunks.first?.frameCount, 60,
+                "первый чанк — 60 кадров (быстрый старт)")
+    // Дальше чанки растут до базового размера: на длинном ролике нельзя
+    // запускать ffmpeg на каждые 60 кадров.
+    expect((full.chunks.dropFirst().first?.frameCount ?? 0) > 60,
+           "второй чанк крупнее первого")
+
+    let limited = ParallelExtractor.makePlan(duration: 10, sourceFPS: 24,
+                                             maxFrames: 100, cores: 4)
+    expectEqual(limited.targetFrames, 100, "лимит ограничивает число кадров")
+    expectClose(limited.outputFPS, 10, 1e-9, "при лимите fps пересчитывается")
+    expectEqual(limited.chunks.map { $0.frameCount }.reduce(0, +), 100,
+                "лимит делится по чанкам")
+
+    // Времена чанков берутся из номеров кадров: стык двух чанков — ровно
+    // кадр, а не «примерно секунда».
+    if full.chunks.count >= 2 {
+        let first = full.chunks[0], second = full.chunks[1]
+        let r1 = full.timeRange(of: first)
+        let r2 = full.timeRange(of: second)
+        expectClose(r1.start, 0, 1e-9, "первый чанк начинается с нуля")
+        expectClose(r1.end, 60.0 / 24.0, 1e-9, "конец = кадр / fps")
+        expectClose(r2.start, r1.end, 1e-9, "следующий чанк начинается в стык")
+    }
+
+    // Длинный ролик (≈44 800 кадров, 10 ядер): чанков достаточно много, чтобы
+    // рабочие не простаивали, но и не по одному на каждые 60 кадров.
+    let long = ParallelExtractor.makePlan(duration: 1866.6, sourceFPS: 24.001,
+                                          maxFrames: 0, cores: 10)
+    expectEqual(long.targetFrames, long.allFrames, "длинный ролик: все кадры")
+    expect(long.chunks.count >= 10,
+           "чанков хватает на все ядра (\(long.chunks.count))")
+    expect(long.chunks.count <= 120,
+           "чанков не слишком много — запуск ffmpeg не съедает время (\(long.chunks.count))")
+    expect(long.chunks.first?.frameCount == 60, "быстрый первый кадр на длинном ролике")
+    expect(long.chunks.map { $0.frameCount }.reduce(0, +) == long.targetFrames,
+           "длинный ролик покрыт без пропусков")
+    let maxChunk = long.chunks.map { $0.frameCount }.max() ?? 0
+    expect(maxChunk <= 1920, "размер чанка ограничен (память): \(maxChunk)")
+
+    // Маленький ролик не дробится на бессмысленные куски.
+    let tiny = ParallelExtractor.makePlan(duration: 1, sourceFPS: 10,
+                                          maxFrames: 0, cores: 10)
+    expectEqual(tiny.chunks.count, 1, "10 кадров — один чанк")
+
+    expectEqual(ParallelExtractor.jpegQuality, 5,
+                "JPEG ≈85% (ffmpeg q:v 5)")
+}
+
+/// Собирает эталон: один процесс ffmpeg, непрерывное декодирование.
+private func referenceFrames(video: URL, fps: Double, count: Int,
+                             dir: URL) -> [Data] {
+    let ff = ParallelExtractor.ffmpegPath!
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: ff)
+    p.arguments = ["-hide_banner", "-loglevel", "error", "-y",
+                   "-i", video.path,
+                   "-vf", String(format: "fps=%.4f", fps),
+                   "-frames:v", "\(count)",
+                   "-f", "image2", "-vcodec", "mjpeg", "-q:v", "5",
+                   "-vsync", "0", dir.appendingPathComponent("%05d.jpg").path]
+    p.standardOutput = FileHandle.nullDevice
+    p.standardError = FileHandle.nullDevice
+    try? p.run()
+    p.waitUntilExit()
+    let files = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+    return files.sorted().compactMap { try? Data(contentsOf: dir.appendingPathComponent($0)) }
+}
+
+/// Стыки чанков не должны сдвигать кадры: байты каждого кадра обязаны
+/// совпасть с непрерывным декодированием того же ролика.
+func testChunkBoundariesAreExact() {
+    section("Извлечение: чанки не сдвигают и не теряют кадры")
+
+    guard let ffmpeg = ParallelExtractor.ffmpegPath else {
+        skip("ffmpeg не установлен"); return
+    }
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("yume_boundary_\(UUID().uuidString)")
+    try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let video = root.appendingPathComponent("clip.mp4")
+
+    let gen = Process()
+    gen.executableURL = URL(fileURLWithPath: ffmpeg)
+    gen.arguments = ["-hide_banner", "-loglevel", "error", "-y",
+                     "-f", "lavfi", "-i", "testsrc=size=96x64:rate=30:duration=20",
+                     "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                     video.path]
+    gen.standardOutput = FileHandle.nullDevice
+    gen.standardError = FileHandle.nullDevice
+    do { try gen.run() } catch { skip("ffmpeg не запустился"); return }
+    gen.waitUntilExit()
+    guard gen.terminationStatus == 0 else {
+        skip("ffmpeg не собрал тестовое видео"); return
+    }
+
+    // 20 с × 30 fps = 600 кадров, план даёт 4+ чанка (несколько стыков).
+    func extract(maxFrames: Int) -> (frames: [Data], plan: ParallelExtractor.Plan) {
+        let plan = ParallelExtractor.makePlan(duration: 20, sourceFPS: 30,
+                                              maxFrames: maxFrames, cores: 10)
+        var out: [Data] = []
+        let sem = DispatchSemaphore(value: 0)
+        let ex = FrameExtractor(url: video,
+                                options: FrameExtractor.Options(maxFrames: maxFrames))
+        ex.run(onFrame: { _, _, _, jpeg in out.append(jpeg) },
+               progress: { _ in },
+               completion: { _ in sem.signal() })
+        _ = sem.wait(timeout: .now() + 180)
+        return (out, plan)
+    }
+
+    let full = extract(maxFrames: 0)
+    expect(full.plan.chunks.count >= 4,
+           "тестовый ролик режется на несколько чанков (\(full.plan.chunks.count))")
+    expectEqual(full.frames.count, 600, "получены все кадры ролика")
+
+    let refDir = root.appendingPathComponent("ref_full")
+    try? FileManager.default.createDirectory(at: refDir, withIntermediateDirectories: true)
+    let ref = referenceFrames(video: video, fps: 30, count: 600, dir: refDir)
+    expectEqual(ref.count, 600, "эталон собран")
+    expectEqual(full.frames, ref,
+                "кадры на стыках чанков байт-в-байт совпадают с эталоном")
+
+    // Лимит кадров меняет выходной fps — стыки обязаны остаться точными.
+    let limited = extract(maxFrames: 300)
+    expectEqual(limited.frames.count, 300, "лимит: ровно 300 кадров")
+    let limDir = root.appendingPathComponent("ref_limited")
+    try? FileManager.default.createDirectory(at: limDir, withIntermediateDirectories: true)
+    let limRef = referenceFrames(video: video, fps: 15, count: 300, dir: limDir)
+    expectEqual(limRef.count, 300, "эталон с лимитом собран")
+    expectEqual(limited.frames, limRef,
+                "при лимите кадры на стыках тоже не сдвигаются")
+}
+
+func testSoftwareFrameExtractionInMemory() {
+    section("Извлечение кадров: ffmpeg параллельно, JPEG в оперативке")
+
+    guard let ffmpeg = ParallelExtractor.ffmpegPath else {
+        skip("ffmpeg не установлен"); return
+    }
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("yume_frame_test_\(UUID().uuidString)")
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let video = dir.appendingPathComponent("clip.mp4")
+
+    let gen = Process()
+    gen.executableURL = URL(fileURLWithPath: ffmpeg)
+    gen.arguments = ["-hide_banner", "-loglevel", "error", "-y",
+                     "-f", "lavfi", "-i", "testsrc=size=64x48:rate=20:duration=2",
+                     "-c:v", "libx264", "-pix_fmt", "yuv420p", video.path]
+    gen.standardOutput = FileHandle.nullDevice
+    gen.standardError = FileHandle.nullDevice
+    do { try gen.run() } catch { skip("ffmpeg не запустился"); return }
+    gen.waitUntilExit()
+    guard gen.terminationStatus == 0 else {
+        skip("ffmpeg не собрал тестовое видео"); return
+    }
+
+    let extractor = FrameExtractor(url: video)
+    expectEqual(extractor.estimatedCount(), 40, "оценка = 2 с × 20 fps")
+
+    let sem = DispatchSemaphore(value: 0)
+    var frames: [Data] = []
+    var ordinals: [Int] = []
+    var outcome: Result<Void, Error>?
+    extractor.run(onFrame: { _, _, ordinal, jpeg in
+        frames.append(jpeg)
+        ordinals.append(ordinal)
+    }, progress: { _ in }, completion: { r in
+        outcome = r
+        sem.signal()
+    })
+    _ = sem.wait(timeout: .now() + 60)
+
+    switch outcome {
+    case .success?:
+        expect(frames.count >= 38 && frames.count <= 42,
+               "кадров ≈ 40, получено \(frames.count)")
+        expect(frames.allSatisfy { $0.count > 100 && $0.first == 0xFF && $0.dropFirst().first == 0xD8 },
+               "каждый кадр — JPEG (FFD8) в памяти")
+        expect(ordinals == Array(0..<frames.count), "порядок кадров строгий")
+    case .failure(let e):
+        expect(false, "извлечение упало: \(e)")
+    case nil:
+        expect(false, "извлечение не завершилось за 60 с")
+    }
+}
+
+func testParallelRGBExtraction() {
+    section("Извлечение RGB: программный декод параллельно")
+
+    guard let ffmpeg = ParallelExtractor.ffmpegPath else {
+        skip("ffmpeg не установлен"); return
+    }
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("yume_rgb_test_\(UUID().uuidString)")
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let video = dir.appendingPathComponent("clip.mp4")
+
+    let gen = Process()
+    gen.executableURL = URL(fileURLWithPath: ffmpeg)
+    gen.arguments = ["-hide_banner", "-loglevel", "error", "-y",
+                     "-f", "lavfi", "-i", "testsrc=size=64x48:rate=10:duration=2",
+                     "-c:v", "libx264", "-pix_fmt", "yuv420p", video.path]
+    gen.standardOutput = FileHandle.nullDevice
+    gen.standardError = FileHandle.nullDevice
+    do { try gen.run() } catch { skip("ffmpeg не запустился"); return }
+    gen.waitUntilExit()
+    guard gen.terminationStatus == 0 else {
+        skip("ffmpeg не собрал тестовое видео"); return
+    }
+
+    let w = 32, h = 24
+    let times = [0.1, 0.5, 1.0, 1.5]
+    let frames = try! FrameRGBExtractor.loadFrames(url: video, times: times,
+                                                   w: w, h: h)
+    expectEqual(frames.count, times.count, "кадров столько же, сколько моментов")
+    expect(frames.allSatisfy { $0.count == w * h * 3 },
+           "каждый кадр — HWC RGB нужного размера")
+    expect(frames.allSatisfy { $0.allSatisfy { $0 >= 0 && $0 <= 1 } },
+           "значения нормализованы в 0...1")
+    expect(frames[0] != frames[3], "кадры из разных моментов различаются")
+
+    // Тот же путь, что используют датасет и шоты (без синхронного моста).
+    let datasetFrames = try! loadVideoFrames(url: video, w: 16, h: 16, count: 4)
+    expectEqual(datasetFrames.count, 4, "датасет получает все кадры")
+    expect(datasetFrames.allSatisfy { $0.count == 16 * 16 * 3 },
+           "датасет получает кадры нужного размера")
+
+    let shotFrames = try! loadShotFrames(url: video, w: 16, h: 16,
+                                         start: 0.2, end: 1.8, count: 3)
+    expectEqual(shotFrames.count, 3, "шот получает все кадры")
+}
+
+func testExtractionStreamsFramesAndProgress() {
+    section("Извлечение: прогресс и кадры идут во время декодирования")
+
+    guard let ffmpeg = ParallelExtractor.ffmpegPath else {
+        skip("ffmpeg не установлен"); return
+    }
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("yume_stream_test_\(UUID().uuidString)")
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let video = dir.appendingPathComponent("clip.mp4")
+
+    let gen = Process()
+    gen.executableURL = URL(fileURLWithPath: ffmpeg)
+    gen.arguments = ["-hide_banner", "-loglevel", "error", "-y",
+                     "-f", "lavfi", "-i", "testsrc=size=480x270:rate=30:duration=10",
+                     "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                     video.path]
+    gen.standardOutput = FileHandle.nullDevice
+    gen.standardError = FileHandle.nullDevice
+    do { try gen.run() } catch { skip("ffmpeg не запустился"); return }
+    gen.waitUntilExit()
+    guard gen.terminationStatus == 0 else {
+        skip("ffmpeg не собрал тестовое видео"); return
+    }
+
+    let start = Date()
+    var firstFrameAt: TimeInterval?
+    var completionAt: TimeInterval?
+    var sawIntermediate = false
+    var frames = 0
+    let sem = DispatchSemaphore(value: 0)
+    let extractor = FrameExtractor(url: video,
+                                   options: FrameExtractor.Options(maxFrames: 120))
+    extractor.run(onFrame: { _, _, _, _ in
+       frames += 1
+        if firstFrameAt == nil { firstFrameAt = Date().timeIntervalSince(start) }
+    }, progress: { p in
+        if p > 0.02 && p < 0.98 { sawIntermediate = true }
+    }, completion: { _ in
+        completionAt = Date().timeIntervalSince(start)
+        sem.signal()
+    })
+    _ = sem.wait(timeout: .now() + 120)
+
+    expectEqual(frames, 120, "все 120 кадров получены")
+    expect(sawIntermediate, "прогресс меняется до завершения (0 < p < 1)")
+    if let first = firstFrameAt, let done = completionAt {
+        expect(first < done, "первый кадр приходит раньше завершения")
+    } else {
+        expect(false, "извлечение не завершилось")
+    }
+}
+
+// MARK: - Асинхронная выдача кадров в интерфейс
+
+func testExtractBatchPolicy() {
+    section("Извлечение: пачки кадров и первая страница коллажа")
+    let policy = ExtractBatchPolicy()
+
+    // Первая пачка — ровно страница коллажа (10 кадров), чтобы первые
+    // кадры появились сразу, а не после всех 44 000.
+    expect(policy.shouldFlush(pending: 9, sinceLastFlushMs: 0,
+                              flushedFirstBatch: false) == false,
+           "9 кадров меньше первой страницы — не сбрасываем")
+    expect(policy.shouldFlush(pending: 10, sinceLastFlushMs: 0,
+                              flushedFirstBatch: false),
+           "10 кадров — первая пачка готова")
+
+    // Дальше крупные пачки: main thread не дёргается на каждый кадр.
+    expect(policy.shouldFlush(pending: 63, sinceLastFlushMs: 0,
+                              flushedFirstBatch: true) == false,
+           "63 кадра — ещё не полная пачка")
+    expect(policy.shouldFlush(pending: 64, sinceLastFlushMs: 0,
+                              flushedFirstBatch: true),
+           "64 кадра — пачка готова")
+
+    // Даже неполная пачка уходит по таймеру, иначе последние кадры
+    // висят в буфере до конца извлечения.
+    expect(policy.shouldFlush(pending: 1, sinceLastFlushMs: 250,
+                              flushedFirstBatch: true),
+           "неполная пачка уходит по времени")
+    expect(policy.shouldFlush(pending: 1, sinceLastFlushMs: 50,
+                              flushedFirstBatch: true) == false,
+           "неполная пачка ждёт таймер")
+    expect(policy.shouldFlush(pending: 0, sinceLastFlushMs: 999,
+                              flushedFirstBatch: true) == false,
+           "пустую пачку не сбрасываем")
+
+    // Коллаж перерисовывается только на первой странице и только пока
+    // она заполняется; остальные кадры — по пагинации.
+    expect(policy.shouldRenderCollage(page: 0, totalBefore: 0, totalAfter: 10,
+                                      pageSize: 10),
+           "первая страница заполнилась — рендер")
+    expect(policy.shouldRenderCollage(page: 0, totalBefore: 5, totalAfter: 10,
+                                      pageSize: 10),
+           "кадры первой страницы появляются по мере поступления")
+    expect(policy.shouldRenderCollage(page: 0, totalBefore: 10, totalAfter: 74,
+                                      pageSize: 10) == false,
+           "после 10 кадров коллаж не дёргаем")
+    expect(policy.shouldRenderCollage(page: 2, totalBefore: 10, totalAfter: 74,
+                                      pageSize: 10) == false,
+           "пока пользователь листает, коллаж не перерисовывается")
+    expect(policy.shouldRenderCollage(page: 0, totalBefore: 10, totalAfter: 10,
+                                      pageSize: 10) == false,
+           "без новых кадров рендера нет")
+}
+
+// MARK: - Проверка (тест) текущих кадров в памяти
+
+func testFrameValidation() {
+    section("Проверка кадров: лимит и целостность")
+
+    let ok = Data([0xFF, 0xD8, 0x00, 0x01, 0xFF, 0xD9])
+    let frames = (0..<5).map { i -> MemoryFrame in
+        MemoryFrame(name: String(format: "frame_%04d.jpg", i), jpeg: ok)
+    }
+
+    // Все кадры валидны, лимит 0 = проверить всё.
+    let all = frameValidation(frames: frames, limit: 0, decode: { _ in true })
+    expectEqual(all.checked, 5, "проверены все кадры")
+    expectEqual(all.passed, 5, "все прошли")
+    expectEqual(all.failed, 0, "провалов нет")
+    expectEqual(all.issues.count, 0, "проблем нет")
+
+    // Лимит ограничивает число проверяемых кадров.
+    let limited = frameValidation(frames: frames, limit: 2, decode: { _ in true })
+    expectEqual(limited.checked, 2, "лимит 2: проверены 2 кадра")
+    expectEqual(limited.passed, 2, "оба прошли")
+    expectEqual(limited.failed, 0, "провалов нет")
+
+    // Лимит больше числа кадров — проверяются все.
+    let over = frameValidation(frames: frames, limit: 999, decode: { _ in true })
+    expectEqual(over.checked, 5, "лимит больше массива — все кадры")
+
+    // Пустой массив — ничего не проверяем.
+    let empty = frameValidation(frames: [], limit: 0, decode: { _ in true })
+    expectEqual(empty.checked, 0, "пустой массив: 0 проверок")
+    expectEqual(empty.failed, 0, "пустой массив: 0 провалов")
+
+    // Битая сигнатура JPEG ловится.
+    var broken = frames
+    broken[2] = MemoryFrame(name: "frame_0002.jpg", jpeg: Data([0x00, 0x01, 0x02]))
+    let b = frameValidation(frames: broken, limit: 0, decode: { _ in true })
+    expectEqual(b.failed, 1, "битая сигнатура — 1 провал")
+    expect(b.issues.contains { $0.contains("JPEG") },
+           "причина указана: JPEG-сигнатура")
+
+    // Сигнатура есть, но декодирование не проходит.
+    let undecodable = frameValidation(frames: frames, limit: 0,
+                                      decode: { _ in false })
+    expectEqual(undecodable.failed, 5, "все не декодируются")
+    expect(undecodable.issues.first?.contains("декод") == true,
+           "причина указана: декодирование")
+}
+
 // MARK: - main
 
 func runAll() {
-    testHTTP()
-    testCheckpoints()
-    testBackups()
-    testGPUOps()
-    testConvPrimitives()
-    testBufferLifecycle()
-    testConvVAEShape()
-    testVAEPrimitives()
-    testVAEVariational()
-    testVAEGradients()
-    testVAEConvergence()
-    testVRAMBudget()
-    testProcessedMarks()
-    testReproducibility()
-    testCheckpointCompat()
-    testTrainStepLogging()
-    testThermalGovernor()
-    testPowerController()
-    testPureLogic()
-    testLayerRenderer()
-    testUniversalLayers()
-    testSceneQuality()
-    testLayeredLossMath()
-    testLayeredLossGPU()
-    testLayeredVAEShape()
-    testLayeredVAEGradients()
-    testLayeredTrainer()
-    testDutyCap90()
-    testHeatDutyCap()
-    testLayerAnnotation()
-    testLayeredCapacityAndSchedule()
-    testLayeredDatasetTraining()
-    testLayerPipeline()
-    testDutyPacer()
-    testLayeredBatching()
-    testLayeredOverlap()
-    testFrameStabilization()
+    let tests: [(String, () -> Void)] = [
+        ("HTTP", testHTTP),
+        ("Checkpoints", testCheckpoints),
+        ("Backups", testBackups),
+        ("Backups", testPrepareCheckpointForTraining),
+        ("GPUOps", testGPUOps),
+        ("ConvPrimitives", testConvPrimitives),
+        ("BufferLifecycle", testBufferLifecycle),
+        ("ConvVAEShape", testConvVAEShape),
+        ("VAEPrimitives", testVAEPrimitives),
+        ("VAEVariational", testVAEVariational),
+        ("VAEGradients", testVAEGradients),
+        ("VAEConvergence", testVAEConvergence),
+        ("VRAMBudget", testVRAMBudget),
+        ("ProcessedMarks", testProcessedMarks),
+        ("Reproducibility", testReproducibility),
+        ("CheckpointCompat", testCheckpointCompat),
+        ("TrainStepLogging", testTrainStepLogging),
+        ("ThermalGovernor", testThermalGovernor),
+        ("PowerController", testPowerController),
+        ("PureLogic", testPureLogic),
+        ("LayerRenderer", testLayerRenderer),
+        ("UniversalLayers", testUniversalLayers),
+        ("SceneQuality", testSceneQuality),
+        ("LayeredLossMath", testLayeredLossMath),
+        ("LayeredLossGPU", testLayeredLossGPU),
+        ("LayeredVAEShape", testLayeredVAEShape),
+        ("LayeredVAEGradients", testLayeredVAEGradients),
+        ("LayeredTrainer", testLayeredTrainer),
+        ("DutyCap", testDutyCap),
+        ("HeatDutyCap", testHeatDutyCap),
+        ("LayerAnnotation", testLayerAnnotation),
+        ("LayeredCapacityAndSchedule", testLayeredCapacityAndSchedule),
+        ("LayeredDatasetTraining", testLayeredDatasetTraining),
+        ("LayerPipeline", testLayerPipeline),
+        ("DutyPacer", testDutyPacer),
+        ("LayeredBatching", testLayeredBatching),
+        ("LayeredOverlap", testLayeredOverlap),
+        ("FrameStabilization", testFrameStabilization),
+        ("FrameExtraction", testFrameExtractionPlan),
+        ("FrameExtraction", testChunkBoundariesAreExact),
+        ("FrameExtraction", testSoftwareFrameExtractionInMemory),
+        ("FrameExtraction", testParallelRGBExtraction),
+        ("FrameExtraction", testExtractionStreamsFramesAndProgress),
+        ("ExtractBatch", testExtractBatchPolicy),
+        ("FrameValidation", testFrameValidation),
+    ]
+    if let filter = gFilter {
+        print("Фильтр: \(filter)")
+    }
+    for (name, body) in tests {
+        if let filter = gFilter,
+           !name.localizedCaseInsensitiveContains(filter) {
+            continue
+        }
+        body()
+    }
 }
 
 let started = Date()

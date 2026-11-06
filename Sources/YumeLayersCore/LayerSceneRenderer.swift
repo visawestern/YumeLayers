@@ -335,7 +335,7 @@ private func makeSceneParams<R: RandomNumberGenerator>(w: Int, h: Int, rng: inou
 private func skyLayer(w: Int, h: Int, p: SceneParams, spec: LayerSpec) -> RenderedLayer {
     let n = w * h
     var rgb = [Float](repeating: 0, count: n * 3)
-    var alpha = [Float](repeating: 1, count: n)
+    let alpha = [Float](repeating: 1, count: n)
     for y in 0..<h {
         let t = Float(y) / Float(max(h - 1, 1))
         for x in 0..<w {

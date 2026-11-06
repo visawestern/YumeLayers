@@ -54,8 +54,8 @@ public final class FrameExtractor {
     private let options: Options
     private let lock = NSLock()
     private var _cancelled = false
-    /// Активный FFmpeg-процесс (для отмены).
-    private var ffmpegProcess: Process?
+    /// Параллельный (на ~10 ядрах) извлекатель кадров — для отмены.
+    private var parallelExtractor: ParallelExtractor?
     private var softwareDecoder: SoftwareFrameDecoder?
     /// Сколько лидирующих полностью чёрных кадров пропущено (артефакт декодирования).
     public private(set) var skippedLeadingBlack = 0
@@ -67,7 +67,7 @@ public final class FrameExtractor {
 
     public func cancel() {
         lock.lock(); _cancelled = true
-        if let process = ffmpegProcess, process.isRunning { process.terminate() }
+        parallelExtractor?.cancel()
         softwareDecoder?.cancel()
         lock.unlock()
     }
@@ -80,8 +80,8 @@ public final class FrameExtractor {
     /// Частота кадров исходного видео (fps из видео-трека; 24 по умолчанию).
     private func sourceFrameRate() -> Double {
         let asset = AVURLAsset(url: url)
-        guard let track = asset.tracks(withMediaType: .video).first else { return 24 }
-        let fr = track.nominalFrameRate
+        guard let track = try? loadVideoTracks(of: asset).first,
+              let fr = try? loadNominalFrameRate(of: track) else { return 24 }
         return fr > 0 ? Double(fr) : 24
     }
 
@@ -94,7 +94,8 @@ public final class FrameExtractor {
     /// Оценка числа кадров для этого видео (без извлечения).
     public func estimatedCount() -> Int {
         let asset = AVURLAsset(url: url)
-        let duration = CMTimeGetSeconds(asset.duration)
+        guard let time = try? loadAssetDuration(asset) else { return 0 }
+        let duration = CMTimeGetSeconds(time)
         guard duration.isFinite, duration > 0.01 else { return 0 }
         let rate = options.useSourceFps ? sourceFrameRate() : 1.0 / max(options.everySeconds, 1e-6)
         let effectiveMax = options.maxFrames > 0 ? options.maxFrames : autoMaxFrames()
@@ -113,7 +114,11 @@ public final class FrameExtractor {
         completion: @escaping (Result<Void, Error>) -> Void
     ) {
         let asset = AVURLAsset(url: url)
-        let duration = CMTimeGetSeconds(asset.duration)
+        guard let time = try? loadAssetDuration(asset) else {
+            completion(.failure(FrameExtractError.unreadableAsset))
+            return
+        }
+        let duration = CMTimeGetSeconds(time)
         guard duration.isFinite, duration > 0.01 else {
             completion(.failure(FrameExtractError.unreadableAsset))
             return
@@ -124,12 +129,17 @@ public final class FrameExtractor {
         let effectiveMax = options.maxFrames > 0 ? options.maxFrames : autoMaxFrames()
         let total = max(1, min(effectiveMax, Int(duration * rate)))
 
-        // Итоговая частота выборки: сколько кадров/с нужно на выходе.
-        let outFps = Double(total) / duration
-
-        if Self.ffmpegPath != nil {
-            runFFmpeg(outFps: outFps, total: total,
-                       onFrame: onFrame, progress: progress, completion: completion)
+        if ParallelExtractor.ffmpegPath != nil {
+            // Параллельное извлечение через ffmpeg (на ~10 ядрах).
+            let parallel = ParallelExtractor(
+                url: url,
+                options: ParallelExtractor.Options(maxFrames: effectiveMax,
+                                                    startIndex: options.startIndex,
+                                                    framesPerSecond: rate))
+            lock.lock()
+            parallelExtractor = parallel
+            lock.unlock()
+            parallel.run(onFrame: onFrame, progress: progress, completion: completion)
         } else {
             // Fallback: программный декодер VideoToolbox (без зависимости).
             let decoder = SoftwareFrameDecoder(url: url)
@@ -142,142 +152,4 @@ public final class FrameExtractor {
         }
     }
 
-    private static let ffmpegPath: String? = {
-        let candidates = [
-            "/usr/local/bin/ffmpeg",
-            "/opt/homebrew/bin/ffmpeg",
-            "/usr/bin/ffmpeg",
-        ]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
-    }()
-
-    /// Запуск ffmpeg: видео → MJPEG-поток в stdout.
-    private func runFFmpeg(outFps: Double,
-                           total: Int,
-                           onFrame: @escaping (Int, Int, Int, Data) -> Void,
-                           progress: @escaping (Double) -> Void,
-                           completion: @escaping (Result<Void, Error>) -> Void) {
-        let process = Process()
-        guard let path = Self.ffmpegPath else { completion(.failure(FrameExtractError.unreadableAsset)); return }
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = [
-            "-hide_banner", "-loglevel", "error",
-            "-threads", "12",
-            "-i", url.path,
-            "-vf", String(format: "fps=%.4f", outFps),
-            "-f", "image2pipe",
-            "-vcodec", "mjpeg",
-            "-q:v", "3",
-            "-vsync", "0",
-            "-"
-        ]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        lock.lock(); ffmpegProcess = process; lock.unlock()
-
-        process.terminationHandler = { [weak self] _ in
-            guard let self = self else { return }
-            self.lock.lock(); self.ffmpegProcess = nil; self.lock.unlock()
-        }
-
-        do {
-            guard !isCancelled else { completion(.failure(FrameExtractError.cancelled)); return }
-            try process.run()
-            if isCancelled && process.isRunning { process.terminate() }
-        } catch {
-            completion(.failure(error))
-            return
-        }
-
-        // Чтение потока и разбор JPEG-кадров.
-        let handle = pipe.fileHandleForReading
-        var buffer = Data()
-        var frameIndex = 0
-        var ordinal = 0
-        var lastProgress = 0
-
-        // Поток чтения: асинхронно, чтобы не блокировать.
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-            while true {
-                if self.isCancelled {
-                    process.terminate()
-                    completion(.failure(FrameExtractError.cancelled))
-                    return
-                }
-                let chunk = handle.readData(ofLength: 262144)
-                if chunk.isEmpty { break }
-                buffer.append(chunk)
-
-                // Разбор: ищем полные JPEG (FFD8 … FFD9/следующий FFD8).
-                while true {
-                    guard let start = Self.findMarker(0xFFD8, in: buffer, from: 0) else { break }
-                    // Ищем следующий FFD8 после старта — это граница следующего кадра.
-                    if let nextStart = Self.findMarker(0xFFD8, in: buffer, from: start + 2) {
-                        let frameData = buffer.subdata(in: start..<nextStart)
-                        if frameData.count > 100 {
-                            let ordinalOut = ordinal
-                            ordinal += 1
-                            frameIndex += 1
-                            onFrame(frameIndex - 1, total, ordinalOut + self.options.startIndex, frameData)
-                            if frameIndex % 50 == 0 || frameIndex >= total {
-                                let p = Double(frameIndex) / Double(max(total, 1))
-                                if Int(p * 1000) != lastProgress {
-                                    lastProgress = Int(p * 1000)
-                                    progress(p)
-                                }
-                            }
-                            if frameIndex >= total {
-                                process.terminate()
-                                progress(1.0)
-                                completion(.success(()))
-                                return
-                            }
-                        }
-                        buffer.removeSubrange(0..<nextStart)
-                    } else {
-                        // Нет следующего старта — ждём ещё данных.
-                        break
-                    }
-                }
-            }
-            // Поток закрыт. Обрабатываем остаток буфера: последний JPEG без
-            // следующего маркера начала (иначе теряем ровно один кадр).
-            if frameIndex < total,
-               let start = Self.findMarker(0xFFD8, in: buffer, from: 0),
-               let end = Self.findMarker(0xFFD9, in: buffer, from: start + 2) {
-                let frameData = buffer.subdata(in: start..<(end + 2))
-                if frameData.count > 100 {
-                    let ordinalOut = ordinal
-                    onFrame(frameIndex, total, ordinalOut + self.options.startIndex, frameData)
-                    frameIndex += 1
-                    progress(Double(frameIndex) / Double(max(total, 1)))
-                }
-            }
-
-            if self.isCancelled {
-                completion(.failure(FrameExtractError.cancelled))
-            } else if frameIndex == 0 {
-                completion(.failure(FrameExtractError.unreadableAsset))
-            } else {
-                progress(1.0)
-                completion(.success(()))
-            }
-        }
-    }
-
-    /// Ищет маркер (2 байта) в Data, начиная с `from`.
-    private static func findMarker(_ marker: UInt16, in data: Data, from: Int) -> Int? {
-        guard from + 1 < data.count else { return nil }
-        let hi = UInt8(marker >> 8)
-        let lo = UInt8(marker & 0xFF)
-        let bytes = [UInt8](data)
-        var i = from
-        while i + 1 < bytes.count {
-            if bytes[i] == hi && bytes[i + 1] == lo { return i }
-            i += 1
-        }
-        return nil
-    }
 }
