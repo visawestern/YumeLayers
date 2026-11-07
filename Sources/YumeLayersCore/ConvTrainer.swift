@@ -544,14 +544,65 @@ public final class TrainingControl {
     public static let shared = TrainingControl()
     private let lock = NSLock()
     private var _cancelled = false
+    /// Идёт ли прогон прямо сейчас (нужно watchdog'у остановки).
+    private var _running = false
+    /// Поколение прогона: старый watchdog не должен убивать новый прогон.
+    private var runToken = 0
+
     public var isCancelled: Bool {
         lock.lock(); defer { lock.unlock() }
         return _cancelled
     }
-    public func cancel() {
+
+    public var isRunning: Bool {
         lock.lock(); defer { lock.unlock() }
-        _cancelled = true
+        return _running
     }
+
+    /// Начало прогона. Флаг отмены НЕ сбрасывается: сброс делает `reset()`
+    /// перед стартом, иначе «Стоп», нажатый между стартом и входом в цикл,
+    /// был бы молча потерян.
+    func beginRun() {
+        lock.lock()
+        _running = true
+        runToken += 1
+        lock.unlock()
+    }
+
+    func endRun() {
+        lock.lock()
+        _running = false
+        runToken += 1
+        lock.unlock()
+    }
+
+    /// Остановка. Если поток обучения заблокирован в драйвере GPU, он не
+    /// увидит флаг никогда (проверка — только между шагами). Поэтому через
+    /// `graceSeconds` с запускается watchdog: не ответил — завершаем процесс,
+    /// иначе приложение остаётся навсегда «обучающимся» и не реагирует.
+    public func cancel(graceSeconds: Double = 20) {
+        lock.lock()
+        _cancelled = true
+        let running = _running
+        let token = runToken
+        lock.unlock()
+        guard running else { return }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + graceSeconds) {
+            TrainingControl.shared.enforceStop(token: token, graceSeconds: graceSeconds)
+        }
+    }
+
+    private func enforceStop(token: Int, graceSeconds: Double) {
+        lock.lock()
+        let stuck = _running && runToken == token
+        lock.unlock()
+        guard stuck else { return }
+        yumeLog("❌ Обучение не ответило на остановку за \(Int(graceSeconds)) с: "
+              + "поток заблокирован в драйвере GPU (аллокация/ожидание command buffer). "
+              + "Принудительное завершение процесса — иначе приложение не остановить.")
+        exit(70)
+    }
+
     public func reset() {
         lock.lock(); defer { lock.unlock() }
         _cancelled = false
@@ -559,33 +610,97 @@ public final class TrainingControl {
 }
 
 /// Замена NaN/Inf в градиентах на 0 + клиппинг суммарной нормы (L2).
-private func sanitizeGrads(_ grads: [GPUTensor], maxNorm: Float = 1.0) {
+///
+/// ВАЖНО: раньше здесь на КАЖДЫЙ тензор вызывались `toArray()` и `setData()`,
+/// а каждая из них создавала новый shared MTLBuffer и отдельный command
+/// buffer с ожиданием. На 12 градиентах это ~24–48 аллокаций и столько же
+/// синхронизаций GPU за шаг; за 15k шагов драйвер AMD накапливал сотни тысяч
+/// ресурсов и вставал внутри `newBufferWithBytes` (стек: sanitizeGrads →
+/// setData → newBufferWithBytes → IOAccelResourceCreate → mach_msg).
+///
+/// Теперь весь пакет пересылается ОДНИМ staging-буфером из пула: один blit
+/// на чтение, CPU-санация в памяти и один blit на запись. Аллокаций после
+/// прогрева нет, синхронизаций — две вместо десятков.
+func sanitizeGrads(_ grads: [GPUTensor], maxNorm: Float = 1.0,
+                   preScale: Float = 1.0) {
+    guard let first = grads.first, !grads.isEmpty else { return }
+    let engine = first.engine
+    let total = grads.reduce(0) { $0 + $1.n }
+    guard total > 0 else { return }
+    let totalBytes = total * 4
+
+    // Смещения каждого тензора внутри общего staging-буфера.
+    var offsets = [Int]()
+    offsets.reserveCapacity(grads.count)
+    var off = 0
+    for g in grads {
+        offsets.append(off)
+        off += g.n * 4
+    }
+
+    let staging = engine.takeStaging(totalBytes)
+
+    // 1) Все градиенты → staging одним blit-ом.
+    guard let readCmd = engine.queue.makeCommandBuffer(),
+          let readBlit = readCmd.makeBlitCommandEncoder() else {
+        engine.putStaging(staging)
+        fatalError(allocationFailureMessage(
+            bytes: totalBytes,
+            availableBytes: Int(engine.device.recommendedMaxWorkingSetSize)
+                - engine.device.currentAllocatedSize,
+            what: "command buffer чтения градиентов"))
+    }
+    for (i, g) in grads.enumerated() {
+        readBlit.copy(from: g.buf, sourceOffset: 0, to: staging,
+                      destinationOffset: offsets[i], size: g.n * 4)
+    }
+    readBlit.endEncoding()
+    engine.waitForCompletion(readCmd, what: "чтение градиентов для санации")
+
+    // 2) Санация и клиппинг — на CPU, в одной непрерывной памяти.
+    let p = staging.contents().bindMemory(to: Float.self, capacity: total)
     var totalSq: Float = 0
     var fixed = 0
-    for g in grads {
-        var a = g.toArray()
+    for (i, g) in grads.enumerated() {
+        let base = offsets[i] / 4
         var s: Float = 0
-        for i in 0..<a.count {
-            let v = a[i]
+        for k in 0..<g.n {
+            var v = p[base + k]
+            if preScale != 1 { v *= preScale }
             if v.isNaN || v.isInfinite {
-                a[i] = 0
+                v = 0
                 fixed += 1
             } else {
                 s += v * v
             }
+            p[base + k] = v
         }
         totalSq += s
-        g.setData(a)
     }
     let norm = sqrt(totalSq)
     if norm > maxNorm {
         let scale = maxNorm / norm
-        for g in grads {
-            var a = g.toArray()
-            for i in 0..<a.count { a[i] *= scale }
-            g.setData(a)
-        }
+        for k in 0..<total { p[k] *= scale }
     }
+
+    // 3) staging → все градиенты одним blit-ом.
+    guard let writeCmd = engine.queue.makeCommandBuffer(),
+          let writeBlit = writeCmd.makeBlitCommandEncoder() else {
+        engine.putStaging(staging)
+        fatalError(allocationFailureMessage(
+            bytes: totalBytes,
+            availableBytes: Int(engine.device.recommendedMaxWorkingSetSize)
+                - engine.device.currentAllocatedSize,
+            what: "command buffer записи градиентов"))
+    }
+    for (i, g) in grads.enumerated() {
+        writeBlit.copy(from: staging, sourceOffset: offsets[i], to: g.buf,
+                       destinationOffset: 0, size: g.n * 4)
+    }
+    writeBlit.endEncoding()
+    engine.waitForCompletion(writeCmd, what: "запись градиентов после санации")
+    engine.putStaging(staging)
+
     if fixed > 0 {
         yumeLog("санация градиентов: \(fixed) значений NaN/Inf → 0; норма \(norm)")
     }
@@ -593,6 +708,11 @@ private func sanitizeGrads(_ grads: [GPUTensor], maxNorm: Float = 1.0) {
 
 public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
                          onStep: ((TrainStepReport) -> Void)? = nil) throws {
+    // Регистрируем прогон для watchdog'а остановки: если поток уйдёт в
+    // драйвер GPU и не увидит флаг отмены, `cancel()` завершит процесс.
+    TrainingControl.shared.beginRun()
+    defer { TrainingControl.shared.endRun() }
+
     let engine = MetalEngine.shared
     let session = GpuSession(engine)
 
@@ -800,6 +920,11 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
     }
     // Тензоры под пачку — создаются один раз и живут весь прогон.
     let inputPool = (0..<effBatch).map { _ in GPUTensor(engine: engine, rows: 3, cols: pw * ph) }
+    // Результат MSE тоже переиспользуется: иначе на каждый шаг создавался
+    // новый 4-байтовый shared-буфер (тот же churn драйвера, что и в санации).
+    let mseOutBufs = (0..<effBatch).map { _ in
+        engine.device.makeBuffer(length: 4, options: .storageModeShared)!
+    }
 
     // «Полный проход» по набору: при пачке >1 число оптимизаторских шагов
     // автоматически сокращается (кадры за шаг = effBatch). Пользовательский
@@ -874,7 +999,8 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
                                               beta: rgbKLBeta)
                 recons.append(batchCache.recon)
                 // MSE считается прямо на GPU (без чтения полных тензоров на CPU).
-                mseBufs.append(session.encodeMSE(recon: batchCache.recon, target: t))
+                mseBufs.append(session.encodeMSE(recon: batchCache.recon, target: t,
+                                                 into: mseOutBufs[b]))
                 if firstCache == nil { firstCache = batchCache }
                 if firstGrads == nil { firstGrads = grads }
                 if accGrads == nil {
@@ -965,12 +1091,9 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
             }
 
             // Санация: NaN/Inf в градиентах → 0; глобальный клиппинг нормы.
-            if effBatch > 1 {
-                for gradient in accGrads! {
-                    gradient.setData(gradient.toArray().map { $0 / Float(effBatch) })
-                }
-            }
-            sanitizeGrads(accGrads!, maxNorm: 1.0)
+            // Деление на размер пачки делается в том же проходе (preScale),
+            // а не отдельными toArray/setData на каждый тензор.
+            sanitizeGrads(accGrads!, maxNorm: 1.0, preScale: 1.0 / Float(effBatch))
 
             // Adam по накопленным градиентам (lr делится на размер пачки)
             t += 1
@@ -2157,16 +2280,7 @@ final class GPUFramePool {
         // Переиспользуемые staging-буферы: пик памяти ≈ batch × кадр.
         // (без `!`: при OOM пользователь получал падение на разыменовании nil
         // без единого слова о том, чего не хватило)
-        let staging = (0..<batch).map { _ in
-            guard let b = engine.device.makeBuffer(length: frameBytes, options: .storageModeShared) else {
-                fatalError(allocationFailureMessage(
-                    bytes: frameBytes,
-                    availableBytes: Int(engine.device.recommendedMaxWorkingSetSize)
-                        - engine.device.currentAllocatedSize,
-                    what: "staging-буфер кадра \(frameBytes / 1024) КиБ"))
-            }
-            return b
-        }
+        let staging = (0..<batch).map { _ in engine.takeStaging(frameBytes) }
 
         yumeLog("GPUFramePool: дозагрузка чанка \(s)..<\(e) — \(n) кадров, порциями по \(batch)")
         var j = 0
@@ -2211,8 +2325,9 @@ final class GPUFramePool {
                           destinationOffset: 0, size: frameBytes)
             }
             blit.endEncoding()
-            cmd.commit()
-            cmd.waitUntilCompleted()
+            engine.waitForCompletion(cmd, what: "дозагрузка окна кадров \(s)..<\(e)")
+            // Staging больше не нужен — возвращаем в пул (после завершения GPU).
+            for b in staging { engine.putStaging(b) }
             j = jend
             onChunk?(j, n)
         }

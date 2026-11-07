@@ -159,6 +159,105 @@ func testTensorBufferPool() {
     }
 }
 
+func testTensorStagingPool() {
+    section("TensorStagingPool: staging-буферы переиспользуются")
+
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let t = GPUTensor(engine: engine, rows: 8, cols: 8)
+    let vals = (0..<64).map { Float($0) * 0.01 }
+
+    // Прогрев: первый setData/toArray могут выделить staging.
+    t.setData(vals)
+    _ = t.toArray()
+
+    let before = engine.totalStagingAllocations
+    let calls = 100
+    var lastCount = 0
+    for _ in 0..<calls {
+        t.setData(vals)
+        let a = t.toArray()
+        lastCount = a.count
+    }
+    let delta = engine.totalStagingAllocations - before
+    expectEqual(lastCount, 64, "toArray вернул 64 значения")
+    expect(delta <= 2,
+           String(format: "%d циклов setData+toArray: %d новых staging-буферов (ожидается ≤ 2)",
+                  calls, delta))
+}
+
+func testGradSanitizeBatched() {
+    section("GradSanitize: батчевая санация без аллокаций на тензор")
+
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+
+    // 12 тензоров — столько градиентов у ConvVAE (6 слоёв × W,b).
+    var grads: [GPUTensor] = []
+    for i in 0..<12 {
+        var data = (0..<64).map { Float($0 % 7) * 0.001 + Float(i) * 0.0001 }
+        if i == 0 {
+            data[0] = .nan
+            data[1] = .infinity
+            data[2] = -.infinity
+        }
+        grads.append(GPUTensor(engine: engine, data: data, rows: 8))
+    }
+
+    // Прогрев: первый вызов наполняет пул staging-буферов.
+    sanitizeGrads(grads, maxNorm: 1.0)
+
+    let before = engine.totalStagingAllocations
+    let calls = 50
+    for _ in 0..<calls { sanitizeGrads(grads, maxNorm: 1.0) }
+    let delta = engine.totalStagingAllocations - before
+    expect(delta <= 2,
+           String(format: "санация %d раз: %d новых staging-буферов (ожидается ≤ 2)",
+                  calls, delta))
+
+    // Семантика: NaN/Inf → 0 (проверяем после последнего вызова).
+    let a0 = grads[0].toArray()
+    expectEqual(a0[0], 0, "NaN заменён на 0")
+    expectEqual(a0[1], 0, "+Inf заменён на 0")
+    expectEqual(a0[2], 0, "-Inf заменён на 0")
+
+    // Клиппинг: суммарная норма не превышает maxNorm, направление сохраняется.
+    var big: [GPUTensor] = []
+    for _ in 0..<4 {
+        big.append(GPUTensor(engine: engine,
+                             data: [Float](repeating: 10, count: 64), rows: 8))
+    }
+    sanitizeGrads(big, maxNorm: 1.0)
+    var norm: Float = 0
+    for g in big { for v in g.toArray() { norm += v * v } }
+    let n = sqrt(norm)
+    expect(n <= 1.0001, String(format: "клиппинг: норма %.4f ≤ 1", n))
+    expect(n > 0.9, String(format: "клиппинг сохраняет направление: норма %.4f ≈ 1", n))
+}
+
+func testTrainingControlLifecycle() {
+    section("TrainingControl: жизненный цикл остановки")
+
+    let tc = TrainingControl.shared
+    tc.reset()
+    expect(!tc.isRunning, "до старта прогон не активен")
+    expect(!tc.isCancelled, "до старта отмена сброшена")
+
+    tc.beginRun()
+    expect(tc.isRunning, "beginRun: прогон активен")
+
+    // graceSeconds большой: watchdog не должен успеть выстрелить за тест.
+    // Проверяем только состояние флагов, а не аварийный exit.
+    tc.cancel(graceSeconds: 60)
+    expect(tc.isCancelled, "cancel: флаг отмены выставлен")
+
+    tc.endRun()
+    expect(!tc.isRunning, "endRun: прогон завершён")
+
+    tc.reset()
+    expect(!tc.isCancelled, "reset: отмена снята")
+}
+
 func testHTTP() {
     section("HTTP: парсинг запросов")
 
@@ -3322,6 +3421,9 @@ func runAll() {
     let tests: [(String, () -> Void)] = [
         ("HTTP", testHTTP),
         ("TensorBufferPool", testTensorBufferPool),
+        ("TensorStagingPool", testTensorStagingPool),
+        ("GradSanitize", testGradSanitizeBatched),
+        ("TrainingControl", testTrainingControlLifecycle),
         ("ParamAPI", testParamAPI),
         ("Checkpoints", testCheckpoints),
         ("Backups", testBackups),

@@ -66,6 +66,67 @@ public final class MetalEngine {
         return b
     }
 
+    // MARK: - Пул shared staging-буферов
+
+    /// Сколько реально выделено shared-буферов (staging для CPU↔GPU).
+    ///
+    /// Раньше `GPUTensor.toArray/setData` создавали новый `MTLBuffer` на
+    /// КАЖДЫЙ вызов, а `sanitizeGrads` вызывал их по разу на тензор на каждом
+    /// шаге. За 15k шагов это сотни тысяч ресурсов, после которых драйвер AMD
+    /// встаёт внутри `newBufferWithBytes` (проверено стеком процесса).
+    /// Теперь staging берётся из пула и возвращается после `waitUntilCompleted`.
+    public private(set) var totalStagingAllocations = 0
+    private let stagingPoolLock = NSLock()
+    private var pooledStaging: [Int: [MTLBuffer]] = [:]
+
+    /// Берёт shared-буфер нужного размера из пула (или выделяет новый).
+    func takeStaging(_ bytes: Int) -> MTLBuffer {
+        let key = max(bytes, 1)
+        stagingPoolLock.lock()
+        if var stack = pooledStaging[key], let b = stack.popLast() {
+            pooledStaging[key] = stack
+            stagingPoolLock.unlock()
+            return b
+        }
+        stagingPoolLock.unlock()
+        guard let b = device.makeBuffer(length: key, options: .storageModeShared) else {
+            fatalError(allocationFailureMessage(
+                bytes: key,
+                availableBytes: Int(device.recommendedMaxWorkingSetSize)
+                    - device.currentAllocatedSize,
+                what: "staging-буфер \(key / 1024) КиБ"))
+        }
+        stagingPoolLock.lock(); totalStagingAllocations += 1; stagingPoolLock.unlock()
+        return b
+    }
+
+    /// Возвращает staging в пул. Вызывать только после завершения GPU-команды,
+    /// которая его читала/писала.
+    func putStaging(_ b: MTLBuffer) {
+        stagingPoolLock.lock(); defer { stagingPoolLock.unlock() }
+        pooledStaging[b.length, default: []].append(b)
+    }
+
+    /// Ждёт command buffer с жёстким пределом времени.
+    ///
+    /// `waitUntilCompleted()` при зависании GPU не возвращается никогда —
+    /// именно так обучение «висело» десятки минут. Для одиночных blit-ов
+    /// (чтение/запись тензоров) используем тот же предел, что и `GpuSession`.
+    @discardableResult
+    func waitForCompletion(_ cmd: MTLCommandBuffer, what: String,
+                           seconds: Double = 30) -> Double {
+        let sem = DispatchSemaphore(value: 0)
+        cmd.addCompletedHandler { _ in sem.signal() }
+        cmd.commit()
+        if sem.wait(timeout: .now() + seconds) == .timedOut {
+            yumeLog("❌ GPU не ответила за \(Int(seconds)) с — \(what). "
+                  + "Аварийный выход, чтобы не перегрузить WindowServer.")
+            exit(70)
+        }
+        let ms = (cmd.gpuEndTime - cmd.gpuStartTime) * 1000
+        return ms.isFinite ? ms : 0
+    }
+
     static let shaderSource = """
     #include <metal_stdlib>
     using namespace metal;
@@ -1147,8 +1208,7 @@ public final class MetalEngine {
         let threads = MTLSize(width: m, height: n, depth: 1)
         enc.dispatchThreads(threads, threadsPerThreadgroup: tg)
         enc.endEncoding()
-        cmd.commit()
-        cmd.waitUntilCompleted()
+        waitForCompletion(cmd, what: "CPU-умножение \(m)×\(k)×\(n)")
         let ptr = cbuf.contents().assumingMemoryBound(to: Float.self)
         var out = [Float](repeating: 0, count: m * n)
         for i in 0..<(m * n) { out[i] = ptr[i] }

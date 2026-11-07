@@ -731,6 +731,7 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
                     "extracting": self.isExtracting,
                     "thermal": self.thermalStateName(),
                     "gpuBufferAllocations": MetalEngine.shared.totalBufferAllocations,
+                    "gpuStagingAllocations": MetalEngine.shared.totalStagingAllocations,
                 ]
                 if let data = try? JSONSerialization.data(withJSONObject: dict),
                    let s = String(data: data, encoding: .utf8) {
