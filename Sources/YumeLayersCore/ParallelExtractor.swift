@@ -112,7 +112,7 @@ private final class SegmentBuffer {
 
 final class ParallelExtractor {
     struct Options {
-        /// Максимальное число кадров (0 — все кадры исходника).
+        /// Сколько ПЕРВЫХ кадров извлечь (0 — все кадры исходника).
         var maxFrames: Int = 0
         /// Смещение глобальной нумерации кадров.
         var startIndex: Int = 0
@@ -157,13 +157,12 @@ final class ParallelExtractor {
         /// Сколько чанков (совместимость с ранними версиями плана).
         var segments: Int { chunks.count }
 
-        /// Частота, с которой ffmpeg отдаёт кадры. Без пользовательского
-        /// лимита — ровно как в исходнике; с лимитом — равномерная выборка.
-        var outputFPS: Double {
-            guard duration > 0 else { return sourceFPS }
-            if targetFrames >= allFrames { return sourceFPS }
-            return Double(targetFrames) / duration
-        }
+        /// Частота, с которой ffmpeg отдаёт кадры. Всегда исходная: лимит
+        /// `maxFrames` означает «первые N кадров подряд», а не равномерную
+        /// выборку по всей длине ролика. Для теста на 2000 кадрах это важно:
+        /// кнопка «Вытащить кадры» должна эмулировать полную работу на начале
+        /// видео, а не прореживать его целиком.
+        var outputFPS: Double { sourceFPS }
 
         /// Временной диапазон чанка: границы привязаны к номерам кадров,
         /// чтобы стыки соседних чанков были точными — каждый кадр ролика

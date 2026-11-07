@@ -431,12 +431,18 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
     private let folderField = NSTextField(string: "")
     private let widthField = NSTextField(string: "854")
     private let heightField = NSTextField(string: "480")
+    private let extractLimitCtl = EditableValueControl(value: "0")
     private let epochsCtl = EditableValueControl(value: "20")
     private let stepsCtl = EditableValueControl(value: "20")
     private let batchCtl = EditableValueControl(value: "1")
     private let lrCtl = EditableValueControl(value: "0.0003")
     private let pauseCtl = EditableValueControl(value: "250")
     private let powerCtl = EditableValueControl(value: "90")
+    /// Размер кадра, на котором обучается VAE. Исходные JPEG остаются
+    /// полноразмерными — декодер уменьшает их на лету (как старый стенд
+    /// 80×56, на котором сеть сходилась заметно лучше 480p).
+    private let widthCtl = EditableValueControl(value: "80")
+    private let heightCtl = EditableValueControl(value: "56")
     private let convPathCtl = EditableValueControl(value: "~/YumeLayers/checkpoints/conv.safetensors", width: 0)
     private let resumeSwitch = NSSwitch()
     private let adaptiveSwitch = NSSwitch()
@@ -589,6 +595,66 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
                 self.startExtraction(urls: self.videoURLs, append: false, maxFrames: maxFrames ?? 0)
             }
         }
+        // /api/set: универсальный сеттер всех параметров интерфейса. Каждый
+        // ключ обновляет тот же элемент управления, что и ручной ввод в UI,
+        // поэтому следующий вызов /api/train использует эти значения.
+        api.onSetParam = { [weak self] params in
+            guard let self = self else { return (false, [], params.keys.map { "\($0)" }) }
+            var applied: [String] = []
+            var unknown: [String] = []
+            DispatchQueue.main.sync {
+                for (key, value) in params {
+                    // Текстовый параметр: число/строка/bool → строка поля.
+                    func textParam(_ ctl: EditableValueControl, _ markUserEdited: inout Bool) -> Bool {
+                        guard let s = paramStringValue(value) else { return false }
+                        ctl.setValue(s)
+                        markUserEdited = true
+                        return true
+                    }
+                    switch key {
+                    case "lr":
+                        if textParam(self.lrCtl, &self.lrEditedByUser) { applied.append(key) } else { unknown.append(key) }
+                    case "epochs":
+                        if textParam(self.epochsCtl, &self.epochsEditedByUser) { applied.append(key) } else { unknown.append(key) }
+                    case "steps":
+                        if textParam(self.stepsCtl, &self.stepsEditedByUser) { applied.append(key) } else { unknown.append(key) }
+                    case "batch":
+                        if let s = paramStringValue(value) { self.batchCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
+                    case "width":
+                        if let s = paramStringValue(value) { self.widthCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
+                    case "height":
+                        if let s = paramStringValue(value) { self.heightCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
+                    case "pauseMs":
+                        if let s = paramStringValue(value) { self.pauseCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
+                    case "gpuPowerPercent":
+                        if let s = paramStringValue(value) { self.powerCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
+                    case "extractLimit":
+                        if let s = paramStringValue(value) { self.extractLimitCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
+                    case "convPath":
+                        if let s = paramStringValue(value) { self.convPathCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
+                    case "resume":
+                        if let b = paramBoolValue(value) { self.resumeSwitch.state = b ? .on : .off; applied.append(key) } else { unknown.append(key) }
+                    case "adaptiveThrottle":
+                        if let b = paramBoolValue(value) { self.adaptiveSwitch.state = b ? .on : .off; applied.append(key) } else { unknown.append(key) }
+                    case "selectedVideos":
+                        if let arr = value as? [String] {
+                            self.setSelectedVideos(arr.map { URL(fileURLWithPath: $0) })
+                            self.saveSelection()
+                            applied.append(key)
+                        } else { unknown.append(key) }
+                    default:
+                        unknown.append(key)
+                    }
+                }
+            }
+            return (unknown.isEmpty, applied, unknown)
+        }
+        api.onResetParams = { [weak self] in
+            DispatchQueue.main.async { self?.resetParams() }
+        }
+        api.onAutoTune = { [weak self] in
+            DispatchQueue.main.async { self?.autoTuneNow() }
+        }
         // /api/test-frames: проверка текущих кадров в памяти (JPEG-сигнатура,
         // декодирование, имена). count — сколько кадров проверить (0 — все).
         api.testFramesProvider = { [weak self] count in
@@ -650,9 +716,12 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
                     "selectedVideos": self.videoURLs.map { $0.path },
                     "framesCount": self.framesStore.count,
                     "processedCount": self.processedFrames.filter { $0 }.count,
+                    "extractLimit": self.extractLimitCtl.stringValue,
                     "epochs": self.epochsCtl.stringValue,
                     "steps": self.stepsCtl.stringValue,
                     "batch": self.batchCtl.stringValue,
+                    "width": self.widthCtl.stringValue,
+                    "height": self.heightCtl.stringValue,
                     "lr": self.lrCtl.stringValue,
                     "pauseMs": self.pauseCtl.stringValue,
                     "gpuPowerPercent": self.powerCtl.stringValue,
@@ -1093,8 +1162,12 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
                                                  eta: extractEtaLabel)
         extractProgressBlock.widthAnchor.constraint(equalToConstant: 340).isActive = true
 
+        let extractLimitRow = valueRow(
+            "Кадров для теста:",
+            extractLimitCtl,
+            info: "Сколько первых кадров извлечь. 0 — все кадры. Лимит не меняет частоту: берутся первые N кадров подряд при fps исходника, как при полном извлечении, а не прореженная выборка по всему ролику. Нужен для быстрой проверки обучения на 2000 кадрах.")
         let dataPage = groupCard(title: "1. Видео",
-                                 contentViews: [folderRow, extractRow,
+                                 contentViews: [folderRow, extractLimitRow, extractRow,
                                                 extractProgressBlock, extractHint],
                                  spacing: 12)
 
@@ -1125,6 +1198,10 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
                      info: "Сколько обновлений весов выполняется за одну эпоху. Один шаг = обработка одного кадра + обновление весов."),
             valueRow("Размер батча:", batchCtl,
                      info: "Сколько кадров обрабатывается за один шаг обучения. Больший батч быстрее проходит эпоху при той же тепловой нагрузке: регулятор держит долю работы GPU, а не число шагов. Верхняя граница — по свободной памяти GPU."),
+            valueRow("Ширина обучения:", widthCtl,
+                     info: "Ширина кадра, до которой уменьшаются кадры при обучении. Исходные JPEG в памяти остаются полноразмерными. По умолчанию 80 — быстрый тест сходимости; 854 — полное разрешение (медленнее и хуже сходится на этой сети)."),
+            valueRow("Высота обучения:", heightCtl,
+                     info: "Высота кадра, до которой уменьшаются кадры при обучении. По умолчанию 56. Вместе с шириной должна быть кратна 8 (лишнее добивается краем без растяжения)."),
             valueRow("Скорость обучения:", lrCtl,
                      info: "Размер шага градиентного спуска (learning rate). Слишком большое значение — расходимость/NaN, слишком малое — очень медленное обучение. По умолчанию 0.0003."),
             valueRow("Пауза, мс:", pauseCtl,
@@ -1743,9 +1820,12 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
         layoutViews["reconsProgress"] = reconsProgressBlock
         layoutViews["chart"] = chart
         layoutViews["folderRow"] = folderRow
+        layoutViews["extractLimitCtl"] = extractLimitCtl
         layoutViews["epochsCtl"] = epochsCtl
         layoutViews["stepsCtl"] = stepsCtl
         layoutViews["batchCtl"] = batchCtl
+        layoutViews["widthCtl"] = widthCtl
+        layoutViews["heightCtl"] = heightCtl
         layoutViews["lrCtl"] = lrCtl
         layoutViews["pauseCtl"] = pauseCtl
         layoutViews["powerCtl"] = powerCtl
@@ -2006,9 +2086,11 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func extractFrames() {
         guard !videoURLs.isEmpty else { return }
+        // Лимит для теста: 0 — все кадры, N — первые N кадров подряд.
+        let limit = max(0, extractLimitCtl.intValue(def: 0))
         // Если в редакторе уже есть кадры — спрашиваем: обнулить или добавить.
         if framesStore.isEmpty {
-            startExtraction(urls: videoURLs, append: false)
+            startExtraction(urls: videoURLs, append: false, maxFrames: limit)
             return
         }
         let alert = NSAlert()
@@ -2019,9 +2101,9 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "Отмена")
         switch alert.runModal() {
         case .alertFirstButtonReturn:
-            startExtraction(urls: videoURLs, append: true)
+            startExtraction(urls: videoURLs, append: true, maxFrames: limit)
         case .alertSecondButtonReturn:
-            startExtraction(urls: videoURLs, append: false)
+            startExtraction(urls: videoURLs, append: false, maxFrames: limit)
         default:
             break
         }
@@ -2157,12 +2239,29 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
             log("Видео \(i + 1)/\(urls.count): \(u.lastPathComponent)")
         }
 
-        log("extract: urls=\(urls.count), append=\(append), maxFrames=\(maxFrames)")
+        log("extract: urls=\(urls.count), append=\(append), maxFrames=\(maxFrames) (первые N кадров)")
 
         DispatchQueue.global(qos: .userInitiated).async {
-            // Предварительный подсчёт кадров по всем видео (для общего прогресса).
-            let counts = urls.map { FrameExtractor(url: $0, options: FrameExtractor.Options(maxFrames: maxFrames)).estimatedCount() }
-            let totalAll = counts.reduce(0, +)
+            // Лимит — общий на всю операцию: раздаём его видео по порядку.
+            // 0 означает «все кадры», поэтому отдельный массив нужен, чтобы
+            // после исчерпания лимита не запускать оставшиеся видео.
+            var videoLimits: [Int] = []
+            if maxFrames > 0 {
+                var remaining = maxFrames
+                for u in urls {
+                    guard remaining > 0 else { videoLimits.append(0); continue }
+                    let count = FrameExtractor(
+                        url: u,
+                        options: FrameExtractor.Options(maxFrames: remaining)
+                    ).estimatedCount()
+                    let take = min(remaining, count)
+                    videoLimits.append(take)
+                    remaining -= take
+                }
+            } else {
+                videoLimits = urls.map { FrameExtractor(url: $0).estimatedCount() }
+            }
+            let totalAll = videoLimits.reduce(0, +)
             guard totalAll > 0 else {
                 DispatchQueue.main.async {
                     self.finishExtraction(.failure(FrameExtractError.unreadableAsset))
@@ -2182,11 +2281,13 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
                 if DispatchQueue.main.sync(execute: { self.extractCancelled }) {
                     lastResult = .failure(FrameExtractError.cancelled); break
                 }
+                let videoLimit = maxFrames > 0 ? videoLimits[i] : 0
+                if maxFrames > 0 && videoLimit <= 0 { continue }
                 videoIndex = i
                 DispatchQueue.main.async {
                     self.setStatus("Извлечение: видео \(i + 1)/\(urls.count)", ok: true)
                 }
-                let extractor = FrameExtractor(url: u, options: FrameExtractor.Options(maxFrames: maxFrames, startIndex: startIndex))
+                let extractor = FrameExtractor(url: u, options: FrameExtractor.Options(maxFrames: videoLimit, startIndex: startIndex))
                 DispatchQueue.main.sync {
                     self.currentExtractor = extractor
                     if self.extractCancelled { extractor.cancel() }
@@ -2510,8 +2611,14 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
         guard !isTraining, !isReconstructing, !isExtracting, window.attachedSheet == nil else { return }
         window.makeFirstResponder(nil)
         var p = Params()
-        p.width = 854
-        p.height = 480
+        // Размер обучения читается из полей как есть. Кадры в памяти
+        // остаются полноразмерными: VAE декодирует их сразу в этот размер.
+        p.width = widthCtl.intValue(def: 80)
+        p.height = heightCtl.intValue(def: 56)
+        guard p.width >= 8, p.height >= 8, p.width <= 8192, p.height <= 8192 else {
+            log("Недопустимый размер обучения: \(p.width)×\(p.height) — допустимо 8…8192")
+            return
+        }
         p.epochs = max(1, epochsCtl.intValue(def: 20))
         p.steps = max(1, stepsCtl.intValue(def: 20))
         p.batch = max(1, batchCtl.intValue(def: 1))
@@ -2742,6 +2849,8 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
         epochsCtl.setValue("20")
         stepsCtl.setValue("20")
         batchCtl.setValue("1")
+        widthCtl.setValue("80")
+        heightCtl.setValue("56")
         lrCtl.setValue("0.0003")
         pauseCtl.setValue("250")
         powerCtl.setValue("90")

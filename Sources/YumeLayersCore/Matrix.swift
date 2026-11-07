@@ -56,12 +56,15 @@ public func matmul(_ a: Matrix, _ b: Matrix) -> Matrix {
 }
 
 public func add(_ a: Matrix, _ b: Matrix) -> Matrix {
+    // vDSP длины не проверяет: короткий b — чтение за границей буфера.
+    precondition(a.data.count == b.data.count, "add: размеры матриц не совпадают")
     var out = a.copy()
     vDSP_vadd(a.data, 1, b.data, 1, &out.data, 1, vDSP_Length(a.data.count))
     return out
 }
 
 public func mul(_ a: Matrix, _ b: Matrix) -> Matrix {
+    precondition(a.data.count == b.data.count, "mul: размеры матриц не совпадают")
     var out = a.copy()
     vDSP_vmul(a.data, 1, b.data, 1, &out.data, 1, vDSP_Length(a.data.count))
     return out

@@ -65,6 +65,8 @@ public final class YumeLogBus {
 }
 
 /// Лог в консоль + файл ~/YumeLayers/train.log + журнал UI (через YumeLogBus).
+private let yumeLogFileLock = NSLock()
+
 public func yumeLog(_ s: String) {
     let fmt = DateFormatter()
     fmt.dateFormat = "HH:mm:ss"
@@ -75,6 +77,10 @@ public func yumeLog(_ s: String) {
     let url = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("YumeLayers", isDirectory: true)
         .appendingPathComponent("train.log")
+    // Запись под замком: извлечение и обучение пишут из разных потоков,
+    // и seekToEnd+write без синхронизации перемешивал/терял строки.
+    yumeLogFileLock.lock()
+    defer { yumeLogFileLock.unlock() }
     if let handle = try? FileHandle(forWritingTo: url) {
         handle.seekToEndOfFile()
         handle.write(Data(line.utf8))
@@ -141,6 +147,44 @@ public struct Params {
     /// и не даёт уйти выше 89 °C (перезагрузка случалась на 93 °C).
     public var gpuPowerPercent = defaultGpuPowerPercent
     public var outPrefix: String
+}
+
+/// Приведение произвольного значения из JSON к строке текстового поля параметра.
+/// Целые числа — без десятичной точки, дробные — до 6 знаков, bool — '1'/'0'.
+public func paramStringValue(_ value: Any) -> String? {
+    if let s = value as? String { return s }
+    if let b = value as? Bool { return b ? "1" : "0" }
+    if let num = value as? NSNumber {
+        let d = num.doubleValue
+        if d.rounded() == d && abs(d) <= Double(Int.max) {
+            return "\(Int(d))"
+        }
+        return String(format: "%.6f", d)
+    }
+    return nil
+}
+
+/// Приведение значения из JSON к Bool переключателя. Принимает bool,
+/// 1/0 (числа) и строки true/1/yes/on, false/0/no/off. Всё остальное — nil.
+public func paramBoolValue(_ value: Any) -> Bool? {
+    if let b = value as? Bool { return b }
+    if let i = value as? Int {
+        if i == 1 { return true }
+        if i == 0 { return false }
+        return nil
+    }
+    if let s = value as? String {
+        switch s.lowercased() {
+        case "true", "1", "yes", "on": return true
+        case "false", "0", "no", "off": return false
+        default: return nil
+        }
+    }
+    if let num = value as? NSNumber {
+        if num.doubleValue == 1 { return true }
+        if num.doubleValue == 0 { return false }
+    }
+    return nil
 }
 
 /// Кадр, извлечённый в память (без записи на диск).

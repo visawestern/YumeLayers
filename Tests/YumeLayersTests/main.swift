@@ -73,6 +73,30 @@ let gHasMetal = MTLCreateSystemDefaultDevice() != nil
 
 // MARK: - 1. HTTP-парсер локального API
 
+func testParamAPI() {
+    section("Параметры API: приведение значений JSON → поля/переключатели")
+
+    // paramStringValue: число/строка/bool → строка текстового поля.
+    expectEqual(paramStringValue("0.01"), "0.01", "строка передаётся как есть")
+    expectEqual(paramStringValue(0.01), "0.010000", "дробное число → 6 знаков")
+    expectEqual(paramStringValue(80), "80", "целое число → без точки")
+    expectEqual(paramStringValue(2000), "2000", "крупное целое → без точки")
+    expectEqual(paramStringValue(true), "1", "bool → '1'")
+    expectEqual(paramStringValue(3.5), "3.500000", "дробное 3.5 → 6 знаков")
+    expect(paramStringValue([1]) == nil, "несовместимый тип → nil")
+
+    // paramBoolValue: bool/0/1/строка → Bool.
+    expectEqual(paramBoolValue(true), true, "bool true")
+    expectEqual(paramBoolValue(false), false, "bool false")
+    expectEqual(paramBoolValue(1), true, "число 1 → true")
+    expectEqual(paramBoolValue(0), false, "число 0 → false")
+    expectEqual(paramBoolValue("true"), true, "'true' → true")
+    expectEqual(paramBoolValue("off"), false, "'off' → false")
+    expectEqual(paramBoolValue("yes"), true, "'yes' → true")
+    expect(paramBoolValue("abc") == nil, "непарсимо → nil")
+    expect(paramBoolValue(2) == nil, "2 не является bool-значением → nil")
+}
+
 func testHTTP() {
     section("HTTP: парсинг запросов")
 
@@ -2567,10 +2591,20 @@ func testFrameExtractionPlan() {
 
     let limited = ParallelExtractor.makePlan(duration: 10, sourceFPS: 24,
                                              maxFrames: 100, cores: 4)
+    expectEqual(limited.allFrames, 240, "лимит не меняет общее число кадров ролика")
     expectEqual(limited.targetFrames, 100, "лимит ограничивает число кадров")
-    expectClose(limited.outputFPS, 10, 1e-9, "при лимите fps пересчитывается")
+    // Лимит — это ПЕРВЫЕ N кадров подряд, а не равномерная выборка по всему
+    // ролику: частота остаётся исходной, иначе тест на 2000 кадров был бы
+    // прореженным по всей длине, а не эмуляцией полной работы на начале.
+    expectClose(limited.outputFPS, 24, 1e-9, "при лимите fps остаётся исходным")
     expectEqual(limited.chunks.map { $0.frameCount }.reduce(0, +), 100,
                 "лимит делится по чанкам")
+    if let last = limited.chunks.last {
+        expectClose(limited.timeRange(of: last).end, 100.0 / 24.0, 1e-9,
+                    "лимит занимает первые 100 кадров, а не весь ролик")
+    } else {
+        expect(false, "у лимита есть чанки")
+    }
 
     // Времена чанков берутся из номеров кадров: стык двух чанков — ровно
     // кадр, а не «примерно секунда».
@@ -2682,15 +2716,15 @@ func testChunkBoundariesAreExact() {
     expectEqual(full.frames, ref,
                 "кадры на стыках чанков байт-в-байт совпадают с эталоном")
 
-    // Лимит кадров меняет выходной fps — стыки обязаны остаться точными.
+    // Лимит кадров — это первые N кадров при исходном fps: они обязаны
+    // байт-в-байт совпасть с началом полного извлечения. Раньше лимит
+    // пересчитывал fps и прореживал ролик по всей длине — для теста на
+    // 2000 кадров это была бы другая выборка, а не эмуляция полной работы.
     let limited = extract(maxFrames: 300)
     expectEqual(limited.frames.count, 300, "лимит: ровно 300 кадров")
-    let limDir = root.appendingPathComponent("ref_limited")
-    try? FileManager.default.createDirectory(at: limDir, withIntermediateDirectories: true)
-    let limRef = referenceFrames(video: video, fps: 15, count: 300, dir: limDir)
-    expectEqual(limRef.count, 300, "эталон с лимитом собран")
-    expectEqual(limited.frames, limRef,
-                "при лимите кадры на стыках тоже не сдвигаются")
+    expectClose(limited.plan.outputFPS, 30, 1e-9, "лимит сохраняет исходный fps")
+    expectEqual(limited.frames, Array(full.frames.prefix(300)),
+                "лимит берёт первые 300 кадров подряд, без прореживания")
 }
 
 func testSoftwareFrameExtractionInMemory() {
@@ -2741,6 +2775,16 @@ func testSoftwareFrameExtractionInMemory() {
         expect(frames.allSatisfy { $0.count > 100 && $0.first == 0xFF && $0.dropFirst().first == 0xD8 },
                "каждый кадр — JPEG (FFD8) в памяти")
         expect(ordinals == Array(0..<frames.count), "порядок кадров строгий")
+        // Тот же путь, которым обучается VAE: JPEG из памяти декодируется
+        // сразу в размер обучения (80×56), исходный кадр остаётся полным.
+        if let first = frames.first, let rgb = loadImageRGB(data: first, w: 80, h: 56) {
+            expectEqual(rgb.count, 80 * 56 * 3,
+                        "кадр декодируется в размер обучения 80×56")
+            expect(rgb.allSatisfy { $0 >= 0 && $0 <= 1 },
+                   "значения после декодирования в 80×56 нормализованы")
+        } else {
+            expect(false, "кадр не декодировался в 80×56")
+        }
     case .failure(let e):
         expect(false, "извлечение упало: \(e)")
     case nil:
@@ -2951,11 +2995,271 @@ func testFrameValidation() {
            "причина указана: декодирование")
 }
 
+// MARK: - Математика и защита от краевых входов (ревью 2026-11)
+
+func testMathAndGuards() {
+    section("Математика: smoothstep, метрики кадра, нормализация")
+
+    // smoothstep: обычный порядок краёв (монотонный рост).
+    expect(smoothstep(0, 1, 0) == 0, "smoothstep: левый край = 0")
+    expect(smoothstep(0, 1, 1) == 1, "smoothstep: правый край = 1")
+    expect(smoothstep(0, 1, 0.5) == 0.5, "smoothstep: центр = 0.5")
+    expect(smoothstep(0, 1, -1) == 0, "smoothstep: кламп слева")
+    expect(smoothstep(0, 1, 2) == 1, "smoothstep: кламп справа")
+
+    // Обращённые края (e0 > e1) — так рендерер зовёт солнце:
+    // smoothstep(sunR, sunR*0.6, d). Раньше знаменатель клампился как
+    // max(e1-e0, 1e-6): обращённый диапазон инвертировался — диск солнца
+    // не закрашивался, а всё небо вокруг заливалось солнечным цветом.
+    expect(smoothstep(1, 0.5, 1) == 0, "smoothstep (обратный): t=e0 → 0")
+    expect(smoothstep(1, 0.5, 0.5) == 1, "smoothstep (обратный): t=e1 → 1")
+    expect(smoothstep(1, 0.5, 2) == 0, "smoothstep (обратный): кламп справа")
+    expect(smoothstep(1, 0.5, 0) == 1, "smoothstep (обратный): кламп слева")
+    // Вырожденные края — без деления на ноль.
+    expect(smoothstep(0.5, 0.5, 0.4) == 0, "smoothstep: e0==e1, t меньше")
+    expect(smoothstep(0.5, 0.5, 0.6) == 1, "smoothstep: e0==e1, t больше")
+
+    // Метрики кадра (FrameMetrics).
+    expect(lumaAt([1, 1, 1], 0) == 1, "lumaAt: белый пиксель = 1")
+    expect(abs(lumaAt([1, 0, 0], 0) - 0.299) < 1e-6, "lumaAt: красный = 0.299")
+    expect(maxPixelDelta([0, 1, 0.5], [1, 1, 0.5]) == 1, "maxPixelDelta: максимум разности")
+    expect(maxPixelDelta([0], [0, 1, 2]) == 0, "maxPixelDelta: короткий кадр безопасен")
+
+    // rgbToFloats: короткий буфер не читает за границей (остаток — нули).
+    let short = FrameRGBExtractor.rgbToFloats(Data([255, 128, 0]), pixels: 2)
+    expect(short[0] == 1 && abs(short[1] - 128.0 / 255) < 1e-6 && short[2] == 0,
+           "rgbToFloats: доступные байты нормализованы")
+    expect(short[3] == 0 && short[4] == 0 && short[5] == 0,
+           "rgbToFloats: недостающие пиксели — нули (без крэша)")
+
+    // padToMultipleOf8: продление края (не растяжение) до кратного 8.
+    // Вход — RGB: на пиксель три значения, иначе функция читает за границей.
+    let (padded, pw, ph) = padToMultipleOf8([Float](repeating: 0.5, count: 3 * 3 * 3), w: 3, h: 3)
+    expectEqual(pw, 8, "pad: ширина до кратного 8")
+    expectEqual(ph, 8, "pad: высота до кратного 8")
+    expectEqual(padded.count, 8 * 8 * 3, "pad: размер кадра")
+    expect(padded.allSatisfy { $0 == 0.5 }, "pad: край продлён значением края")
+}
+
+// MARK: - Планировщик чанков и бюджеты памяти
+
+func testChunkPlanAndMemoryBudgets() {
+    section("Планировщик чанков ffmpeg и бюджеты памяти")
+
+    // План чанков: покрывает [0, target) без дыр, растёт 60→120→240→1920.
+    do {
+        let plan = ParallelExtractor.chunkPlan(target: 500)
+        expectEqual(plan.map { $0.frameCount }, [60, 120, 240, 80],
+                    "чанки: рост 60→120→240, хвост неполный")
+        expectEqual(plan.map { $0.startFrame }, [0, 60, 180, 420],
+                    "чанки: стыки без дыр и перекрытий")
+        expectEqual(plan.reduce(0) { $0 + $1.frameCount }, 500, "чанки: сумма = target")
+
+        let one = ParallelExtractor.chunkPlan(target: 50)
+        expectEqual(one.count, 1, "чанки: маленький ролик — один чанк")
+        expect(ParallelExtractor.chunkPlan(target: 0).isEmpty, "чанки: target=0 → пусто")
+
+        let big = ParallelExtractor.chunkPlan(target: 100_000)
+        expect(big.allSatisfy { $0.frameCount <= 1920 }, "чанки: потолок размера 1920")
+        expectEqual(big.reduce(0) { $0 + $1.frameCount }, 100_000,
+                    "чанки: 100k покрывается целиком")
+    }
+
+    // Порция дозагрузки кадров в VRAM: [64, 1024], от бюджетов RAM/GPU.
+    do {
+        let fb = 854 * 480 * 3 * 4
+        expectEqual(frameLoadChunkSize(frameBytes: 0, availableRAM: 32 << 30,
+                                       maxWorkingSet: 8 << 30),
+                    64, "порция: frameBytes=0 → консервативные 64")
+        expectEqual(frameLoadChunkSize(frameBytes: fb, availableRAM: 64 << 30,
+                                       maxWorkingSet: 64 << 30),
+                    1024, "порция: огромные бюджеты → потолок 1024")
+        // Нижняя граница — когда бюджета не хватает даже на пару кадров:
+        // 50% от 64 МБ = 32 МБ; 32 МБ / (2 × 4.9 МБ) ≈ 3 → зажим до 64.
+        expectEqual(frameLoadChunkSize(frameBytes: fb, availableRAM: 64 << 30,
+                                       maxWorkingSet: 64 << 20),
+                    64, "порция: малый GPU-бюджет → нижняя граница 64")
+        // 25% RAM против 50% рабочего набора: берётся минимум.
+        // 32 ГБ RAM → 8 ГиБ; 8 ГБ GPU → 4 ГиБ; 4 ГиБ / (2 × 4.9 МБ) = 436.
+        expectEqual(frameLoadChunkSize(frameBytes: fb, availableRAM: 32 << 30,
+                                       maxWorkingSet: 8 << 30),
+                    436, "порция: 32 ГБ RAM / 8 ГБ GPU → 436 кадров")
+    }
+}
+
+// MARK: - Рендер: солнце (регрессия инвертированного smoothstep)
+
+func testSunDiscRegression() {
+    section("Рендер: солнце — компактный диск, а не всё небо")
+
+    let sc = makeLayeredScene(w: 160, h: 120, seed: 2026)
+    let n = sc.w * sc.h
+    var warm = 0
+    // Солнце — слой группы .background: в sc.objects его нет (там только
+    // фигуры), поэтому ищем тёплый диск именно в фоне. Раньше проверка
+    // смотрела в objects и не могла увидеть регрессию вообще.
+    for i in 0..<n {
+        let r = sc.background[i * 3], g = sc.background[i * 3 + 1], b = sc.background[i * 3 + 2]
+        // Солнце: (1.0, 0.97, 0.88). Облака (0.98, 0.99, 1.0) отсекаются
+        // синим каналом, небо — тоже (синий канал высокий).
+        if r > 0.95 && g > 0.92 && b < 0.95 { warm += 1 }
+    }
+    let frac = Double(warm) / Double(n)
+    expect(warm >= 5, "солнце: тёплые пиксели в фоне есть (\(warm))")
+    expect(frac < 0.15,
+           "солнце: компактный диск — \(String(format: "%.3f", frac)) кадра (< 0.15); раньше инвертированный smoothstep заливал солнечным цветом всё небо")
+}
+
+// MARK: - Стабилизация: крошечные кадры (регрессия выхода за границы)
+
+func testStabilizeTinyFrames() {
+    section("Стабилизация: крошечные кадры не ломают границы выборки")
+
+    // 12×12: раньше availW=6, cw=max(8, 0)=8 > availW → offX<0 → sx выходил
+    // за [0, w) и чтение шло за границей буфера (крэш). Теперь сдвиг зажат
+    // запасом на кратность 8.
+    do {
+        var rng = SplitMix64(seed: 3)
+        let frames = (0..<5).map { _ in makeSyntheticScene(w: 12, h: 12, rng: &rng) }
+        let (aligned, cw, ch, report) = stabilizeFrames(frames, w: 12, h: 12, maxShift: 3)
+        expect(cw % 8 == 0 && ch % 8 == 0, "12×12: выход кратен 8 (\(cw)×\(ch))")
+        expect(cw <= 12 && ch <= 12, "12×12: выход не больше исходного кадра")
+        expect(aligned.allSatisfy { $0.count == cw * ch * 3 },
+               "12×12: размер выровненных кадров сходится")
+        expect(!aligned.isEmpty, "12×12: хотя бы один кадр остался")
+        expectEqual(report.sourceWidth, 12, "12×12: отчёт ссылается на источник")
+    }
+
+    // 16×16: поведение прежнее (умещается и сдвиг, и кратность 8).
+    do {
+        var rng = SplitMix64(seed: 7)
+        let frames = (0..<4).map { _ in makeSyntheticScene(w: 16, h: 16, rng: &rng) }
+        let (aligned, cw, ch, _) = stabilizeFrames(frames, w: 16, h: 16, maxShift: 8)
+        expectEqual(cw, 8, "16×16: выход 8×8 (сдвиг ±4, область 8)")
+        expectEqual(ch, 8, "16×16: выход 8×8")
+        expect(!aligned.isEmpty, "16×16: кадры остались")
+    }
+
+    // 8×8: на сдвиг места нет вовсе — честный ранний выход без изменений.
+    do {
+        var rng = SplitMix64(seed: 11)
+        let frames = (0..<3).map { _ in makeSyntheticScene(w: 8, h: 8, rng: &rng) }
+        let (aligned, cw, ch, _) = stabilizeFrames(frames, w: 8, h: 8, maxShift: 8)
+        expectEqual(aligned.count, 3, "8×8: кадры без изменений")
+        expectEqual(cw, 8, "8×8: размер без изменений")
+        expectEqual(ch, 8, "8×8: размер без изменений")
+    }
+}
+
+// MARK: - GPUFramePool: битый кадр (регрессия «фантома»)
+
+func testChannelLayout() {
+    section("Канальная раскладка: HWC ↔ CHW")
+
+    // 1. hwcToChw ставит каналы в планарный (CHW) порядок.
+    do {
+        // Кадр 2×1: пиксель 0 = (R0,G0,B0) = (1,2,3), пиксель 1 = (R1,G1,B1).
+        let hwc: [Float] = [1, 2, 3, 4, 5, 6]
+        let chw = hwcToChw(hwc)
+        // CHW: R-плоскость [1,4], G [2,5], B [3,6].
+        expectEqual(chw, [1, 4, 2, 5, 3, 6], "hwcToChw: планарная раскладка")
+    }
+
+    // 2. Круговая поездка — тождество.
+    do {
+        var rng = SplitMix64(seed: 99)
+        let img = makeSyntheticScene(w: 16, h: 12, rng: &rng)
+        expectEqual(maxAbsDiff(chwToHwc(hwcToChw(img)), img), 0,
+                    "chwToHwc∘hwcToChw = тождество")
+        expectEqual(maxAbsDiff(hwcToChw(chwToHwc(img)), img), 0,
+                    "hwcToChw∘chwToHwc = тождество")
+    }
+
+    // 3. Поведенческий: с правильной CHW-раскладкой и малым β модель учится
+    //    сохранять яркость кадра. В HWC-кормушке (каналы перепутаны) этого
+    //    не происходило — реконструкция схлопывалась в тёмный шум.
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    do {
+        let engine = MetalEngine.shared
+        let session = GpuSession(engine)
+        let w = 32, h = 24
+        var rng = SplitMix64(seed: 7)
+        let hwc = makeSyntheticScene(w: w, h: h, rng: &rng)
+        let chw = hwcToChw(hwc)
+        let x = GPUTensor(engine: engine, data: chw, rows: 3)
+        let vae = ConvVAEGPU(engine: engine)
+        let beta: Float = 0.01
+        let steps = 200
+        for step in 1...steps {
+            session.begin()
+            let c = vae.forward(session, image: x, w: w, h: h,
+                                deterministic: false, seed: UInt32(step))
+            let (_, g) = vae.backward(session, c, target: x, beta: beta)
+            vae.applyAdam(session, grads: g, t: step, lr: 0.01)
+            _ = session.end()
+        }
+        func lumaMean(_ hwc: [Float]) -> Double {
+            let n = hwc.count / 3
+            var s = 0.0
+            for i in 0..<n {
+                s += 0.299 * Double(hwc[i * 3])
+                    + 0.587 * Double(hwc[i * 3 + 1])
+                    + 0.114 * Double(hwc[i * 3 + 2])
+            }
+            return s / Double(n)
+        }
+        session.begin()
+        let c = vae.forward(session, image: x, w: w, h: h, deterministic: true)
+        _ = session.end()
+        let reconHWC = chwToHwc(c.recon.toArray())
+        let targetLuma = lumaMean(hwc)
+        let reconLuma = lumaMean(reconHWC)
+        expect(abs(reconLuma - targetLuma) < 0.30,
+               String(format: "CHW-кормушка: яркость реконструкции близка к исходной (%.2f vs %.2f)",
+                      reconLuma, targetLuma))
+    }
+}
+
+// MARK: - GPUFramePool: битый кадр (регрессия «фантома»)
+
+func testGPUFramePoolBrokenFrame() {
+    section("GPUFramePool: битый кадр → чёрная заглушка, не мусор")
+
+    guard MTLCreateSystemDefaultDevice() != nil else {
+        skip("Metal недоступен"); return
+    }
+    let engine = MetalEngine.shared
+
+    func solidFrame(_ v: Float) -> MemoryFrame {
+        let img = [Float](repeating: v, count: 8 * 8 * 3)
+        let png = encodePNG(width: 8, height: 8, rgb: img)!
+        return MemoryFrame(name: "f\(v)", jpeg: png)
+    }
+    // Кадр 1 — мусор вместо JPEG: раньше слот пула оставался с байтами
+    // предыдущего окна («фантом»), а непроинициализированный приватный
+    // буфер вообще содержал случайные значения.
+    let frames = [solidFrame(0.1),
+                  MemoryFrame(name: "bad", jpeg: Data([0x12, 0x34, 0x56])),
+                  solidFrame(0.9)]
+    guard let pool = GPUFramePool(engine: engine, frames: frames, w: 8, h: 8, size: 2) else {
+        expect(false, "пул не создался"); return
+    }
+
+    let a0 = pool.next().toArray()
+    expect(a0.allSatisfy { abs($0 - 0.1) < 0.02 },
+           "пул: валидный кадр декодирован (значение ~0.1)")
+
+    let a1 = pool.next().toArray()
+    expect(a1.allSatisfy { $0 == 0 },
+           "пул: битый кадр — чёрная заглушка (нули), не мусор и не чужой кадр")
+}
+
 // MARK: - main
 
 func runAll() {
     let tests: [(String, () -> Void)] = [
         ("HTTP", testHTTP),
+        ("ParamAPI", testParamAPI),
         ("Checkpoints", testCheckpoints),
         ("Backups", testBackups),
         ("Backups", testPrepareCheckpointForTraining),
@@ -3000,6 +3304,12 @@ func runAll() {
         ("FrameExtraction", testExtractionStreamsFramesAndProgress),
         ("ExtractBatch", testExtractBatchPolicy),
         ("FrameValidation", testFrameValidation),
+        ("MathGuards", testMathAndGuards),
+        ("ChunkPlan", testChunkPlanAndMemoryBudgets),
+        ("SunDisc", testSunDiscRegression),
+        ("StabilizeTiny", testStabilizeTinyFrames),
+        ("ChannelLayout", testChannelLayout),
+        ("PoolBrokenFrame", testGPUFramePoolBrokenFrame),
     ]
     if let filter = gFilter {
         print("Фильтр: \(filter)")

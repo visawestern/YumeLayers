@@ -31,6 +31,13 @@ final class ApiServer {
     var onTrain: ((Int, Bool) -> Void)?
     var onStop: (() -> Void)?
     var onExtract: (([String], Int?) -> Void)?
+    /// Применение произвольного набора параметров интерфейса.
+    /// Возвращает (ok, применено, нераспознано). Вызывается на главном потоке.
+    var onSetParam: (([String: Any]) -> (ok: Bool, applied: [String], unknown: [String]))?
+    /// Сброс параметров к умолчаниям (кнопка «Сброс»).
+    var onResetParams: (() -> Void)?
+    /// Авто-расчёт параметров под текущие кадры (кнопка «Авто-расчёт»).
+    var onAutoTune: (() -> Void)?
     /// Прогон проверки текущих кадров: возвращает JSON-отчёт.
     var testFramesProvider: ((Int) -> String)?
     var screenshotProvider: (() -> String?)?
@@ -46,13 +53,16 @@ final class ApiServer {
             let parameters = NWParameters.tcp
             parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!)
             let listener = try NWListener(using: parameters)
+            let portValue = port
             listener.newConnectionHandler = { [weak self] conn in
                 self?.handle(conn)
             }
+            // [weak self] + захваченный порт: сильное захватывание self здесь
+            // давало цикл listener → stateUpdateHandler → ApiServer.
             listener.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    print("API listener: готов на порту \(self.port)")
+                    print("API listener: готов на порту \(portValue)")
                 case .failed(let err):
                     print("API listener error: \(err)")
                 default:
@@ -192,7 +202,7 @@ final class ApiServer {
             let resume: Bool
             if let data = body.data(using: .utf8),
                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                limit = (obj["maxFrames"] as? Int) ?? 0
+                limit = max(0, (obj["maxFrames"] as? Int) ?? 0)
                 resume = (obj["resume"] as? Bool) ?? false
             } else {
                 limit = 0
@@ -219,6 +229,25 @@ final class ApiServer {
             }
             let maxFrames = obj["maxFrames"] as? Int
             onExtract?(paths, maxFrames)
+            send(status: 200, body: "{\"ok\":true}", to: conn)
+        case ("POST", "/api/set"):
+            // Универсальный сеттер параметров интерфейса. Тело — словарь
+            // «ключ → значение» (напр. {"lr": 0.01, "epochs": 6}).
+            // Возвращает, какие ключи применены, а какие не распознаны.
+            guard let data = body.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let setter = onSetParam else {
+                send(status: 400, body: "{\"error\":\"bad params\"}", to: conn); return
+            }
+            let r = setter(obj)
+            send(status: r.ok ? 200 : 400,
+                 body: json(["ok": r.ok, "applied": r.applied, "unknown": r.unknown]),
+                 to: conn)
+        case ("POST", "/api/reset"):
+            onResetParams?()
+            send(status: 200, body: "{\"ok\":true}", to: conn)
+        case ("POST", "/api/autotune"):
+            onAutoTune?()
             send(status: 200, body: "{\"ok\":true}", to: conn)
         case ("POST", "/api/test-frames"):
             // Проверка текущих кадров в памяти. Тело: {"count": N}

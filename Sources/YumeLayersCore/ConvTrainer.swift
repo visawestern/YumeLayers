@@ -5,6 +5,15 @@ import CoreGraphics
 import UniformTypeIdentifiers
 import Metal
 
+/// Вес KL-регуляризатора для RGB-свёрточного VAE.
+///
+/// β=1.0 (по умолчанию в `backward`) доминирует над реконструкцией: KL-градиент
+/// по элементам масштабируется как `β/M`, а MSE — как `2/N`; при N≈1.3e4 и
+/// M≈1e3 KL подавляет MSE, латент схлопывается к N(0,1), и декодер выдаёт
+/// тёмную кашу даже на ярких кадрах. Замер на одном ярком кадре (80×56):
+/// β=0.01 → 22.5 дБ, β=0.1 → 13.0 дБ, β=1.0 → 10.0 дБ. 0.01 — рабочая точка.
+let rgbKLBeta: Float = 0.01
+
 // ---------- Загрузка изображений ----------
 
 /// RGB [0,1], row-major сверху вниз, ровно w×h. Читает из файла.
@@ -73,6 +82,34 @@ public func padToMultipleOf8(_ img: [Float], w: Int, h: Int) -> ([Float], Int, I
         }
     }
     return (out, pw, ph)
+}
+
+/// Конвертация раскладки кадра HWC (межстрочный RGB: r,g,b,r,g,b,…) в CHW
+/// (планарный, канал-major: канал c, пиксель i → c·n + i). Свёрточный VAE
+/// (im2col, split2/merge2) работает строго в CHW, а `decodeImageRGB` и
+/// синтетические сцены отдают HWC. Раньше кадры кормились сетью как есть —
+/// каналы 1 и 2 перемешивались с соседними пикселями, и модель не могла
+/// выучить содержание (реконструкции схлопывались в тёмный шум).
+public func hwcToChw(_ hwc: [Float]) -> [Float] {
+    precondition(hwc.count % 3 == 0, "hwcToChw: длина не кратна 3")
+    let n = hwc.count / 3
+    var out = [Float](repeating: 0, count: hwc.count)
+    for c in 0..<3 {
+        for i in 0..<n { out[c * n + i] = hwc[i * 3 + c] }
+    }
+    return out
+}
+
+/// Обратная конвертация: CHW → HWC. Используется при отрисовке реконструкций
+/// и превью (все выходные PNG — HWC).
+public func chwToHwc(_ chw: [Float]) -> [Float] {
+    precondition(chw.count % 3 == 0, "chwToHwc: длина не кратна 3")
+    let n = chw.count / 3
+    var out = [Float](repeating: 0, count: chw.count)
+    for c in 0..<3 {
+        for i in 0..<n { out[i * 3 + c] = chw[c * n + i] }
+    }
+    return out
 }
 
 // ---------- Данные ----------
@@ -438,8 +475,9 @@ private func runReconsOn(engine: MetalEngine, items: [(name: String, jpeg: Data)
         var recons: [GPUTensor] = []
         for j in 0..<chunkItems.count {
             guard let img = imgs[j] else { continue }
+            // Декод даёт HWC; сеть ждёт CHW.
             let t = GPUTensor(engine: engine, rows: 3, cols: img.count / 3)
-            session.upload(t, from: img)
+            session.upload(t, from: hwcToChw(img))
             targets.append(t)
             targetToItem.append(j)
         }
@@ -467,8 +505,9 @@ private func runReconsOn(engine: MetalEngine, items: [(name: String, jpeg: Data)
             // и прогресс навсегда замирал на X-1 из N, не доходя до финиша.
             if let t = reconByItem[j] {
                 let r = t.toArray()
-                // Реконструкция — сразу в память (PNG), без записи на диск.
-                if let png = encodePNG(width: pw, height: ph, rgb: r) {
+                // Реконструкция в памяти — CHW (внутренняя раскладка сети);
+                // PNG ожидает HWC.
+                if let png = encodePNG(width: pw, height: ph, rgb: chwToHwc(r)) {
                     result[item.name] = png
                 }
             }
@@ -807,7 +846,8 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
             session.begin()
             if batchTensors.isEmpty {
                 for b in 0..<effBatch {
-                    let img = source.sequentialSample()
+                    // Кэш/данные отдают HWC — сеть ждёт CHW.
+                    let img = hwcToChw(source.sequentialSample())
                     batchImgs.append(img)
                     session.upload(inputPool[b], from: img)
                     batchTensors.append(inputPool[b])
@@ -824,7 +864,14 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
             for b in 0..<effBatch {
                 let t = batchTensors[b]
                 let batchCache = vae.forward(session, image: t, w: pw, h: ph)
-                let (_, grads) = vae.backward(session, batchCache, target: t)
+                // β=1.0 (по умолчанию) доминирует над реконструкцией: KL-член
+                // схлопывает латент к N(0,1) ещё до того, как декодер успевает
+                // что-то выучить — реконструкции выходят тёмными даже на ярких
+                // кадрах. Меро β=0.01 даёт MSE-члену вклад ~в 17 раз сильнее,
+                // и модель учится сохранять яркость и содержание (проверено
+                // замером на одном ярком кадре: 22.5 дБ против 10.0 при β=1).
+                let (_, grads) = vae.backward(session, batchCache, target: t,
+                                              beta: rgbKLBeta)
                 recons.append(batchCache.recon)
                 // MSE считается прямо на GPU (без чтения полных тензоров на CPU).
                 mseBufs.append(session.encodeMSE(recon: batchCache.recon, target: t))
@@ -1047,7 +1094,10 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
             // Реконструкции кадров после обучения живут в памяти, папка на
             // диске больше не нужна (и не запрашивается в интерфейсе).
             let outPath = "\(previewDir)/conv_ep\(String(format: "%03d", ep)).png"
-            try savePairPNG(path: outPath, w: pw, h: ph, target: pt, recon: pr)
+            // Цель и реконструкция в памяти — CHW (внутренняя раскладка сети);
+            // PNG-развёртка HWC.
+            try savePairPNG(path: outPath, w: pw, h: ph,
+                            target: chwToHwc(pt), recon: chwToHwc(pr))
             onProgress?(ep, meanLoss, meanPsnr, outPath)
         } else {
             onProgress?(ep, meanLoss, meanPsnr, nil)
@@ -2144,7 +2194,10 @@ final class GPUFramePool {
             }
             for k in 0..<cnt {
                 if let img = imgs[k], img.count * 4 == frameBytes {
-                    img.withUnsafeBytes { raw in
+                    // Кадр в памяти — HWC; сеть ждёт CHW. Без этой конвертации
+                    // каналы отправлялись перепутанными (см. hwcToChw).
+                    let chw = hwcToChw(img)
+                    chw.withUnsafeBytes { raw in
                         staging[k].contents().copyMemory(from: raw.baseAddress!, byteCount: frameBytes)
                     }
                 } else {
