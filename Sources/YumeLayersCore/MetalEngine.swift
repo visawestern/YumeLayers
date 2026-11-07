@@ -112,19 +112,62 @@ public final class MetalEngine {
     /// `waitUntilCompleted()` при зависании GPU не возвращается никогда —
     /// именно так обучение «висело» десятки минут. Для одиночных blit-ов
     /// (чтение/запись тензоров) используем тот же предел, что и `GpuSession`.
+    ///
+    /// Ожидание построено на ДВУХ источниках сигнала:
+    ///   • обработчик завершения (`addCompletedHandler`) — обычный путь;
+    ///   • статус самого буфера (`cmd.status`) — страховка. Обработчик Metal
+    ///     иногда не доставляется, и тогда ожидание на семафоре висело до
+    ///     предела и убивало процесс («GPU не ответила за 30 с»), хотя буфер
+    ///     давно был выполнен.
+    ///
+    /// Возвращает «время GPU» в мс, ограниченное стенным временем ожидания:
+    /// пустые/невнятные показания драйвера (gpuStartTime = 0) больше не
+    /// превращаются в гигантскую паузу регулятора.
     @discardableResult
     func waitForCompletion(_ cmd: MTLCommandBuffer, what: String,
                            seconds: Double = 30) -> Double {
         let sem = DispatchSemaphore(value: 0)
         cmd.addCompletedHandler { _ in sem.signal() }
         cmd.commit()
-        if sem.wait(timeout: .now() + seconds) == .timedOut {
-            yumeLog("❌ GPU не ответила за \(Int(seconds)) с — \(what). "
-                  + "Аварийный выход, чтобы не перегрузить WindowServer.")
-            exit(70)
+        let start = Date()
+        while true {
+            if sem.wait(timeout: .now() + 0.005) == .success { break }
+            let elapsed = Date().timeIntervalSince(start)
+            let state = MetalEngine.bufferState(cmd.status)
+            switch gpuWaitOutcome(state: state, handlerSignaled: false,
+                                  elapsedSeconds: elapsed, deadlineSeconds: seconds) {
+            case .done:
+                // Обработчик потерялся, но буфер уже выполнен — это не зависание.
+                yumeLog("⚠️ обработчик завершения не доставлен (\(what)) — "
+                      + "статус буфера: \(state). Продолжаю по статусу.")
+                break
+            case .timedOut:
+                yumeLog("❌ GPU не ответила за \(Int(seconds)) с — \(what). "
+                      + "Статус буфера: \(state), ошибка: \(cmd.error?.localizedDescription ?? "нет"). "
+                      + "Аварийный выход, чтобы не перегрузить WindowServer.")
+                exit(70)
+            case .keepWaiting:
+                continue
+            }
+            break
         }
-        let ms = (cmd.gpuEndTime - cmd.gpuStartTime) * 1000
-        return ms.isFinite ? ms : 0
+        let wallMs = Date().timeIntervalSince(start) * 1000
+        let reported = (cmd.gpuEndTime - cmd.gpuStartTime) * 1000
+        let ms = boundedGpuMs(reportedMs: reported, wallMs: wallMs)
+        if reported > wallMs + 50 {
+            yumeLog(String(format: "⚠️ драйвер сообщил %.0f мс GPU при %.0f мс стенного времени (%@) — показание отброшено",
+                           reported, wallMs, what))
+        }
+        return ms
+    }
+
+    /// Состояние command buffer в терминах политики ожидания.
+    static func bufferState(_ status: MTLCommandBufferStatus) -> GpuBufferState {
+        switch status {
+        case .completed: return .completed
+        case .error: return .failed
+        default: return .running
+        }
     }
 
     static let shaderSource = """

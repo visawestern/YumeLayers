@@ -850,6 +850,8 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
     var lastSensorAt = Date.distantPast
     var lastSensorLog = Date.distantPast
     var lastDutyCutAt = Date.distantPast
+    /// Когда последний раз сообщали про отброшенное показание времени GPU.
+    var lastGpuClockWarnAt = Date.distantPast
     yumeLog(String(format: "Нагрузка GPU: потолок %.0f%% (доля работы ≤ %.0f%%), цель %.0f °C",
                    Double(p.gpuPowerPercent), power.ceiling * 100, power.targetTempC))
 
@@ -961,15 +963,14 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
 
             var batchImgs: [[Float]] = []
             var batchTensors: [GPUTensor] = []
+            // Кадры берём ДО открытия command buffer сессии: при перезагрузке
+            // окна пул сам коммитит свои буферы.
+            var poolFrames: [GPUTensor] = []
             if let pool = gpuPool {
-                for b in 0..<effBatch {
-                    let frame = pool.next()
-                    inputPool[b].copyFrom(frame)
-                    batchTensors.append(inputPool[b])
-                }
+                for _ in 0..<effBatch { poolFrames.append(pool.next()) }
             }
             session.begin()
-            if batchTensors.isEmpty {
+            if poolFrames.isEmpty {
                 for b in 0..<effBatch {
                     // Кэш/данные отдают HWC — сеть ждёт CHW.
                     let img = hwcToChw(source.sequentialSample())
@@ -978,7 +979,14 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
                     batchTensors.append(inputPool[b])
                 }
             } else {
-                // Из пула VRAM: кадры уже на GPU, ничего грузить не нужно.
+                // Копирование кадра — ВНУТРИ command buffer сессии. Раньше это
+                // был отдельный command buffer и отдельное ожидание на КАЖДЫЙ
+                // шаг: лишняя синхронизация с GPU и лишняя нагрузка на драйвер,
+                // который на длинных прогонах зависал.
+                for b in 0..<effBatch {
+                    session.copy(inputPool[b], from: poolFrames[b])
+                    batchTensors.append(inputPool[b])
+                }
                 for _ in 0..<effBatch { batchImgs.append([]) }
             }
 
@@ -1158,12 +1166,25 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
                 }
             }
             let wallMs = stepTimes.last.map { $0 * 1000 } ?? 0
+            // Показание драйвера о времени GPU физически не может превышать
+            // стенное время шага. Наблюдалось обратное: драйвер отдавал
+            // gpuStartTime = 0, «время GPU» выходило 18 000 мс при 12 мс
+            // реальной работы, и регулятор превращал это в паузу до 2 с на
+            // каждый шаг — обучение замедлялось примерно в 100 раз при
+            // полностью простаивающей карте (0–6 % загрузки, 8 Вт).
+            // Поэтому показание ограничивается стенным временем шага.
+            let gpuMs = boundedGpuMs(reportedMs: gpuMsThisStep, wallMs: wallMs)
+            if gpuMsThisStep > wallMs + 50, Date().timeIntervalSince(lastGpuClockWarnAt) > 60 {
+                lastGpuClockWarnAt = Date()
+                yumeLog(String(format: "⚠️ драйвер сообщил %.0f мс GPU при %.0f мс стенного времени — показание отброшено (пауза не вырастет)",
+                               gpuMsThisStep, wallMs))
+            }
             // Дрейф считаем по ЧИСТОМУ времени GPU, а не по стенному: пауза,
             // которую мы сами добавляем, не должна выглядеть как нагрев —
             // иначе регулятор уходит в спираль «больше пауза → больше дрейф →
             // ещё больше пауза». gpuMs от пауз не зависит.
-            let decision = governHeat(gpuMs: gpuMsThisStep,
-                                      wallMs: gpuMsThisStep > 0 ? gpuMsThisStep : wallMs,
+            let decision = governHeat(gpuMs: gpuMs,
+                                      wallMs: gpuMs,
                                       duty: currentDuty,
                                       tempC: lastTempC)
             pendingSleepMs = decision.sleepMs
@@ -1200,8 +1221,15 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
 
             // Пауза — ЗДЕСЬ, в конце каждого шага, а не между эпохами.
             // Именно её отсутствие перегрело GPU 4 ноября 2026.
+            //
+            // Пауза режется на короткие срезы: «Стоп» проверяется между ними,
+            // иначе кнопка ждала конца паузы (до 2 с) и выглядела как
+            // «не работает».
             if pendingSleepMs > 0 {
-                Thread.sleep(forTimeInterval: pendingSleepMs / 1000)
+                for slice in pauseSlices(totalMs: pendingSleepMs) {
+                    if TrainingControl.shared.isCancelled { break }
+                    Thread.sleep(forTimeInterval: slice / 1000)
+                }
             }
         }
 

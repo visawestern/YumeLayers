@@ -186,6 +186,77 @@ func testTensorStagingPool() {
                   calls, delta))
 }
 
+func testGpuWaitPolicy() {
+    section("GpuWaitPolicy: показания драйвера и ожидание command buffer")
+
+    // 1) Правдоподобное показание драйвера берём как есть.
+    expectEqual(boundedGpuMs(reportedMs: 2, wallMs: 10), 2,
+                "правдоподобное показание не меняется")
+
+    // 2) Драйвер сообщил 18 с при 12 мс стенного времени. GPU физически
+    //    не мог быть занят дольше самого шага — такое показание отбрасываем,
+    //    иначе регулятор превращает его в паузу в 2 с на каждом шаге
+    //    (обучение замедляется в 100 раз при полностью простаивающей GPU).
+    expectEqual(boundedGpuMs(reportedMs: 18_000, wallMs: 12), 12,
+                "невозможное показание ограничивается стенным временем")
+
+    // 3) Драйвер не дал времени вовсе — берём стенное.
+    expectEqual(boundedGpuMs(reportedMs: 0, wallMs: 8), 8,
+                "без показания драйвера — стенное время")
+
+    // 4) Ни показания, ни стенного времени — ноль (не NaN!).
+    expectEqual(boundedGpuMs(reportedMs: .nan, wallMs: 0), 0,
+                "NaN и отсутствие стенного времени дают 0")
+
+    // 5) Небольшое превышение стенного времени — норма: буфер мог ждать
+    //    в очереди (WindowServer, другой клиент).
+    expectEqual(boundedGpuMs(reportedMs: 30, wallMs: 12, toleranceMs: 50), 30,
+                "превышение в пределах допуска не трогаем")
+
+    // 6) Главное свойство: пауза регулятора не может взорваться из-за
+    //    показания драйвера. 18 000 мс при duty 0.9 дали бы 2000 мс паузы;
+    //    после ограничения — около 1.3 мс.
+    let pause = dutySleepMs(gpuMs: boundedGpuMs(reportedMs: 18_000, wallMs: 12),
+                            duty: 0.9, maxPauseMs: 2000)
+    expect(pause < 5,
+           String(format: "пауза по ограниченному показанию: %.2f мс (ожидается < 5)", pause))
+
+    // 7) Обработчик сработал — ждать больше нечего.
+    expectEqual(gpuWaitOutcome(state: .running, handlerSignaled: true,
+                               elapsedSeconds: 0.01, deadlineSeconds: 30), .done,
+                "сработавший обработчик — готово")
+
+    // 8) Обработчик потерялся, но буфер уже выполнен — это и есть путь
+    //    спасения от «GPU не ответила»: ждать handler'а бессмысленно.
+    expectEqual(gpuWaitOutcome(state: .completed, handlerSignaled: false,
+                               elapsedSeconds: 0.01, deadlineSeconds: 30), .done,
+                "выполненный буфер без обработчика — готово")
+
+    // 9) Буфер ещё выполняется, время есть — продолжаем ждать.
+    expectEqual(gpuWaitOutcome(state: .running, handlerSignaled: false,
+                               elapsedSeconds: 1, deadlineSeconds: 30), .keepWaiting,
+                "идущий буфер — продолжаем ждать")
+
+    // 10) Время вышло — таймаут.
+    expectEqual(gpuWaitOutcome(state: .running, handlerSignaled: false,
+                               elapsedSeconds: 30, deadlineSeconds: 30), .timedOut,
+                "превышен предел — таймаут")
+
+    // 11) Ошибка драйвера — дальше ждать нечего.
+    expectEqual(gpuWaitOutcome(state: .failed, handlerSignaled: false,
+                               elapsedSeconds: 1, deadlineSeconds: 30), .done,
+                "ошибка буфера — ждать бессмысленно")
+
+    // 12) Пауза регулятора режется на короткие срезы: «Стоп» должен
+    //     срабатывать сразу, а не через 2 с.
+    expectEqual(pauseSlices(totalMs: 250), [100, 100, 50],
+                "пауза 250 мс делится на срезы по 100 мс")
+    expectEqual(pauseSlices(totalMs: 0), [Double](),
+                "нулевая пауза — без срезов")
+    expectEqual(pauseSlices(totalMs: 40), [40],
+                "пауза меньше среза — один срез")
+}
+
 func testGradSanitizeBatched() {
     section("GradSanitize: батчевая санация без аллокаций на тензор")
 
@@ -3423,6 +3494,7 @@ func runAll() {
         ("TensorBufferPool", testTensorBufferPool),
         ("TensorStagingPool", testTensorStagingPool),
         ("GradSanitize", testGradSanitizeBatched),
+        ("GpuWaitPolicy", testGpuWaitPolicy),
         ("TrainingControl", testTrainingControlLifecycle),
         ("ParamAPI", testParamAPI),
         ("Checkpoints", testCheckpoints),

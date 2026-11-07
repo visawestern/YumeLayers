@@ -201,7 +201,6 @@ public final class GpuSession {
         let pool: BufferPool
         let staged: [MTLBuffer]
         private let sem = DispatchSemaphore(value: 0)
-        private var gpuMs: Double = 0
 
         init(_ buffer: MTLCommandBuffer, pool: BufferPool, staged: [MTLBuffer]) {
             self.buffer = buffer
@@ -209,22 +208,58 @@ public final class GpuSession {
             self.staged = staged
         }
 
-        func signal(gpuMs: Double) {
-            self.gpuMs = gpuMs.isFinite ? gpuMs : 0
+        /// Обработчик завершения только сигналит: время GPU считается в
+        /// `wait()`, где известно стенное время ожидания (показания драйвера
+        /// без стенной границы небезопасны — см. `boundedGpuMs`).
+        func signal() {
             sem.signal()
         }
 
         /// Блокирует до завершения GPU (с жёстким пределом `gpuDeadlineSeconds`,
         /// чтобы висячий buffer не утащил за собой WindowServer) и возвращает
         /// время GPU в мс.
+        ///
+        /// Страховка от потери обработчика: если Metal не доставил
+        /// `addCompletedHandler`, но буфер уже выполнен (`cmd.status ==
+        /// .completed`), ждать семафор бессмысленно — это и был источник
+        /// «GPU не ответила за 30 с» при полностью свободной карте.
+        ///
+        /// Возвращаемое время GPU ограничено стенным временем ожидания:
+        /// пустые показания драйвера (gpuStartTime = 0) больше не превращаются
+        /// в двухсекундную паузу на каждом шаге.
         func wait() -> Double {
-            if sem.wait(timeout: .now() + GpuSession.gpuDeadlineSeconds) == .timedOut {
-                yumeLog("❌ GPU не ответила за \(Int(GpuSession.gpuDeadlineSeconds)) с — "
-                      + "command buffer завис. Аварийный выход, чтобы не перегрузить WindowServer.")
-                exit(70)
+            let start = Date()
+            while true {
+                if sem.wait(timeout: .now() + 0.005) == .success { break }
+                let elapsed = Date().timeIntervalSince(start)
+                let state = MetalEngine.bufferState(buffer.status)
+                switch gpuWaitOutcome(state: state, handlerSignaled: false,
+                                      elapsedSeconds: elapsed,
+                                      deadlineSeconds: GpuSession.gpuDeadlineSeconds) {
+                case .done:
+                    yumeLog("⚠️ обработчик завершения не доставлен — статус буфера: "
+                          + "\(state). Продолжаю по статусу.")
+                    break
+                case .timedOut:
+                    yumeLog("❌ GPU не ответила за \(Int(GpuSession.gpuDeadlineSeconds)) с — "
+                          + "command buffer завис. Статус: \(state), ошибка: "
+                          + "\(buffer.error?.localizedDescription ?? "нет"). "
+                          + "Аварийный выход, чтобы не перегрузить WindowServer.")
+                    exit(70)
+                case .keepWaiting:
+                    continue
+                }
+                break
             }
             for s in staged { pool.put(s) }
-            return gpuMs
+            let wallMs = Date().timeIntervalSince(start) * 1000
+            let reported = (buffer.gpuEndTime - buffer.gpuStartTime) * 1000
+            let bounded = boundedGpuMs(reportedMs: reported, wallMs: wallMs)
+            if reported > wallMs + 50 {
+                yumeLog(String(format: "⚠️ драйвер сообщил %.0f мс GPU при %.0f мс стенного времени — показание отброшено",
+                               reported, wallMs))
+            }
+            return bounded
         }
     }
 
@@ -243,8 +278,7 @@ public final class GpuSession {
         staged.removeAll()
         let step = CommittedStep(committed, pool: pool, staged: myStaged)
         committed.addCompletedHandler { [weak step] _ in
-            let ms = (committed.gpuEndTime - committed.gpuStartTime) * 1000
-            step?.signal(gpuMs: ms)
+            step?.signal()   // время GPU считается в wait() — там есть стенная граница
         }
         committed.commit()
         return step
