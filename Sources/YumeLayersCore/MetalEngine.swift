@@ -10,6 +10,62 @@ public final class MetalEngine {
     public let queue: MTLCommandQueue
     public let deviceName: String
 
+    // MARK: - Пул переиспользования приватных буферов (критично для длинных прогонов)
+
+    /// Сколько раз реально выделен новый приватный буфер (через makeBuffer).
+    /// Растёт только при промахе пула; с переиспользованием почти не растёт.
+    public private(set) var totalBufferAllocations = 0
+    private let bufferPoolLock = NSLock()
+    /// Свободные буферы по размеру (байты → стек), готовые к выдаче.
+    private var pooledBuffers: [Int: [MTLBuffer]] = [:]
+    /// Освобождённые (retire), но ещё не готовые к выдаче: их вернёт в пул
+    /// `reclaimRetiredBuffers()` ПОСЛЕ `end()`, когда GPU закончил с ними.
+    private var retiredBuffers: [MTLBuffer] = []
+
+    /// Берёт приватный буфер из пула (nil — пул не имеет подходящего).
+    func takeBuffer(_ bytes: Int) -> MTLBuffer? {
+        bufferPoolLock.lock(); defer { bufferPoolLock.unlock() }
+        if var stack = pooledBuffers[bytes], !stack.isEmpty {
+            let b = stack.removeLast()
+            pooledBuffers[bytes] = stack
+            return b
+        }
+        return nil
+    }
+
+    /// Возвращает буфер в отложенную очередь (не в свободный пул сразу —
+    /// GPU может ещё читать его данные).
+    func retireBuffer(_ b: MTLBuffer) {
+        bufferPoolLock.lock(); defer { bufferPoolLock.unlock() }
+        retiredBuffers.append(b)
+    }
+
+    /// Переносит отложенные буферы в свободный пул. Безопасно вызывать только
+    /// после `end()` (все GPU-команды завершились).
+    func reclaimRetiredBuffers() {
+        bufferPoolLock.lock(); defer { bufferPoolLock.unlock() }
+        guard !retiredBuffers.isEmpty else { return }
+        for b in retiredBuffers {
+            pooledBuffers[b.length, default: []].append(b)
+        }
+        retiredBuffers.removeAll()
+    }
+
+    /// Создаёт приватный буфер, пытаясь взять его из пула (переиспользование).
+    /// При промахе — реальный makeBuffer и инкремент счётчика.
+    func makePrivateBuffer(length: Int, what: String) -> MTLBuffer {
+        if let pooled = takeBuffer(length) { return pooled }
+        guard let b = device.makeBuffer(length: length, options: .storageModePrivate) else {
+            fatalError(allocationFailureMessage(
+                bytes: length,
+                availableBytes: Int(device.recommendedMaxWorkingSetSize)
+                    - device.currentAllocatedSize,
+                what: what))
+        }
+        bufferPoolLock.lock(); totalBufferAllocations += 1; bufferPoolLock.unlock()
+        return b
+    }
+
     static let shaderSource = """
     #include <metal_stdlib>
     using namespace metal;

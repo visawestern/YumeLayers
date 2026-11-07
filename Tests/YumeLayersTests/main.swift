@@ -97,6 +97,68 @@ func testParamAPI() {
     expect(paramBoolValue(2) == nil, "2 не является bool-значением → nil")
 }
 
+func testTensorBufferPool() {
+    section("TensorBufferPool: переиспользование приватных буферов")
+
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let session = GpuSession(engine)
+
+    // 1. Пул: take → retire → reclaim отдаёт ТОТ ЖЕ буфер.
+    do {
+        let b1 = engine.takeBuffer(4096)
+        let b2 = engine.takeBuffer(4096)
+        // Оба nil: пул пуст.
+        expect(b1 == nil && b2 == nil, "пустой пул не отдаёт буферы")
+        // Создаём два буфера вручную и кладём их в пул.
+        if let m1 = engine.device.makeBuffer(length: 4096, options: .storageModePrivate),
+           let m2 = engine.device.makeBuffer(length: 4096, options: .storageModePrivate) {
+            engine.retireBuffer(m1)
+            engine.retireBuffer(m2)
+            engine.reclaimRetiredBuffers()
+            let r1 = engine.takeBuffer(4096)
+            let r2 = engine.takeBuffer(4096)
+            // Переиспользование: вернулись те же объекты (в любом порядке).
+            expect((r1 === m1 || r1 === m2), "takeBuffer вернул буфер из пула (1)")
+            expect((r2 === m1 || r2 === m2), "takeBuffer вернул буфер из пула (2)")
+            expect(r1 !== r2, "два takeBuffer дают разные буферы")
+        }
+    }
+
+    // 2. Поведенческий: на длинном прогоне число РЕАЛЬНЫХ аллокаций не растёт
+    //    линейно. Моделируем ритм тренировки: каждый шаг = begin/create/end,
+    //    и create/end синхронизирует GPU и возвращает освобождённые буферы
+    //    в пул переиспользования.
+    do {
+        let outerSteps = 40      // «шаги» обучения
+        let innerPerStep = 10    // тензоров на шаг
+        let iterations = outerSteps * innerPerStep
+
+        // Прогрев: пара итераций наполняет пул.
+        for _ in 0..<2 {
+            session.begin()
+            let t = GPUTensor(engine: engine, rows: 64, cols: 64)
+            _ = t.n
+            _ = session.end()
+        }
+        let startAlloc = engine.totalBufferAllocations
+        for _ in 0..<outerSteps {
+            session.begin()
+            for _ in 0..<innerPerStep {
+                let t = GPUTensor(engine: engine, rows: 64, cols: 64)
+                _ = t.n
+            }
+            _ = session.end()
+        }
+        let delta = engine.totalBufferAllocations - startAlloc
+        // После прогрева аллокации должны быть ~первый шаг (внутри шага буферы
+        // живут одновременно и не переиспользуются), а не расти линейно.
+        expect(delta < iterations / 8,
+               String(format: "пул: %d созданий породили %d аллокаций (< %d)",
+                      iterations, delta, iterations / 8))
+    }
+}
+
 func testHTTP() {
     section("HTTP: парсинг запросов")
 
@@ -3259,6 +3321,7 @@ func testGPUFramePoolBrokenFrame() {
 func runAll() {
     let tests: [(String, () -> Void)] = [
         ("HTTP", testHTTP),
+        ("TensorBufferPool", testTensorBufferPool),
         ("ParamAPI", testParamAPI),
         ("Checkpoints", testCheckpoints),
         ("Backups", testBackups),

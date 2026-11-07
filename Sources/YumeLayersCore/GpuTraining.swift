@@ -14,16 +14,14 @@ public final class GPUTensor {
         self.engine = engine
         self.rows = rows; self.cols = cols; self.n = rows * cols
         let bytes = max(rows * cols, 1) * 4
-        guard let buf = engine.device.makeBuffer(length: bytes, options: .storageModePrivate) else {
-            // Раньше здесь стоял `!`: при OOM пользователь получал падение на
-            // разыменовании nil без единого слова о том, чего не хватило.
-            fatalError(allocationFailureMessage(
-                bytes: bytes,
-                availableBytes: Int(engine.device.recommendedMaxWorkingSetSize)
-                    - engine.device.currentAllocatedSize,
-                what: "тензор \(rows)×\(cols)"))
-        }
-        self.buf = buf
+        self.buf = engine.makePrivateBuffer(length: bytes, what: "тензор \(rows)×\(cols)")
+    }
+
+    deinit {
+        // Возврат приватного буфера в пул переиспользования. Сразу в свободный
+        // пул не кладём: GPU может ещё читать данные. Фактическое переиспользование
+        // произойдёт после `reclaimRetiredBuffers()` (вызывается из `end()`).
+        engine.retireBuffer(buf)
     }
 
     init(engine: MetalEngine, data: [Float], rows: Int) {
@@ -34,7 +32,6 @@ public final class GPUTensor {
         let bytes = max(data.count, 1) * 4
         guard let staging = engine.device.makeBuffer(bytes: data, length: data.count * 4,
                                                options: .storageModeShared),
-              let priv = engine.device.makeBuffer(length: bytes, options: .storageModePrivate),
               let cmd = engine.queue.makeCommandBuffer(),
               let blit = cmd.makeBlitCommandEncoder() else {
             fatalError(allocationFailureMessage(
@@ -43,6 +40,7 @@ public final class GPUTensor {
                     - engine.device.currentAllocatedSize,
                 what: "тензор \(rows)×\(data.count / max(rows, 1)) (с данными)"))
         }
+        let priv = engine.makePrivateBuffer(length: bytes, what: "тензор \(rows)×\(data.count / max(rows, 1)) (с данными)")
         blit.copy(from: staging, sourceOffset: 0, to: priv, destinationOffset: 0, size: data.count * 4)
         blit.endEncoding()
         cmd.commit()
@@ -258,7 +256,10 @@ public final class GpuSession {
     /// `commit().wait()`.
     @discardableResult
     func end() -> Double {
-        return commit().wait()
+        let ms = commit().wait()
+        // GPU закончил команды: можно вернуть освобождённые буферы в пул.
+        engine.reclaimRetiredBuffers()
+        return ms
     }
 
     /// Копирует данные с CPU в тензор ВНУТРИ текущего command buffer:
