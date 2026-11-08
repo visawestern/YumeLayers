@@ -523,6 +523,13 @@ func testVRAMBudget() {
     expect(msg.contains("100 МБ"), "OOM-сообщение: свободный объём")
     expect(msg.contains("тензор 16×410880"), "OOM-сообщение: что именно не влезло")
     expect(msg.contains("пачки"), "OOM-сообщение: подсказка про размер пачки")
+
+    // Фаза 4: адаптивный размер порции загрузки окна (меньше синхронизаций).
+    expectEqual(frameLoadBatchCap(frameBytes: 8 * 1024 * 1024), 64,
+                "малые кадры (≤50 МБ) → порция 64 (сокращение синхронизаций)")
+    expectEqual(frameLoadBatchCap(frameBytes: 466 * 1024 * 1024), 16,
+                "854×480 (≈466 МБ) → порция 16 (пик staging ограничен)")
+    expectEqual(frameLoadBatchCap(frameBytes: 0), 64, "frameBytes=0 → консервативно 64")
 }
 
 // MARK: - 7g. Отметки «кадр обработан»

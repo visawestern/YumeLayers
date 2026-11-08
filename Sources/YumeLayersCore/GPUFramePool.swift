@@ -92,7 +92,8 @@ final class GPUFramePool {
         // Размер порции подстраивается под доступную память и рабочий набор GPU
         // (см. frameLoadChunkSize). На 32 ГБ RAM + Radeon 5500M это заметно
         // больше консервативных 64, но ниже 1024 — чтобы не создавать пик ~10 ГБ.
-        let batch = min(n, 16, frameLoadChunkSize(frameBytes: frameBytes,
+        let batch = min(n, frameLoadBatchCap(frameBytes: frameBytes),
+                        frameLoadChunkSize(frameBytes: frameBytes,
                                        availableRAM: UInt64(ProcessInfo.processInfo.physicalMemory),
                                        maxWorkingSet: engine.device.recommendedMaxWorkingSetSize))
         // Переиспользуемые staging-буферы: пик памяти ≈ batch × кадр.
