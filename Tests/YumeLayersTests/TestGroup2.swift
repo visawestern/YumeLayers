@@ -416,12 +416,10 @@ func testCodeGuideLimits() {
         "Sources/YumeLayersUI/main.swift",
     ]
     let knownLargeFuncs: Set<String> = [
-        "Sources/YumeLayersUI/ApiServer.swift:68",
         "Sources/YumeLayersCore/ParallelExtractor.swift:194",
         "Sources/YumeLayersCore/SoftwareFrameDecoder.swift:26",
         "Sources/YumeLayersCore/ConvGPU.swift:308",
         "Sources/YumeLayersCore/MetalEngine.swift:26",
-        "Sources/YumeLayersUI/ApiServer.swift:194",
         "Sources/YumeLayersCore/LayeredTrainer.swift:133",
         "Sources/YumeLayersCore/ParallelExtractor.swift:268",
         "Sources/YumeLayersCore/SelfTest.swift:9",

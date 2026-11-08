@@ -209,34 +209,92 @@ final class ApiServer {
         }
 
         switch (method, path) {
-        case ("GET", "/api/status"):
+        case ("GET", "/api/status"), ("POST", "/api/status"):
+            self.route__api_status(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/interpolation"), ("POST", "/api/interpolation"):
+            self.route__api_interpolation(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/log"), ("POST", "/api/log"):
+            self.route__api_log(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/preview"), ("POST", "/api/preview"):
+            self.route__api_preview(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/screenshot"), ("POST", "/api/screenshot"):
+            self.route__api_screenshot(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/layout"), ("POST", "/api/layout"):
+            self.route__api_layout(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/state"), ("POST", "/api/state"):
+            self.route__api_state(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/train"), ("POST", "/api/train"):
+            self.route__api_train(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/stop"), ("POST", "/api/stop"):
+            self.route__api_stop(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/extract"), ("POST", "/api/extract"):
+            self.route__api_extract(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/set"), ("POST", "/api/set"):
+            self.route__api_set(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/reset"), ("POST", "/api/reset"):
+            self.route__api_reset(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/autotune"), ("POST", "/api/autotune"):
+            self.route__api_autotune(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/interpolate"), ("POST", "/api/interpolate"):
+            self.route__api_interpolate(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/interpolate/stop"), ("POST", "/api/interpolate/stop"):
+            self.route__api_interpolate_stop(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/layered/train"), ("POST", "/api/layered/train"):
+            self.route__api_layered_train(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/layered/result"), ("POST", "/api/layered/result"):
+            self.route__api_layered_result(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/save-recons"), ("POST", "/api/save-recons"):
+            self.route__api_save_recons(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/test-frames"), ("POST", "/api/test-frames"):
+            self.route__api_test_frames(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        default:
+            send(status: 404, body: "{\"error\":\"not found\"}", to: conn)
+        }
+    }
+
+
+    private func route__api_status(conn: NWConnection, body: String, pathWithQuery: String) {
             send(status: 200, body: statusJSON(), to: conn)
-        case ("GET", "/api/interpolation"):
+    }
+
+    private func route__api_interpolation(conn: NWConnection, body: String, pathWithQuery: String) {
             send(status: 200, body: interpolationJSON(), to: conn)
-        case ("GET", "/api/log"):
+    }
+
+    private func route__api_log(conn: NWConnection, body: String, pathWithQuery: String) {
             let linesCount = queryInt(pathWithQuery, "lines", def: 100)
             send(status: 200, body: logJSON(lines: linesCount), to: conn)
-        case ("GET", "/api/preview"):
+    }
+
+    private func route__api_preview(conn: NWConnection, body: String, pathWithQuery: String) {
             send(status: 200, body: previewJSON(), to: conn)
-        case ("GET", "/api/screenshot"):
+    }
+
+    private func route__api_screenshot(conn: NWConnection, body: String, pathWithQuery: String) {
             if let path = screenshotProvider?() {
                 send(status: 200, body: json(["path": path]), to: conn)
             } else {
                 send(status: 500, body: "{\"error\":\"no window\"}", to: conn)
             }
-        case ("GET", "/api/layout"):
+    }
+
+    private func route__api_layout(conn: NWConnection, body: String, pathWithQuery: String) {
             if let json = layoutProvider?() {
                 send(status: 200, body: json, to: conn)
             } else {
                 send(status: 500, body: "{\"error\":\"no layout\"}", to: conn)
             }
-        case ("GET", "/api/state"):
+    }
+
+    private func route__api_state(conn: NWConnection, body: String, pathWithQuery: String) {
             if let json = stateProvider?() {
                 send(status: 200, body: json, to: conn)
             } else {
                 send(status: 500, body: "{\"error\":\"no state\"}", to: conn)
             }
-        case ("POST", "/api/train"):
+    }
+
+    private func route__api_train(conn: NWConnection, body: String, pathWithQuery: String) {
             // Обучение запускается ТОЙ ЖЕ функцией и с ТЕМИ ЖЕ параметрами,
             // что и кнопка «Обучить VAE» в интерфейсе. Параметры из тела:
             // {"maxFrames": N} — учиться только на первых N кадрах
@@ -254,10 +312,14 @@ final class ApiServer {
             }
             onTrain?(limit, resume)
             send(status: 200, body: "{\"ok\":true}", to: conn)
-        case ("POST", "/api/stop"):
+    }
+
+    private func route__api_stop(conn: NWConnection, body: String, pathWithQuery: String) {
             onStop?()
             send(status: 200, body: "{\"ok\":true}", to: conn)
-        case ("POST", "/api/extract"):
+    }
+
+    private func route__api_extract(conn: NWConnection, body: String, pathWithQuery: String) {
             guard let data = body.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 send(status: 400, body: "{\"error\":\"bad params\"}", to: conn); return
@@ -274,7 +336,9 @@ final class ApiServer {
             let maxFrames = obj["maxFrames"] as? Int
             onExtract?(paths, maxFrames)
             send(status: 200, body: "{\"ok\":true}", to: conn)
-        case ("POST", "/api/set"):
+    }
+
+    private func route__api_set(conn: NWConnection, body: String, pathWithQuery: String) {
             // Универсальный сеттер параметров интерфейса. Тело — словарь
             // «ключ → значение» (напр. {"lr": 0.01, "epochs": 6}).
             // Возвращает, какие ключи применены, а какие не распознаны.
@@ -287,13 +351,19 @@ final class ApiServer {
             send(status: r.ok ? 200 : 400,
                  body: json(["ok": r.ok, "applied": r.applied, "unknown": r.unknown]),
                  to: conn)
-        case ("POST", "/api/reset"):
+    }
+
+    private func route__api_reset(conn: NWConnection, body: String, pathWithQuery: String) {
             onResetParams?()
             send(status: 200, body: "{\"ok\":true}", to: conn)
-        case ("POST", "/api/autotune"):
+    }
+
+    private func route__api_autotune(conn: NWConnection, body: String, pathWithQuery: String) {
             onAutoTune?()
             send(status: 200, body: "{\"ok\":true}", to: conn)
-        case ("POST", "/api/interpolate"):
+    }
+
+    private func route__api_interpolate(conn: NWConnection, body: String, pathWithQuery: String) {
             // Интерполяция между двумя опорными картинками.
             // Тело: {"imageA": путь, "imageB": путь, "seconds": N, "fps": N,
             //        "out": путь к .mp4 (необязательно)}.
@@ -308,10 +378,14 @@ final class ApiServer {
             let out = obj["out"] as? String
             onInterpolate?(imageA, imageB, seconds, fps, out)
             send(status: 200, body: "{\"ok\":true}", to: conn)
-        case ("POST", "/api/interpolate/stop"):
+    }
+
+    private func route__api_interpolate_stop(conn: NWConnection, body: String, pathWithQuery: String) {
             onInterpolateStop?()
             send(status: 200, body: "{\"ok\":true}", to: conn)
-        case ("POST", "/api/layered/train"):
+    }
+
+    private func route__api_layered_train(conn: NWConnection, body: String, pathWithQuery: String) {
             // Слойный контур: видео → слои (фон/объекты/свет) → обучение → превью.
             // Тело: {"video": путь, "w": N, "h": N, "steps": N,
             //        "latentChannels": N, "checkpoint": путь}. Все кроме video
@@ -330,14 +404,18 @@ final class ApiServer {
             }
             onLayeredTrain?(video, lw, lh, lsteps, llatent, lck)
             send(status: 200, body: "{\"ok\":true}", to: conn)
-        case ("GET", "/api/layered/result"):
+    }
+
+    private func route__api_layered_result(conn: NWConnection, body: String, pathWithQuery: String) {
             lock.lock(); defer { lock.unlock() }
             if let info = _lastLayered {
                 send(status: 200, body: json(["result": info]), to: conn)
             } else {
                 send(status: 200, body: "{\"result\":null}", to: conn)
             }
-        case ("POST", "/api/save-recons"):
+    }
+
+    private func route__api_save_recons(conn: NWConnection, body: String, pathWithQuery: String) {
             // Сохранение реконструкций в памяти на диск.
             // Тело: {"dir": путь к папке} — папка необязательна.
             var dir: String?
@@ -347,7 +425,9 @@ final class ApiServer {
             }
             onSaveRecons?(dir)
             send(status: 200, body: "{\"ok\":true}", to: conn)
-        case ("POST", "/api/test-frames"):
+    }
+
+    private func route__api_test_frames(conn: NWConnection, body: String, pathWithQuery: String) {
             // Проверка текущих кадров в памяти. Тело: {"count": N}
             // (0 — все кадры). Отчёт возвращается сразу.
             let count: Int
@@ -362,9 +442,6 @@ final class ApiServer {
             } else {
                 send(status: 500, body: "{\"error\":\"no frames\"}", to: conn)
             }
-        default:
-            send(status: 404, body: "{\"error\":\"not found\"}", to: conn)
-        }
     }
 
     private func queryInt(_ pathWithQuery: String, _ key: String, def: Int) -> Int {
