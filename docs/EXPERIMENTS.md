@@ -66,6 +66,9 @@
   Интеграция в `ConvVAEGPU` — следующий под-шаг.
 - Шаг 4 (подготовка): `randomCrop` — случайный кроп HWC для обучения на патчах
   128–256px; тест проверяет размер/границы/детерминизм/валидацию.
+- Шаг 3 (L1): `l1grad_kernel` + `session.encodeL1Grad` (GPU ≈ CPU, |Δ|=0),
+  переключатель `lossKind` (Params/API), `dReconOverride` в trainConvVAE;
+  обучение с L1 снижает loss 0.31→0.026. Sobel edge-loss — далее.
 
 ## Открыто
 - G2 (hold-out на реальных данных 854×480, baseline SD-VAE) — после Этапа 1.

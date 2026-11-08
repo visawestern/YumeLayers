@@ -124,3 +124,16 @@ public func groupNormCPU(channels: Int, groups: Int, plane: Int, xs: [Float]) ->
     }
     return out
 }
+
+/// CPU-эталон L1-градиента реконструкции (для проверки `encodeL1Grad`).
+public func l1GradCPU(recon: [Float], target: [Float]) -> [Float] {
+    let n = min(recon.count, target.count)
+    var out = [Float](repeating: 0, count: n)
+    guard n > 0 else { return out }
+    let invN = 1.0 / Float(n)
+    for i in 0..<n {
+        let d = recon[i] - target[i]
+        out[i] = (d > 0 ? 1 : (d < 0 ? -1 : 0)) * invN
+    }
+    return out
+}

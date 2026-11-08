@@ -448,6 +448,17 @@ extension MetalKernels {
         GRAD[6*n + i] = dl*(m - TARGET[6*n + i]) + dM;
         GRAD[7*n + i] = dl*(light - TARGET[7*n + i]) + dL;
     }
+
+    // L1-градиент реконструкции (Этап 1): sign(recon−target)/N.
+    kernel void l1grad_kernel(
+        device const float* recon [[buffer(0)]],
+        device const float* target [[buffer(1)]],
+        device float* out [[buffer(2)]],
+        constant float& invN [[buffer(3)]],
+        uint gid [[thread_position_in_grid]]) {
+        float d = recon[gid] - target[gid];
+        out[gid] = (d > 0.0f ? 1.0f : (d < 0.0f ? -1.0f : 0.0f)) * invN;
+    }
     """
 
     }

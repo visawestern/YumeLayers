@@ -115,6 +115,8 @@ func runAll() {
         ("GPUGroupNorm", testGPUGroupNorm),
         ("ResidualBlock", testResidualBlockGradients),
         ("RandomCrop", testRandomCrop),
+        ("GPU_L1Grad", testGPU_L1Grad),
+        ("TrainWithL1", testTrainWithL1),
         ("VRAMBudget", testVRAMBudget),
         ("ProcessedMarks", testProcessedMarks),
         ("Reproducibility", testReproducibility),

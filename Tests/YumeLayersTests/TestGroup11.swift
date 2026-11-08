@@ -191,3 +191,61 @@ func testRandomCrop() {
     expect(randomCrop(rgb: img, w: w, h: h, cropW: 1000, cropH: 24, rng: &rng) == nil,
            "кроп: cropW > w → nil")
 }
+
+func testGPU_L1Grad() {
+    section("Этап 1: GPU-L1 градиент ≈ CPU-эталон")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let session = GpuSession(engine)
+    var rng = SplitMix64(seed: 31)
+    var reconData = [Float](repeating: 0, count: 256)
+    var targetData = [Float](repeating: 0, count: 256)
+    for i in 0..<256 {
+        reconData[i] = Float.random(in: 0...1, using: &rng)
+        targetData[i] = Float.random(in: 0...1, using: &rng)
+    }
+    let recon = GPUTensor(engine: engine, data: reconData, rows: 4)
+    let target = GPUTensor(engine: engine, data: targetData, rows: 4)
+    session.begin()
+    let g = session.encodeL1Grad(recon: recon, target: target)
+    _ = session.end()
+    let got = g.toArray()
+    let expected = l1GradCPU(recon: reconData, target: targetData)
+    expect(maxAbsDiff(got, expected) < 1e-6,
+           "GPU-L1grad ≈ CPU (max|Δ| = \(maxAbsDiff(got, expected)))")
+}
+
+func testTrainWithL1() {
+    section("Этап 1: обучение с L1-градиентом (dReconOverride)")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let session = GpuSession(engine)
+    let w = 64, h = 40
+    let nFrames = 8
+    var frames = [[Float]]()
+    for f in 0..<nFrames {
+        var rng = SplitMix64(seed: UInt64(2000 + f))
+        frames.append(makeSyntheticScene(w: w, h: h, rng: &rng))
+    }
+    let beta: Float = 0.01
+    let lr: Float = 0.004
+    let vae = ConvVAEGPU(engine: engine)
+    var firstLoss = Double.infinity
+    var lastLoss = Double.infinity
+    for step in 1...400 {
+        let img = frames[(step - 1) % nFrames]
+        let chw = hwcToChw(img)
+        let x = GPUTensor(engine: engine, data: chw, rows: 3)
+        session.begin()
+        let c = vae.forward(session, image: x, w: w, h: h, deterministic: false, seed: 7)
+        let dR = session.encodeL1Grad(recon: c.recon, target: x)
+        let (_, g) = vae.backward(session, c, target: x, beta: beta, dReconOverride: dR)
+        vae.applyAdam(session, grads: g, t: step, lr: lr)
+        _ = session.end()
+        if step == 1 { firstLoss = vaeLossGeneric(cache: c, target: chw, beta: beta, kind: .l1) }
+        if step == 400 { lastLoss = vaeLossGeneric(cache: c, target: chw, beta: beta, kind: .l1) }
+    }
+    expect(firstLoss.isFinite && lastLoss.isFinite, "обучение с L1: loss конечна")
+    expect(lastLoss < firstLoss,
+           "обучение с L1: loss снижается (\(String(format: "%.4f", firstLoss))→\(String(format: "%.4f", lastLoss)))")
+}

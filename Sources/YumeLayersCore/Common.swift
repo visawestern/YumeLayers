@@ -157,6 +157,10 @@ public struct Params {
     /// Фактическую долю работы всегда задаёт контур: он держит 85 °C
     /// и не даёт уйти выше 89 °C (перезагрузка случалась на 93 °C).
     public var gpuPowerPercent = defaultGpuPowerPercent
+    /// Вид реконструкционного лоссса в обучении ("mse" | "l1").
+    public var lossKind: String = "mse"
+    /// Вес Sobel edge-loss (0 — выключен; >0 — штраф за «мыло»).
+    public var edgeWeight: Float = 0
     public var outPrefix: String
 }
 

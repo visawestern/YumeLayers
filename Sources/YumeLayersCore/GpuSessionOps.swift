@@ -130,6 +130,18 @@ extension GpuSession {
         return C
     }
 
+    /// L1-градиент реконструкции: sign(recon−target)/N (для dReconOverride).
+    func encodeL1Grad(recon: GPUTensor, target: GPUTensor) -> GPUTensor {
+        precondition(recon.n == target.n, "encodeL1Grad: размеры совпадают")
+        let C = GPUTensor(engine: engine, rows: recon.rows, cols: recon.cols)
+        enc.setComputePipelineState(engine.l1GradPS)
+        setBuffers([recon.buf, target.buf, C.buf])
+        var invN = Float(1.0 / Double(recon.n))
+        enc.setBytes(&invN, length: 4, index: 3)
+        dispatch(256, 1, recon.n, 1)
+        return C
+    }
+
     // C = A + bias (1×cols), broadcast по строкам
     func addBias(_ A: GPUTensor, _ bias: GPUTensor) -> GPUTensor {
         let C = GPUTensor(engine: engine, rows: A.rows, cols: A.cols)

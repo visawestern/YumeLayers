@@ -224,6 +224,7 @@ public final class MetalEngine {
     let addInPlacePS: MTLComputePipelineState
     let msePS: MTLComputePipelineState
     let groupNormPS: MTLComputePipelineState
+    let l1GradPS: MTLComputePipelineState
 
     // Вариационный путь
     let fmaPS: MTLComputePipelineState
@@ -331,6 +332,7 @@ public final class MetalEngine {
             self.addInPlacePS = try ps("addinplace_kernel")
             self.msePS = try ps("mse_reduce_kernel")
             self.groupNormPS = try ps("groupnorm_kernel")
+            self.l1GradPS = try ps("l1grad_kernel")
             self.fmaPS = try ps("fma_kernel")
             self.expPS = try ps("exp_kernel")
             self.addConstPS = try ps("addconst_kernel")

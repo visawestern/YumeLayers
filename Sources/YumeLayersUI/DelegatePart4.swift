@@ -257,6 +257,16 @@ extension YumeAppDelegate {
                             self.requestedLatentChannels = c
                             applied.append(key)
                         } else { unknown.append(key) }
+                    case "lossKind":
+                        if let s = paramStringValue(value), s == "mse" || s == "l1" {
+                            self.requestedLossKind = s
+                            applied.append(key)
+                        } else { unknown.append(key) }
+                    case "edgeWeight":
+                        if let s = paramStringValue(value), let f = Float(s), f >= 0 {
+                            self.requestedEdgeWeight = f
+                            applied.append(key)
+                        } else { unknown.append(key) }
                     case "pauseMs":
                         if let s = paramStringValue(value) { self.pauseCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
                     case "gpuPowerPercent":

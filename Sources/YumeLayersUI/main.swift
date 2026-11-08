@@ -151,6 +151,10 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
     var requestedModelWidth = 1
     /// Число каналов латента для следующего обучения.
     var requestedLatentChannels = 16
+    /// Вид реконструкционного лоссса для следующего обучения ("mse" | "l1").
+    var requestedLossKind = "mse"
+    /// Вес Sobel edge-loss для следующего обучения (0 — выключен).
+    var requestedEdgeWeight: Float = 0
 
     // ——— Генерация A→B: интерполяция между двумя опорными картинками ———
     let interpAButton = NSButton(title: "Выбрать…", target: nil, action: nil)

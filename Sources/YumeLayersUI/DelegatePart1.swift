@@ -146,6 +146,8 @@ extension YumeAppDelegate {
         p.adaptiveThrottle = adaptiveSwitch.state == .on
         p.modelWidth = max(1, requestedModelWidth)
         p.latentChannels = max(1, requestedLatentChannels)
+        p.lossKind = requestedLossKind
+        p.edgeWeight = requestedEdgeWeight
         p.convPath = (convPathCtl.stringValue as NSString).expandingTildeInPath
 
         guard p.lr.isFinite, p.lr > 0, p.lr <= 1,

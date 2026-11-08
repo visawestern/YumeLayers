@@ -170,8 +170,13 @@ extension TrainContext {
             let noiseSeed = trainingNoiseSeed(step: t, batchIndex: b)
             let batchCache = vae.forward(session, image: img, w: pw, h: ph,
                                          deterministic: false, seed: noiseSeed)
+            var l1dRecon: GPUTensor? = nil
+            if p.lossKind == "l1" {
+                l1dRecon = session.encodeL1Grad(recon: batchCache.recon, target: img)
+            }
             let (_, grads) = vae.backward(session, batchCache, target: img,
-                                          beta: rgbKLBeta)
+                                          beta: rgbKLBeta,
+                                          dReconOverride: l1dRecon)
             recons.append(batchCache.recon)
             mseBufs.append(session.encodeMSE(recon: batchCache.recon, target: img,
                                              into: mseOutBufs[b]))
