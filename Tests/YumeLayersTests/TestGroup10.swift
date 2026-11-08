@@ -99,6 +99,31 @@ func testCheckpointModelWidth() {
     expectEqual(st2.modelWidth, 1, "без метаданных modelWidth = 1")
 }
 
+func testCheckpointArchVersion() {
+    section("Чекпоинт хранит версию архитектуры (archVersion)")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let tmp = NSTemporaryDirectory() + "yume-cp-av-\(UUID().uuidString).safetensors"
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+    let vae = ConvVAEGPU(engine: engine)
+    try? saveState(vae.matrices, to: tmp, epoch: 1, step: 1, totalSteps: 2,
+                   optimizer: CheckpointOptimizerState(step: 1, moments: vae.optimizerMoments()),
+                   modelWidth: 1, latentChannels: 16, archVersion: 2)
+    guard let st = try? loadStateWithMeta(path: tmp) else {
+        expect(false, "чекпоинт прочитан"); return
+    }
+    expectEqual(st.archVersion, 2, "archVersion=2 сохранён и прочитан")
+
+    // Старый формат (без archVersion) → по умолчанию 1.
+    let base = ConvVAEGPU(engine: engine)
+    try? saveState(base.matrices, to: tmp, archVersion: nil)
+    guard let st2 = try? loadStateWithMeta(path: tmp) else {
+        expect(false, "чекпоинт без версии прочитан"); return
+    }
+    expectEqual(st2.archVersion, 1, "без метаданных archVersion = 1")
+}
+
 // MARK: - Этап 0. Диагностика, ворота G1
 
 /// G1: overfit на 16 кадрах → цель PSNR ≥35 дБ.

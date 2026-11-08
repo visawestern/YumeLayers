@@ -56,7 +56,8 @@ public func saveState(_ mats: [Matrix], to path: String, epoch: Int? = nil,
                       dataFingerprint: String? = nil,
                       optimizer: CheckpointOptimizerState? = nil,
                       modelWidth: Int? = nil,
-                      latentChannels: Int? = nil) throws {
+                      latentChannels: Int? = nil,
+                      archVersion: Int? = nil) throws {
     var dict: [String: Any] = [:]
     var offset = 0
     var order: [String] = []
@@ -83,6 +84,7 @@ public func saveState(_ mats: [Matrix], to path: String, epoch: Int? = nil,
     if let fp = dataFingerprint { meta["dataFingerprint"] = fp }
     if let w = modelWidth { meta["modelWidth"] = w }
     if let lc = latentChannels { meta["latentChannels"] = lc }
+    if let av = archVersion { meta["archVersion"] = av }
     // Моменты Adam — отдельными тензорами "adam.mN"/"adam.vN", чтобы старые
     // чекпоинты (без них) продолжали читаться как есть.
     var momentData: [[Float]] = []
@@ -141,9 +143,11 @@ public struct CheckpointState {
     public let modelWidth: Int
     /// Число каналов латента модели (16 — базовое).
     public let latentChannels: Int
+    /// Версия архитектуры сети (1 — plain, 2 — GroupNorm/Residual).
+    public let archVersion: Int
     public init(mats: [Matrix], epoch: Int, step: Int, fingerprint: String? = nil,
                 optimizer: CheckpointOptimizerState? = nil, modelWidth: Int = 1,
-                latentChannels: Int = 16) {
+                latentChannels: Int = 16, archVersion: Int = 1) {
         self.mats = mats
         self.epoch = epoch
         self.step = step
@@ -151,6 +155,7 @@ public struct CheckpointState {
         self.optimizer = optimizer
         self.modelWidth = modelWidth
         self.latentChannels = latentChannels
+        self.archVersion = archVersion
     }
 }
 
@@ -279,6 +284,7 @@ public func loadStateWithMeta(path: String) throws -> CheckpointState {
     var metaOptimizerStep = 0
     var metaModelWidth = 1
     var metaLatentChannels = 16
+    var metaArchVersion = 1
     if let meta = obj["__metadata__"] as? [String: Any] {
         metaEpoch = (meta["epoch"] as? NSNumber)?.intValue ?? 0
         metaStep = (meta["step"] as? NSNumber)?.intValue ?? 0
@@ -286,6 +292,7 @@ public func loadStateWithMeta(path: String) throws -> CheckpointState {
         metaOptimizerStep = (meta["optimizerStep"] as? NSNumber)?.intValue ?? 0
         metaModelWidth = max(1, (meta["modelWidth"] as? NSNumber)?.intValue ?? 1)
         metaLatentChannels = max(1, (meta["latentChannels"] as? NSNumber)?.intValue ?? 16)
+        metaArchVersion = max(1, (meta["archVersion"] as? NSNumber)?.intValue ?? 1)
     }
 
     let entries = try parseCheckpointEntries(obj, baseOffset: baseOffset)
@@ -305,5 +312,6 @@ public func loadStateWithMeta(path: String) throws -> CheckpointState {
     return CheckpointState(mats: result, epoch: metaEpoch, step: metaStep,
                            fingerprint: metaFingerprint, optimizer: optimizer,
                            modelWidth: metaModelWidth,
-                           latentChannels: metaLatentChannels)
+                           latentChannels: metaLatentChannels,
+                           archVersion: metaArchVersion)
 }

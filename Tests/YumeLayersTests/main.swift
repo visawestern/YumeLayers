@@ -161,6 +161,7 @@ func runAll() {
         ("SceneMotion", testSceneMotion),
         ("ConvVAEWidth", testConvVAEWidthScales),
         ("CheckpointModelWidth", testCheckpointModelWidth),
+        ("CheckpointArchVersion", testCheckpointArchVersion),
     ]
     if let filter = gFilter {
         print("Фильтр: \(filter)")
