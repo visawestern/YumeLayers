@@ -170,6 +170,7 @@
 - [x] **Этап 1 (шаг 1) — каркас лосс-переключателя**: чистые функции `meanL1`, `sobelLumaGradient`, `sobelEdgeLoss`, `vaeLossGeneric(kind: mse/l1)` + тесты (`testL1AndSobelLoss`, `testVaeLossKindSwitch`). Интеграция в обучение/backward — следующий шаг.
 - [x] **Этап 1 (шаг 2, под-шаг) — GPU-GroupNorm**: ядро `groupnorm_kernel` + `session.groupNorm(_:groups:)` + CPU-эталон `groupNormCPU` + тест `testGPUGroupNorm` (расхождение c эталоном <1e-3; фактически 3.6e-7). Интеграция GroupNorm в `ConvVAEGPU` — следующий под-шаг.
 - [x] **Этап 1 (шаг 2b) — ResidualBlockGPU**: модуль `f(x)=x+conv2(ReLU(conv1(x)))` с собственным forward/backward на существующих GPU-операциях; численная проверка градиентов (конечные разности, относительная ошибка ≈0%) — тест `testResidualBlockGradients`. Интеграция в `ConvVAEGPU` (архитектура v2) — следующий под-шаг.
+- [x] **Этап 1 (шаг 4, подготовка) — инфраструктура патчей**: `randomCrop` (HWC, детерминизм, проверка границ) + тест `testRandomCrop`. Обучение на кропах 128–256px и инференс всего кадра 854×480 — следующий шаг.
 
 ### Осталось
 - [ ] **Этап 1 (автоэнкодер до G2)**: лосс-переключатель (L1/Sobel), ResBlock/GroupNorm, патчи 128–256px → инференс 854×480; цель — G2 (hold-out на реальных данных не хуже SD-VAE).

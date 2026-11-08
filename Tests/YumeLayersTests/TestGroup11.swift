@@ -158,3 +158,36 @@ func testResidualBlockGradients() {
     }
     expectEqual(checked, 4, "проверено 4 точки ResidualBlock")
 }
+
+func testRandomCrop() {
+    section("Этап 1: случайный кроп кадра (патчи 128–256px)")
+    let w = 64, h = 48
+    var img = [Float](repeating: 0, count: w * h * 3)
+    for y in 0..<h {
+        for x in 0..<w {
+            let i = (y * w + x) * 3
+            img[i] = Float(x) / Float(w); img[i + 1] = Float(y) / Float(h); img[i + 2] = 0.5
+        }
+    }
+    var rng = SplitMix64(seed: 42)
+    let cw = 32, ch = 24
+    guard let r = randomCrop(rgb: img, w: w, h: h, cropW: cw, cropH: ch, rng: &rng) else {
+        expect(false, "кроп создан"); return
+    }
+    expectEqual(r.crop.count, cw * ch * 3, "кроп: размер cw×ch×3")
+    expect(r.x0 >= 0 && r.x0 <= w - cw, "кроп: x0 в границах")
+    expect(r.y0 >= 0 && r.y0 <= h - ch, "кроп: y0 в границах")
+    // Проверка соответствия пикселей источнику в позиции x0,y0.
+    let si0 = (r.y0 * w + r.x0) * 3
+    expectClose(Double(r.crop[0]), Double(img[si0]), 1e-9, "кроп: пиксель (0,0) совпадает с источником (r=\(img[si0]))")
+
+    // Детерминизм: одинаковый seed → одинаковый кроп.
+    var rng2 = SplitMix64(seed: 42)
+    let r2 = randomCrop(rgb: img, w: w, h: h, cropW: cw, cropH: ch, rng: &rng2)
+    expectEqual(r2?.x0, r.x0, "кроп: детерминизм x0")
+    expectEqual(r2?.crop, r.crop, "кроп: детерминизм содержимого")
+
+    // Невалидные размеры → nil.
+    expect(randomCrop(rgb: img, w: w, h: h, cropW: 1000, cropH: 24, rng: &rng) == nil,
+           "кроп: cropW > w → nil")
+}
