@@ -426,7 +426,6 @@ func testCodeGuideLimits() {
         "Sources/YumeLayersCore/ConvTrainer.swift:131",
         "Sources/YumeLayersUI/main.swift:242",
         "Sources/YumeLayersUI/DelegatePart1.swift:170",
-        "Sources/YumeLayersUI/DelegatePart4.swift:201",
         "Tests/YumeLayersTests/TestGroup6.swift:13",
         "Tests/YumeLayersTests/TestGroup5.swift:184",
         "Tests/YumeLayersTests/TestGroup5.swift:334",

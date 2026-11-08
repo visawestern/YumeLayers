@@ -207,25 +207,16 @@ extension YumeAppDelegate {
         YumeLogBus.shared.subscribe { [weak self] line in
             DispatchQueue.main.async { self?.appendCoreLog(line) }
         }
-        // API /api/train запускает ТУ ЖЕ функцию, что и кнопка «Обучить VAE»
-        // (та же логика бэкапа/диалога и те же параметры из интерфейса).
-        api.onTrain = { [weak self] maxFrames, resume in
-            DispatchQueue.main.async { self?.startTraining(maxFrames: maxFrames, resume: resume) }
-        }
-        api.onStop = { [weak self] in
-            DispatchQueue.main.async { self?.stopTraining() }
-        }
-        api.onExtract = { [weak self] paths, maxFrames in
-            DispatchQueue.main.async {
-                guard let self = self, !paths.isEmpty else { return }
-                let urls = paths.map { URL(fileURLWithPath: $0) }
-                // Та же регистрация, что и при выборе в UI: список, поле, показ.
-                self.setSelectedVideos(urls)
-                self.saveSelection()
-                // Тот же запуск извлечения, что и у кнопки «Вытащить кадры».
-                self.startExtraction(urls: self.videoURLs, append: false, maxFrames: maxFrames ?? 0)
-            }
-        }
+        configureTrainCallbacks()
+        configureMiscCallbacks()
+        configureTestFramesCallback()
+        configureViewProviders()
+        configureStateProvider()
+        configureWindow()
+    }
+
+    /// Регистрирует /api/set: универсальный сеттер параметров интерфейса.
+    private func configureSetParamCallback() {
         // /api/set: универсальный сеттер всех параметров интерфейса. Каждый
         // ключ обновляет тот же элемент управления, что и ручной ввод в UI,
         // поэтому следующий вызов /api/train использует эти значения.
@@ -280,6 +271,33 @@ extension YumeAppDelegate {
             }
             return (unknown.isEmpty, applied, unknown)
         }
+    }
+
+    /// Регистрирует /api/train, /api/stop, /api/extract.
+    private func configureTrainCallbacks() {
+        // API /api/train запускает ТУ ЖЕ функцию, что и кнопка «Обучить VAE»
+        // (та же логика бэкапа/диалога и те же параметры из интерфейса).
+        api.onTrain = { [weak self] maxFrames, resume in
+            DispatchQueue.main.async { self?.startTraining(maxFrames: maxFrames, resume: resume) }
+        }
+        api.onStop = { [weak self] in
+            DispatchQueue.main.async { self?.stopTraining() }
+        }
+        api.onExtract = { [weak self] paths, maxFrames in
+            DispatchQueue.main.async {
+                guard let self = self, !paths.isEmpty else { return }
+                let urls = paths.map { URL(fileURLWithPath: $0) }
+                // Та же регистрация, что и при выборе в UI: список, поле, показ.
+                self.setSelectedVideos(urls)
+                self.saveSelection()
+                // Тот же запуск извлечения, что и у кнопки «Вытащить кадры».
+                self.startExtraction(urls: self.videoURLs, append: false, maxFrames: maxFrames ?? 0)
+            }
+        }
+    }
+
+    /// Регистрирует сброс/автоподбор/интерполяцию/слойный контур.
+    private func configureMiscCallbacks() {
         api.onResetParams = { [weak self] in
             DispatchQueue.main.async { self?.resetParams() }
         }
@@ -332,6 +350,10 @@ extension YumeAppDelegate {
                 }
             }
         }
+    }
+
+    /// Регистрирует /api/test-frames: проверка кадров в памяти.
+    private func configureTestFramesCallback() {
         // /api/test-frames: проверка текущих кадров в памяти (JPEG-сигнатура,
         // декодирование, имена). count — сколько кадров проверить (0 — все).
         api.testFramesProvider = { [weak self] count in
@@ -363,6 +385,10 @@ extension YumeAppDelegate {
             }
             return report
         }
+    }
+
+    /// Регистрирует screenshotProvider и layoutProvider.
+    private func configureViewProviders() {
         api.screenshotProvider = { [weak self] in
             guard let self = self else { return nil }
             var path: String? = nil
@@ -382,6 +408,10 @@ extension YumeAppDelegate {
             }
             return json
         }
+    }
+
+    /// Регистрирует stateProvider: снимок состояния окна.
+    private func configureStateProvider() {
         api.stateProvider = { [weak self] in
             guard let self = self else { return "{}" }
             var json = ""
@@ -419,7 +449,10 @@ extension YumeAppDelegate {
             }
             return json
         }
+    }
 
+    /// Настраивает окно, контент и обсервер ресайза.
+    private func configureWindow() {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1360, height: 840),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
