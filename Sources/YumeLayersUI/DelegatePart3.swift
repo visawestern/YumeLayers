@@ -274,7 +274,6 @@ extension YumeAppDelegate {
         let urls = panel.urls
         guard !urls.isEmpty else { return }
         setSelectedVideos(urls)
-        saveSelection()
     }
 
     func setSelectedVideos(_ urls: [URL]) {

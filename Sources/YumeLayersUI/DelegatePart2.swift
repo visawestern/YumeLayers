@@ -67,7 +67,6 @@ extension YumeAppDelegate {
     @objc func removeVideo(_ sender: NSButton) {
         guard sender.tag >= 0, sender.tag < videoURLs.count else { return }
         videoURLs.remove(at: sender.tag)
-        saveSelection()
         if videoURLs.isEmpty {
             folderField.stringValue = ""
             extractButton.isEnabled = false
@@ -90,27 +89,6 @@ extension YumeAppDelegate {
         looper = AVPlayerLooper(player: queuePlayer, templateItem: item)
         // Без автозапуска: воспроизведение — по кнопке плеера.
         setStatus("Видео выбрано. Нажмите «Вытащить кадры»", ok: true)
-    }
-
-    func saveSelection() {
-        let paths = videoURLs.map { $0.path }
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("YumeLayers", isDirectory: true)
-            .appendingPathComponent("last_video.json")
-        if let data = try? JSONSerialization.data(withJSONObject: ["videos": paths]) {
-            try? data.write(to: url)
-        }
-    }
-
-    func restoreSelection() {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("YumeLayers", isDirectory: true)
-            .appendingPathComponent("last_video.json")
-        guard let data = try? Data(contentsOf: url),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let arr = obj["videos"] as? [String], !arr.isEmpty else { return }
-        let urls = arr.map { URL(fileURLWithPath: $0) }
-        setSelectedVideos(urls)
     }
 
     @objc func extractFrames() {

@@ -261,7 +261,6 @@ extension YumeAppDelegate {
                     case "selectedVideos":
                         if let arr = value as? [String] {
                             self.setSelectedVideos(arr.map { URL(fileURLWithPath: $0) })
-                            self.saveSelection()
                             applied.append(key)
                         } else { unknown.append(key) }
                     default:
@@ -289,7 +288,6 @@ extension YumeAppDelegate {
                 let urls = paths.map { URL(fileURLWithPath: $0) }
                 // Та же регистрация, что и при выборе в UI: список, поле, показ.
                 self.setSelectedVideos(urls)
-                self.saveSelection()
                 // Тот же запуск извлечения, что и у кнопки «Вытащить кадры».
                 self.startExtraction(urls: self.videoURLs, append: false, maxFrames: maxFrames ?? 0)
             }
@@ -482,7 +480,6 @@ extension YumeAppDelegate {
             let pages = max(1, (self.framesStore.count + self.pageSize - 1) / self.pageSize)
             self.renderPageDots(pages: pages)
         }
-        restoreSelection()
         log("Готово. Добавьте видео → извлеките кадры → начните обучение.")
     }
 
