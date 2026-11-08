@@ -61,6 +61,9 @@
 - Шаг 2 (под-шаг): GPU-GroupNorm — ядро `groupnorm_kernel` + `session.groupNorm`
   + CPU-эталон `groupNormCPU`; расхождение GPU vs CPU = 3.6e-7 (< 1e-3).
   Интеграция GroupNorm в `ConvVAEGPU` — следующий под-шаг.
+- Шаг 2b: ResidualBlockGPU — f(x)=x+conv2(ReLU(conv1(x))), собственный backward,
+  численная проверка градиентов (конечные разности, отн. ошибка ≈0%).
+  Интеграция в `ConvVAEGPU` — следующий под-шаг.
 
 ## Открыто
 - G2 (hold-out на реальных данных 854×480, baseline SD-VAE) — после Этапа 1.

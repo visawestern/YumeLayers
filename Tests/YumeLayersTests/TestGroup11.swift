@@ -93,3 +93,68 @@ func testGPUGroupNorm() {
     let gmean = gsum / Double(gSize * P)
     expect(abs(gmean) < 1e-3, "группа 0: среднее ≈ 0 (\(gmean))")
 }
+
+func testResidualBlockGradients() {
+    section("Этап 1: ResidualBlockGPU — численная проверка градиентов")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let session = GpuSession(engine)
+    let C = 4, ih = 8, iw = 8, plane = ih * iw
+    var rng = SplitMix64(seed: 9)
+    let block = ResidualBlockGPU(engine: engine, channels: C, rng: &rng)
+
+    var data = [Float](repeating: 0, count: C * plane)
+    for i in 0..<data.count { data[i] = Float.random(in: -1...1, using: &rng) }
+    let x = GPUTensor(engine: engine, data: data, rows: C)
+    var targetData = [Float](repeating: 0, count: C * plane)
+    for i in 0..<targetData.count { targetData[i] = Float.random(in: -1...1, using: &rng) }
+    let target = GPUTensor(engine: engine, data: targetData, rows: C)
+
+    func loss() -> Double {
+        session.begin()
+        let (o, _) = block.forward(session, x, ih: ih, iw: iw)
+        _ = session.end()
+        let oa = o.toArray()
+        var s = 0.0
+        for i in 0..<oa.count { let d = Double(oa[i] - targetData[i]); s += d * d }
+        return s / Double(oa.count)
+    }
+
+    session.begin()
+    let (out, cache) = block.forward(session, x, ih: ih, iw: iw)
+    let dOut = session.smul(2.0 / Float(C * plane), session.sub(out, target))
+    let (_, grads) = block.backward(session, cache, dOut: dOut)
+    _ = session.end()
+
+    var maxGrad = 0.0
+    for g in grads {
+        let a = g.toArray()
+        maxGrad = max(maxGrad, a.map { abs(Double($0)) }.max() ?? 0)
+    }
+    expect(maxGrad > 1e-6, "Residual: градиенты невырождены (max |g| = \(maxGrad))")
+
+    let eps: Float = 1e-2
+    var checked = 0
+    let layers: [ConvLayerGPU] = [block.c1, block.c2]
+    for (li, layer) in layers.enumerated() {
+        let g = grads[li * 2].toArray()
+        let top = (0..<g.count).sorted { abs(g[$0]) > abs(g[$1]) }.prefix(2)
+        for weightIdx in top {
+            let analytic = Double(g[weightIdx])
+            let orig = layer.W.getValue(weightIdx)
+            layer.W.setValue(weightIdx, orig + eps)
+            let lp = loss()
+            layer.W.setValue(weightIdx, orig - eps)
+            let lm = loss()
+            layer.W.setValue(weightIdx, orig)
+            let numeric = (lp - lm) / (2 * Double(eps))
+            let denom = max(1e-9, abs(analytic) + abs(numeric))
+            let rel = abs(analytic - numeric) / denom
+            expect(rel < 0.10,
+                   String(format: "Residual слой %d вес %d: аналит %.4e числ %.4e (отн %.1f%%)",
+                          li, weightIdx, analytic, numeric, rel * 100))
+            checked += 1
+        }
+    }
+    expectEqual(checked, 4, "проверено 4 точки ResidualBlock")
+}

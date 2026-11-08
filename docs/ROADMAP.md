@@ -169,6 +169,7 @@
 - [x] **Этап 0.4 — hold-out по сценам**: обучение на сцене A → PSNR 33.18 дБ; сцена B (hold-out) → 14.29 дБ (разрыв 18.9 дБ). Подтверждено «запоминание», а не генерализация (тест `testHoldoutByScene`).
 - [x] **Этап 1 (шаг 1) — каркас лосс-переключателя**: чистые функции `meanL1`, `sobelLumaGradient`, `sobelEdgeLoss`, `vaeLossGeneric(kind: mse/l1)` + тесты (`testL1AndSobelLoss`, `testVaeLossKindSwitch`). Интеграция в обучение/backward — следующий шаг.
 - [x] **Этап 1 (шаг 2, под-шаг) — GPU-GroupNorm**: ядро `groupnorm_kernel` + `session.groupNorm(_:groups:)` + CPU-эталон `groupNormCPU` + тест `testGPUGroupNorm` (расхождение c эталоном <1e-3; фактически 3.6e-7). Интеграция GroupNorm в `ConvVAEGPU` — следующий под-шаг.
+- [x] **Этап 1 (шаг 2b) — ResidualBlockGPU**: модуль `f(x)=x+conv2(ReLU(conv1(x)))` с собственным forward/backward на существующих GPU-операциях; численная проверка градиентов (конечные разности, относительная ошибка ≈0%) — тест `testResidualBlockGradients`. Интеграция в `ConvVAEGPU` (архитектура v2) — следующий под-шаг.
 
 ### Осталось
 - [ ] **Этап 1 (автоэнкодер до G2)**: лосс-переключатель (L1/Sobel), ResBlock/GroupNorm, патчи 128–256px → инференс 854×480; цель — G2 (hold-out на реальных данных не хуже SD-VAE).

@@ -113,6 +113,7 @@ func runAll() {
         ("L1SobelLoss", testL1AndSobelLoss),
         ("VaeLossKind", testVaeLossKindSwitch),
         ("GPUGroupNorm", testGPUGroupNorm),
+        ("ResidualBlock", testResidualBlockGradients),
         ("VRAMBudget", testVRAMBudget),
         ("ProcessedMarks", testProcessedMarks),
         ("Reproducibility", testReproducibility),
