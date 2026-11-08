@@ -225,6 +225,43 @@ func testGPUFramePoolBrokenFrame() {
            "пул: битый кадр — чёрная заглушка (нули), не мусор и не чужой кадр")
 }
 
+/// Регрессия Фазы 4: многократная дозагрузка окон пула (долгий прогон)
+/// должна завершаться, а не зависать на командном буфере.
+func testGPUFramePoolLongRunNoHang() {
+    section("GPUFramePool: долгий прогон — перезагрузка окон не зависает (Фаза 4)")
+
+    guard MTLCreateSystemDefaultDevice() != nil else {
+        skip("Metal недоступен"); return
+    }
+    let engine = MetalEngine.shared
+
+    func solidFrame(_ v: Float) -> MemoryFrame {
+        let img = [Float](repeating: v, count: 8 * 8 * 3)
+        return MemoryFrame(name: "f\(v)", jpeg: encodePNG(width: 8, height: 8, rgb: img)!)
+    }
+    let values: [Float] = [0.1, 0.25, 0.4, 0.55, 0.7]
+    let frames = values.map { solidFrame($0) }
+    // 5 кадров, окно 2 → чанки [0,1],[2,3],[4] — дозагрузка на каждом переходе окна.
+    guard let pool = GPUFramePool(engine: engine, frames: frames, w: 8, h: 8, size: 2) else {
+        expect(false, "пул не создался"); return
+    }
+
+    let t0 = Date()
+    var ok = true
+    // 20 полных проходов по 5 кадров = 100 вызовов next() + ~60 перезагрузок окон.
+    for _ in 0..<20 {
+        for i in 0..<5 {
+            let v = pool.next().toArray()
+            let expected = values[i]
+            if !v.allSatisfy({ abs($0 - expected) < 0.02 }) { ok = false }
+        }
+    }
+    let dt = Date().timeIntervalSince(t0)
+    expect(ok, "все кадры выданы в строгом цикле при многократной перезагрузке окон")
+    expect(dt < 30,
+           "долгий прогон завершился, а не завис (\(String(format: "%.1f", dt)) с)")
+}
+
 // MARK: - main
 
 
