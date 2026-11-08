@@ -18,7 +18,8 @@ func saveIntermediateCheckpoint(vae: ConvVAEGPU, convPath: String,
         let opt = CheckpointOptimizerState(step: step, moments: vae.optimizerMoments())
         try saveState(vae.matrices, to: convPath,
                       epoch: epoch, step: stepIdx, totalSteps: epochSteps,
-                      dataFingerprint: fingerprint, optimizer: opt)
+                      dataFingerprint: fingerprint, optimizer: opt,
+                      modelWidth: vae.width)
         yumeLog("Промежуточный чекпоинт: эпоха \(epoch), шаг \(stepIdx)/\(epochSteps) — сохранён")
     } catch {
         yumeLog("⚠️ ошибка промежуточного чекпоинта: \(error.localizedDescription)")
@@ -35,11 +36,13 @@ func saveEpochCheckpoints(vae: ConvVAEGPU, convPath: String,
     let opt = CheckpointOptimizerState(step: step, moments: vae.optimizerMoments())
     try saveState(vae.matrices, to: convPath,
                   epoch: nextEpoch, step: 0, totalSteps: epochSteps,
-                  dataFingerprint: fingerprint, optimizer: opt)
+                  dataFingerprint: fingerprint, optimizer: opt,
+                  modelWidth: vae.width)
     let finalPath = finalCheckpointPath(for: convPath)
     try saveState(vae.matrices, to: finalPath,
                   epoch: nextEpoch, step: 0, totalSteps: epochSteps,
-                  dataFingerprint: fingerprint, optimizer: opt)
+                  dataFingerprint: fingerprint, optimizer: opt,
+                  modelWidth: vae.width)
 }
 
 /// Трассировка градиентов и кэша первого шага эпохи 0 (локализация NaN).

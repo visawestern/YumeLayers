@@ -85,11 +85,14 @@ private func runReconsOn(engine: MetalEngine, items: [(name: String, jpeg: Data)
     // Канонический декод: истинный размер + паддинг (не растяжение).
     let decW = realW ?? pw, decH = realH ?? ph
     let session = GpuSession(engine)
-    let vae = ConvVAEGPU(engine: engine)
+    var vae = ConvVAEGPU(engine: engine)
     let sensor = GpuSensor()
     if FileManager.default.fileExists(atPath: convPath) {
-        let mats = try loadState(path: convPath)
-        try vae.load(from: mats)
+        let st = try loadStateWithMeta(path: convPath)
+        // Модель той же ширины, что и обученная: иначе формы слоёв
+        // не совпадают и загрузка падает («несовпадение формы слоя 0»).
+        vae = ConvVAEGPU(engine: engine, width: st.modelWidth)
+        try vae.load(from: st.mats)
     } else {
         return [:]
     }

@@ -203,6 +203,11 @@ public final class ConvVAEGPU {
     /// латент и упадёт на `split2`.
     public let latentChannels: Int
 
+    /// Кратность ширины свёрточных каналов этой модели (1 — базовая).
+    /// Сохраняется в чекпоинт, чтобы реконструкции/переобучение строили
+    /// модель той же архитектуры.
+    public let width: Int
+
     let e1: ConvLayerGPU
     let e2: ConvLayerGPU
     let e3: ConvLayerGPU
@@ -226,6 +231,7 @@ public final class ConvVAEGPU {
         self.latentChannels = latentChannels
         let C = latentChannels
         let W = max(width, 1)
+        self.width = W
         let f1 = 16 * W
         let f2 = 32 * W
         var rng = SplitMix64(seed: seed)

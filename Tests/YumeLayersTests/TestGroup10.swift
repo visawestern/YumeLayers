@@ -1,4 +1,5 @@
 // YumeLayers — тесты движения и «законченности» сцены (Фаза 3).
+import Foundation
 
 func testSceneMotion() {
     section("Движение по последовательным кадрам: фон/объекты/законченность")
@@ -68,4 +69,31 @@ func testConvVAEWidthScales() {
     _ = s.end()
     expectEqual(cache.recon.toArray().count, w * h * 3,
                 "width=2: recon имеет размер w×h×3")
+}
+
+func testCheckpointModelWidth() {
+    section("Чекпоинт хранит ширину модели (modelWidth) для реконструкций")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let tmp = NSTemporaryDirectory() + "yume-cp-width-\(UUID().uuidString).safetensors"
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+    let wide = ConvVAEGPU(engine: engine, width: 2)
+    try? saveState(wide.matrices, to: tmp, epoch: 1, step: 5, totalSteps: 10,
+                   optimizer: CheckpointOptimizerState(step: 5, moments: wide.optimizerMoments()),
+                   modelWidth: 2)
+    guard let st = try? loadStateWithMeta(path: tmp) else {
+        expect(false, "чекпоинт с шириной прочитан"); return
+    }
+    expectEqual(st.modelWidth, 2, "modelWidth=2 сохранён и прочитан")
+    let stMats = st.mats
+    expectEqual(stMats.count, wide.layers.count * 2, "число матриц соответствует ширине модели")
+
+    // Старый формат (без метаданных modelWidth) → по умолчанию 1.
+    let base = ConvVAEGPU(engine: engine)
+    try? saveState(base.matrices, to: tmp, modelWidth: nil)
+    guard let st2 = try? loadStateWithMeta(path: tmp) else {
+        expect(false, "чекпоинт без ширины прочитан"); return
+    }
+    expectEqual(st2.modelWidth, 1, "без метаданных modelWidth = 1")
 }

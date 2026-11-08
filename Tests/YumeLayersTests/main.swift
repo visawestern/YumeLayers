@@ -150,6 +150,7 @@ func runAll() {
         ("PoolLongRun", testGPUFramePoolLongRunNoHang),
         ("SceneMotion", testSceneMotion),
         ("ConvVAEWidth", testConvVAEWidthScales),
+        ("CheckpointModelWidth", testCheckpointModelWidth),
     ]
     if let filter = gFilter {
         print("Фильтр: \(filter)")
