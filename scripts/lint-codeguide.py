@@ -34,10 +34,6 @@ KNOWN_OVERSIZED = {
 # Долг: крупные (неатомарные) функции в файлах, которые сами по себе в лимите.
 # Ключ — (относительный путь, номер строки func). Убираются рефакторингом.
 KNOWN_LARGE_FUNCS = {
-    ("Sources/YumeLayersCore/ParallelExtractor.swift", 194): "параллельное извлечение",
-    ("Sources/YumeLayersCore/SoftwareFrameDecoder.swift", 26): "декодер кадров",
-    ("Sources/YumeLayersCore/ConvGPU.swift", 308): "decode: прямой проход декодера (см. долг)",
-    ("Sources/YumeLayersCore/MetalEngine.swift", 26): "init: настройка пайплайнов/ядер (см. долг)",
     ("Sources/YumeLayersCore/LayeredTrainer.swift", 133): "цикл слоёного обучения (см. долг)",
     ("Sources/YumeLayersCore/ParallelExtractor.swift", 268): "run: продюсер+эмиттер (см. долг)",
     ("Sources/YumeLayersCore/SelfTest.swift", 9): "runSelfTest: монолит самопроверки (см. долг)",
