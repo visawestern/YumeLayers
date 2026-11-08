@@ -97,24 +97,15 @@ extension YumeAppDelegate {
 
         trainButton.target = self
         trainButton.action = #selector(startTraining as () -> Void)
-        trainButton.bezelStyle = .rounded
         trainButton.keyEquivalent = "\r"
-        trainButton.controlSize = .large
-        trainButton.bezelColor = .systemBlue
-        // Кнопки «Старт/Стоп»: иконки встроены в текст (▶/■) — у системной
-        // кнопки AppKit внутренний зазор между image и title не убирается,
-        // а текст с символом даёт ровную типографику без отступов.
-        trainButton.image = nil
         trainButton.title = "▶ Обучить VAE"
-        trainButton.imagePosition = .imageLeading
+        Design.applyPill(trainButton, fill: Design.violet, text: .white, radius: Design.pillFull)
 
         stopButton.target = self
         stopButton.action = #selector(stopTraining)
-        stopButton.bezelStyle = .rounded
         stopButton.keyEquivalent = "\u{1b}"   // Esc
-        stopButton.controlSize = .regular
-        stopButton.image = nil
         stopButton.title = "■ Стоп"
+        Design.applyOutlinePill(stopButton, stroke: Design.ash, text: Design.obsidian)
         stopButton.isEnabled = false
 
         let runButtons = NSStackView(views: [trainButton, stopButton])

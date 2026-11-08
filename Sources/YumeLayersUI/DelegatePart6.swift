@@ -13,7 +13,7 @@ extension YumeAppDelegate {
             card.state = .active
             card.wantsLayer = true
             card.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-            card.layer?.cornerRadius = 12
+            card.layer?.cornerRadius = Design.cardRadius
             card.layer?.borderWidth = 0.5
             card.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.45).cgColor
 
@@ -54,7 +54,7 @@ extension YumeAppDelegate {
             let card = NSView()
             card.wantsLayer = true
             card.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-            card.layer?.cornerRadius = 12
+            card.layer?.cornerRadius = Design.cardRadius
             card.layer?.borderWidth = 0.5
             card.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.45).cgColor
             card.addSubview(content)
