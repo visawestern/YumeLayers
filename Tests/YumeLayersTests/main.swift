@@ -109,6 +109,7 @@ func runAll() {
         ("VAEGradients", testVAEGradients),
         ("VAEConvergence", testVAEConvergence),
         ("OverfitGate16", testOverfitGate_16Frames),
+        ("HoldoutByScene", testHoldoutByScene),
         ("VRAMBudget", testVRAMBudget),
         ("ProcessedMarks", testProcessedMarks),
         ("Reproducibility", testReproducibility),

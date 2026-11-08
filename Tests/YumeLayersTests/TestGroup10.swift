@@ -161,3 +161,73 @@ func testOverfitGate_16Frames() {
           + " дБ (β \(beta), lr \(lr); " + atNote + ")")
     expect(p >= 35, String(format: "G1: overfit 16 кадров ≥35 дБ (получено %.2f)", p))
 }
+
+// MARK: - Этап 0.4. Hold-out по сценам (запоминание vs генерализация)
+
+/// Другая «сцена» (горизонтальные полосы, без круга/света) для hold-out.
+func makeStripedScene(w: Int, h: Int) -> [Float] {
+    var img = [Float](repeating: 0, count: w * h * 3)
+    for y in 0..<h {
+        for x in 0..<w {
+            let i = (y * w + x) * 3
+            if (y / 12) % 2 == 0 {
+                img[i] = 0.2; img[i + 1] = 0.4; img[i + 2] = 0.7
+            } else {
+                img[i] = 0.8; img[i + 1] = 0.6; img[i + 2] = 0.2
+            }
+        }
+    }
+    return img
+}
+
+/// Обучаемся на сцене A (16 кадров), затем меряем PSNR на A (train) и на B
+/// (hold-out). Если модель генерализует — разрыв мал; если запоминает —
+/// train заметно выше hold-out. Диагностика этапа 0.4.
+func testHoldoutByScene() {
+    section("Этап 0.4: hold-out по сценам (запоминание vs генерализация)")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let session = GpuSession(engine)
+    let w = 128, h = 72
+    let nFrames = 16
+
+    var sceneA = [[Float]]()   // сцена A: градиент + круг + свет
+    for f in 0..<nFrames {
+        var rng = SplitMix64(seed: UInt64(0x1111_0000 + f))
+        sceneA.append(makeSyntheticScene(w: w, h: h, rng: &rng))
+    }
+    let sceneB = makeStripedScene(w: w, h: h)   // сцена B: полосы (девіm)
+
+    let beta: Float = 0.01
+    let lr: Float = 0.004
+    let totalSteps = 6000
+
+    let vae = ConvVAEGPU(engine: engine)
+    func psnrOn(_ frames: [[Float]]) -> Float {
+        var sum: Float = 0
+        for img in frames {
+            let x = GPUTensor(engine: engine, data: hwcToChw(img), rows: 3)
+            session.begin()
+            let c = vae.forward(session, image: x, w: w, h: h, deterministic: true)
+            _ = session.end()
+            sum += psnr(reference: img, candidate: chwToHwc(c.recon.toArray()))
+        }
+        return sum / Float(frames.count)
+    }
+    for step in 1...totalSteps {
+        let img = sceneA[(step - 1) % nFrames]
+        let x = GPUTensor(engine: engine, data: hwcToChw(img), rows: 3)
+        session.begin()
+        let c = vae.forward(session, image: x, w: w, h: h, deterministic: true)
+        let (_, g) = vae.backward(session, c, target: x, beta: beta)
+        vae.applyAdam(session, grads: g, t: step, lr: lr)
+        _ = session.end()
+    }
+    let trainPSNR = psnrOn(sceneA)
+    let holdoutPSNR = psnrOn([sceneB])
+    print("      hold-out: train PSNR = " + String(format: "%.2f", trainPSNR)
+          + " дБ, hold-out PSNR = " + String(format: "%.2f", holdoutPSNR) + " дБ")
+    expect(trainPSNR - holdoutPSNR >= 3.0,
+           String(format: "запоминание: train заметно выше hold-out (разрыв ≥3 дБ; получено %.1f)",
+                  trainPSNR - holdoutPSNR))
+}
