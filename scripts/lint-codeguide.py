@@ -45,7 +45,6 @@ KNOWN_LARGE_FUNCS = {
     ("Sources/YumeLayersUI/main.swift", 242): "buildUI: сборка интерфейса (см. долг)",
     ("Sources/YumeLayersUI/DelegatePart1.swift", 170): "длинный метод (см. долг)",
     ("Sources/YumeLayersUI/DelegatePart4.swift", 201): "длинный метод (см. долг)",
-    ("Sources/YumeLayersUI/DelegatePart7.swift", 9): "buildLeftPanel: сборка левой панели (см. долг)",
     ("Tests/YumeLayersTests/TestGroup6.swift", 13): "длинная тест-функция (см. долг)",
     ("Tests/YumeLayersTests/TestGroup5.swift", 184): "длинная тест-функция (см. долг)",
     ("Tests/YumeLayersTests/TestGroup5.swift", 334): "длинная тест-функция (см. долг)",

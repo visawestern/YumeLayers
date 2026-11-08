@@ -7,6 +7,34 @@ import YumeLayersCore
 
 extension YumeAppDelegate {
     func buildLeftPanel() -> NSStackView {
+        let (folderRow, dataPage) = buildExtractSection()
+        let paramsPage = buildParamsPage()
+        let runPage = buildRunPage()
+        let interpPage = buildInterpPage()
+
+        for p in [dataPage, paramsPage, runPage, interpPage] {
+            p.widthAnchor.constraint(equalToConstant: 392).isActive = true
+            // Карточки не растягиваются по вертикали — держатся нативной высоты.
+            p.setContentHuggingPriority(.required, for: .vertical)
+        }
+
+        let left = NSStackView(views: [dataPage, paramsPage, runPage, interpPage])
+        left.orientation = .vertical
+        left.spacing = 16
+        left.alignment = .leading
+        left.edgeInsets = NSEdgeInsets(top: 24, left: 24, bottom: 24, right: 24)
+        left.widthAnchor.constraint(equalToConstant: 440).isActive = true
+
+        layoutViews["dataPage"] = dataPage
+        layoutViews["paramsPage"] = paramsPage
+        layoutViews["runPage"] = runPage
+        layoutViews["left"] = left
+        layoutViews["folderRow"] = folderRow
+        return left
+    }
+
+    /// Собирает карточку «1. Видео» и связанные контролы.
+    private func buildExtractSection() -> (folderRow: NSStackView, page: NSView) {
         let folderRow = fieldRow("Файл:", folderField, accessory: browseButton,
                                  info: "Выберите один или несколько видеофайлов (MP4/MOV). Кадры будут извлечены строго в порядке выбора — это важно для привязки движения к seed.")
 
@@ -51,7 +79,11 @@ extension YumeAppDelegate {
                                  contentViews: [folderRow, extractLimitRow, extractRow,
                                                 extractProgressBlock, extractHint],
                                  spacing: 12)
+        return (folderRow: folderRow, page: dataPage)
+    }
 
+    /// Собирает карточку «2. Параметры обучения».
+    private func buildParamsPage() -> NSView {
         // Шаг 2 — Параметры обучения
         resetParamsButton.target = self
         resetParamsButton.action = #selector(resetParams)
@@ -94,7 +126,11 @@ extension YumeAppDelegate {
             autoTuneButton,
             resetParamsButton,
         ], spacing: 10)
+        return paramsPage
+    }
 
+    /// Собирает карточку «3. Запуск».
+    private func buildRunPage() -> NSView {
         trainButton.target = self
         trainButton.action = #selector(startTraining as () -> Void)
         trainButton.keyEquivalent = "\r"
@@ -169,8 +205,11 @@ extension YumeAppDelegate {
                       info: "Путь к файлу, в который сохраняется обученная модель (чекпоинт, safetensors). Можно указать любой файл, например ~/YumeLayers/checkpoints/my_vae.safetensors."),
             hint,
         ], spacing: 10)
+        return runPage
+    }
 
-        // Шаг 4 — Генерация A→B (интерполяция)
+    /// Собирает карточку «4. Генерация A→B».
+    private func buildInterpPage() -> NSView {
         interpAButton.target = self
         interpAButton.action = #selector(chooseReferenceA)
         interpAButton.bezelStyle = .rounded
@@ -211,26 +250,7 @@ extension YumeAppDelegate {
             interpResultLabel,
             interpHint,
         ], spacing: 10)
-
-        for p in [dataPage, paramsPage, runPage, interpPage] {
-            p.widthAnchor.constraint(equalToConstant: 392).isActive = true
-            // Карточки не растягиваются по вертикали — держатся нативной высоты.
-            p.setContentHuggingPriority(.required, for: .vertical)
-        }
-
-        let left = NSStackView(views: [dataPage, paramsPage, runPage, interpPage])
-        left.orientation = .vertical
-        left.spacing = 16
-        left.alignment = .leading
-        left.edgeInsets = NSEdgeInsets(top: 24, left: 24, bottom: 24, right: 24)
-        left.widthAnchor.constraint(equalToConstant: 440).isActive = true
-
-        layoutViews["dataPage"] = dataPage
-        layoutViews["paramsPage"] = paramsPage
-        layoutViews["runPage"] = runPage
-        layoutViews["left"] = left
-        layoutViews["folderRow"] = folderRow
-        return left
+        return interpPage
     }
 
 }
