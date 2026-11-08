@@ -147,6 +147,8 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
     var layoutViews: [String: NSView] = [:]
     var debugGrids: [NSView] = []
     var lastParams = Params()
+    /// Кратность ширины VAE для следующего обучения (по умолчанию 1).
+    var requestedModelWidth = 1
 
     // ——— Генерация A→B: интерполяция между двумя опорными картинками ———
     let interpAButton = NSButton(title: "Выбрать…", target: nil, action: nil)

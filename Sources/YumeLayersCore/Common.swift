@@ -127,6 +127,9 @@ public struct Params {
     public var width = 854
     public var height = 480
     public var latentDim = 16
+    /// Кратность ширины свёрточных слоёв VAE (1 — базовая архитектура;
+    /// >1 — увеличенная ёмкость для ворот Фазы 1–2).
+    public var modelWidth = 1
     public var epochs = 20
     public var steps = 20
     public var batch = 1

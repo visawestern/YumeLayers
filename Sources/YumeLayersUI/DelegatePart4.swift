@@ -247,6 +247,11 @@ extension YumeAppDelegate {
                         if let s = paramStringValue(value) { self.widthCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
                     case "height":
                         if let s = paramStringValue(value) { self.heightCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
+                    case "modelWidth":
+                        if let s = paramStringValue(value), let w = Int(s), w >= 1 {
+                            self.requestedModelWidth = w
+                            applied.append(key)
+                        } else { unknown.append(key) }
                     case "pauseMs":
                         if let s = paramStringValue(value) { self.pauseCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
                     case "gpuPowerPercent":
