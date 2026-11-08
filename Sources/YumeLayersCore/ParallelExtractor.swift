@@ -294,11 +294,8 @@ final class ParallelExtractor {
         let plan = Self.makePlan(duration: duration, sourceFPS: requestedFPS,
                                  maxFrames: options.maxFrames, cores: cores)
 
-        // Полное извлечение (все кадры) — ОДИН процесс ffmpeg со всеми
-        // ядрами: он и так нагружает CPU целиком, и параллельные чанки не
-        // ускоряют, а добавляют накладные на запуск процессов. Параллельные
-        // чанки выгодны только при выборке с лимитом — там кадров заметно
-        // меньше, чем в исходнике.
+        // Полное извлечение — один процесс ffmpeg (параллельные чанки
+        // выгодны только при выборке с лимитом).
         if plan.targetFrames >= plan.allFrames {
             runSinglePass(plan: plan, ffmpeg: ffmpeg,
                           onFrame: onFrame, progress: progress,
@@ -307,148 +304,9 @@ final class ParallelExtractor {
         }
 
         let buffer = SegmentBuffer(count: plan.chunks.count, target: plan.targetFrames)
-        let group = DispatchGroup()
-        let queue = DispatchQueue(label: "yume.parallel", attributes: .concurrent)
-
-        // Параллельно работают не больше `cores` процессов ffmpeg: каждый
-        // берёт следующий неотданный чанк. Чанки маленькие, поэтому ГДЕ-ТО
-        // В СЕРЕДИНЕ ролика извлечение не замирает — готовые чанки
-        // отдаются по мере готовности, в строгом порядке.
-        let nextChunk = AtomicCounter()
-        let workers = min(max(cores, 1), plan.chunks.count)
-
-        func decodeChunk(_ c: Int) {
-            let chunk = plan.chunks[c]
-            let range = plan.timeRange(of: chunk)
-            guard !isCancelled else { return }
-
-            // Видеофильтр: исходный fps + (опционально) масштаб.
-            // Фильтр fps обязателен: он синхронизирует выходную частоту с
-            // временными границами чанка, иначе стыки «плывут» и кадры
-            // теряются на границах чанков.
-            var vf = String(format: "fps=%.4f", plan.outputFPS)
-            if options.targetWidth > 0 && options.targetHeight > 0 {
-                let scaleBar = "scale=\(options.targetWidth):\(options.targetHeight):force_original_aspect_ratio=decrease:flags=lanczos"
-                vf = "\(vf),\(scaleBar)"
-            }
-
-            let args = [
-                "-hide_banner", "-loglevel", "error",
-                "-nostdin",
-                // Seek с запасом в полкадра в прошлое и точностью до микросекунды:
-                // округление «вверх» до 0.1 мс отбрасывало кадр ровно на границе
-                // чанка (29.97 fps и т.п.), а дубли не страшны — предыдущий чанк
-                // ограничен своим -frames:v и до этой точки не доходит.
-                "-ss", String(format: "%.6f", max(0, range.start - 0.5 / plan.outputFPS)),
-                "-i", url.path,
-                "-vf", vf,
-                "-frames:v", "\(chunk.frameCount)",
-                "-f", "image2pipe",
-                "-vcodec", "mjpeg",
-                "-q:v", "\(Self.jpegQuality)",
-                "-vsync", "0",
-                "-",
-            ]
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: ffmpeg)
-            proc.arguments = args
-            let pipe = Pipe()
-            proc.standardOutput = pipe
-            proc.standardError = FileHandle.nullDevice
-            lock.lock()
-            processes.append(proc)
-            lock.unlock()
-            do {
-                try proc.run()
-            } catch {
-                buffer.markFailed()
-                return
-            }
-            var gotFrames = 0
-            Self.readJpegs(handle: pipe.fileHandleForReading,
-                           maxFrames: chunk.frameCount,
-                           onCancel: { [self] in isCancelled },
-                           onFrame: { jpeg in
-                               gotFrames += 1
-                               buffer.append(jpeg, at: c)
-                           })
-            proc.waitUntilExit()
-            // Ошибка декодирования внутри чанка (битые данные, сбой seek)
-            // раньше оставляла чанк «законченным» с нулём кадров — недобор
-            // никто не замечал, completion уходил с успехом.
-            if proc.terminationStatus != 0, !isCancelled {
-                if gotFrames == 0 {
-                    yumeLog("⚠️ ffmpeg: чанк \(c) не выдал ни одного кадра (код \(proc.terminationStatus))")
-                    buffer.markFailed()
-                    return
-                }
-                yumeLog("⚠️ ffmpeg: чанк \(c) завершился с кодом \(proc.terminationStatus), получено \(gotFrames)/\(chunk.frameCount) кадров")
-            }
-            buffer.finish(at: c)
-        }
-
-        for _ in 0..<workers {
-            group.enter()
-            queue.async { [self] in
-                defer { group.leave() }
-                while true {
-                    let c = nextChunk.increment()
-                    if c >= plan.chunks.count { break }
-                    if isCancelled { break }
-                    decodeChunk(c)
-                    if buffer.hasFailed { break }
-                }
-            }
-        }
-
-        // Сборка в строгом порядке: кадры первого чанка отдаются сразу, как
-        // только он готов (обычно за доли секунды), дальше — каждый следующий
-        // чанк по мере готовности. Прогресс считаем ТОЛЬКО по фактически
-        // отданным кадрам, чтобы UI не прыгал вперёд «прочитанного»,
-        // но ещё не показанного.
-        let progressStride = max(1, plan.targetFrames / 100)
-
-        DispatchQueue(label: "yume.emit").async { [self] in
-            var idx = 0
-            var failure: Error?
-            emitLoop: for c in 0..<plan.chunks.count {
-                if idx >= plan.targetFrames { break }
-                while true {
-                    if isCancelled {
-                        failure = FrameExtractError.cancelled
-                        break emitLoop
-                    }
-                    let (frame, done) = buffer.next(c, shouldStop: { isCancelled })
-                    if let frame {
-                        if idx >= plan.targetFrames { break emitLoop }
-                        onFrame(idx, plan.targetFrames, idx + options.startIndex, frame)
-                        idx += 1
-                        if idx % progressStride == 0 {
-                            reportProgress(Double(idx) / Double(plan.targetFrames),
-                                           progress: progress)
-                        }
-                        continue
-                    }
-                    if done { break }
-                }
-                if buffer.hasFailed {
-                    failure = FrameExtractError.unreadableAsset
-                    break
-                }
-            }
-
-            if let failure {
-                terminateAll()
-                completion(.failure(failure))
-                return
-            }
-            guard idx > 0 else {
-                completion(.failure(FrameExtractError.unreadableAsset))
-                return
-            }
-            reportProgress(1.0, progress: progress)
-            completion(.success(()))
-        }
+        launchParallelDecode(plan: plan, buffer: buffer, ffmpeg: ffmpeg, cores: cores)
+        emitInOrder(plan: plan, buffer: buffer, startIndex: options.startIndex,
+                    onFrame: onFrame, progress: progress, completion: completion)
     }
 
     /// Однопроходное извлечение ВСЕХ кадров одним процессом ffmpeg.
@@ -589,4 +447,152 @@ final class ParallelExtractor {
             return nil
         }
     }
+    /// Запускает параллельные ffmpeg-чанки (не больше cores процессов).
+    private func launchParallelDecode(plan: Plan, buffer: SegmentBuffer, ffmpeg: String, cores: Int) {
+        let group = DispatchGroup()
+        let queue = DispatchQueue(label: "yume.parallel", attributes: .concurrent)
+
+        // Параллельно работают не больше `cores` процессов ffmpeg: каждый
+        // берёт следующий неотданный чанк. Чанки маленькие, поэтому ГДЕ-ТО
+        // В СЕРЕДИНЕ ролика извлечение не замирает — готовые чанки
+        // отдаются по мере готовности, в строгом порядке.
+        let nextChunk = AtomicCounter()
+        let workers = min(max(cores, 1), plan.chunks.count)
+
+        func decodeChunk(_ c: Int) {
+            let chunk = plan.chunks[c]
+            let range = plan.timeRange(of: chunk)
+            guard !isCancelled else { return }
+
+            // Видеофильтр: исходный fps + (опционально) масштаб.
+            // Фильтр fps обязателен: он синхронизирует выходную частоту с
+            // временными границами чанка, иначе стыки «плывут» и кадры
+            // теряются на границах чанков.
+            var vf = String(format: "fps=%.4f", plan.outputFPS)
+            if options.targetWidth > 0 && options.targetHeight > 0 {
+                let scaleBar = "scale=\(options.targetWidth):\(options.targetHeight):force_original_aspect_ratio=decrease:flags=lanczos"
+                vf = "\(vf),\(scaleBar)"
+            }
+
+            let args = [
+                "-hide_banner", "-loglevel", "error",
+                "-nostdin",
+                // Seek с запасом в полкадра в прошлое и точностью до микросекунды:
+                // округление «вверх» до 0.1 мс отбрасывало кадр ровно на границе
+                // чанка (29.97 fps и т.п.), а дубли не страшны — предыдущий чанк
+                // ограничен своим -frames:v и до этой точки не доходит.
+                "-ss", String(format: "%.6f", max(0, range.start - 0.5 / plan.outputFPS)),
+                "-i", url.path,
+                "-vf", vf,
+                "-frames:v", "\(chunk.frameCount)",
+                "-f", "image2pipe",
+                "-vcodec", "mjpeg",
+                "-q:v", "\(Self.jpegQuality)",
+                "-vsync", "0",
+                "-",
+            ]
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: ffmpeg)
+            proc.arguments = args
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = FileHandle.nullDevice
+            lock.lock()
+            processes.append(proc)
+            lock.unlock()
+            do {
+                try proc.run()
+            } catch {
+                buffer.markFailed()
+                return
+            }
+            var gotFrames = 0
+            Self.readJpegs(handle: pipe.fileHandleForReading,
+                           maxFrames: chunk.frameCount,
+                           onCancel: { [self] in isCancelled },
+                           onFrame: { jpeg in
+                               gotFrames += 1
+                               buffer.append(jpeg, at: c)
+                           })
+            proc.waitUntilExit()
+            // Ошибка декодирования внутри чанка (битые данные, сбой seek)
+            // раньше оставляла чанк «законченным» с нулём кадров — недобор
+            // никто не замечал, completion уходил с успехом.
+            if proc.terminationStatus != 0, !isCancelled {
+                if gotFrames == 0 {
+                    yumeLog("⚠️ ffmpeg: чанк \(c) не выдал ни одного кадра (код \(proc.terminationStatus))")
+                    buffer.markFailed()
+                    return
+                }
+                yumeLog("⚠️ ffmpeg: чанк \(c) завершился с кодом \(proc.terminationStatus), получено \(gotFrames)/\(chunk.frameCount) кадров")
+            }
+            buffer.finish(at: c)
+        }
+
+        for _ in 0..<workers {
+            group.enter()
+            queue.async { [self] in
+                defer { group.leave() }
+                while true {
+                    let c = nextChunk.increment()
+                    if c >= plan.chunks.count { break }
+                    if isCancelled { break }
+                    decodeChunk(c)
+                    if buffer.hasFailed { break }
+                }
+            }
+        }
+
+    }
+
+    /// Отдаёт кадры в строгом порядке чанков, считая прогресс.
+    private func emitInOrder(plan: Plan, buffer: SegmentBuffer, startIndex: Int,
+                           onFrame: @escaping (Int, Int, Int, Data) -> Void,
+                           progress: @escaping (Double) -> Void,
+                           completion: @escaping (Result<Void, Error>) -> Void) {
+        let progressStride = max(1, plan.targetFrames / 100)
+
+        DispatchQueue(label: "yume.emit").async { [self] in
+            var idx = 0
+            var failure: Error?
+            emitLoop: for c in 0..<plan.chunks.count {
+                if idx >= plan.targetFrames { break }
+                while true {
+                    if isCancelled {
+                        failure = FrameExtractError.cancelled
+                        break emitLoop
+                    }
+                    let (frame, done) = buffer.next(c, shouldStop: { isCancelled })
+                    if let frame {
+                        if idx >= plan.targetFrames { break emitLoop }
+                        onFrame(idx, plan.targetFrames, idx + options.startIndex, frame)
+                        idx += 1
+                        if idx % progressStride == 0 {
+                            reportProgress(Double(idx) / Double(plan.targetFrames),
+                                           progress: progress)
+                        }
+                        continue
+                    }
+                    if done { break }
+                }
+                if buffer.hasFailed {
+                    failure = FrameExtractError.unreadableAsset
+                    break
+                }
+            }
+
+            if let failure {
+                terminateAll()
+                completion(.failure(failure))
+                return
+            }
+            guard idx > 0 else {
+                completion(.failure(FrameExtractError.unreadableAsset))
+                return
+            }
+            reportProgress(1.0, progress: progress)
+            completion(.success(()))
+        }
+    }
+
 }
