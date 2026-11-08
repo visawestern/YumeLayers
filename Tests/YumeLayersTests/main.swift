@@ -148,6 +148,7 @@ func runAll() {
         ("ChannelLayout", testChannelLayout),
         ("PoolBrokenFrame", testGPUFramePoolBrokenFrame),
         ("PoolLongRun", testGPUFramePoolLongRunNoHang),
+        ("SceneMotion", testSceneMotion),
     ]
     if let filter = gFilter {
         print("Фильтр: \(filter)")
