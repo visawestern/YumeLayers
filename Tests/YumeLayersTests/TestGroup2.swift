@@ -418,7 +418,6 @@ func testCodeGuideLimits() {
     let knownLargeFuncs: Set<String> = [
         "Sources/YumeLayersCore/SelfTest.swift:9",
         "Sources/YumeLayersCore/ConvTrainer.swift:131",
-        "Tests/YumeLayersTests/TestGroup6.swift:13",
         "Tests/YumeLayersTests/TestGroup5.swift:184",
         "Tests/YumeLayersTests/TestGroup5.swift:334",
     ]

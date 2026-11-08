@@ -12,7 +12,18 @@ import IOKit
 
 func testLayerRenderer() {
     section("Рендер слоёв: процедурные сцены с разметкой")
+    testLayerRendererDeterminism()
+    let scene = makeLayeredScene(w: 128, h: 96, seed: 2026)
+    let n = scene.w * scene.h
+    testLayerRanges(scene, n)
+    testLayerComposition(scene, n)
+    testLightGradient(scene)
+    testLayerChwLayout(scene, n)
+    testLayer480pSmoke()
+    testLayerPreviewSave(scene)
+}
 
+func testLayerRendererDeterminism() {
     // Детерминизм: один seed → побитово одна сцена.
     do {
         let a = makeLayeredScene(w: 96, h: 64, seed: 42)
@@ -30,10 +41,9 @@ func testLayerRenderer() {
         expect(a.background != b.background, "разные seed → разные фоны")
         expect(a.mask != b.mask, "разные seed → разные маски")
     }
+}
 
-    let scene = makeLayeredScene(w: 128, h: 96, seed: 2026)
-    let n = scene.w * scene.h
-
+func testLayerRanges(_ scene: LayeredScene, _ n: Int) {
     // Диапазоны: всё конечно и в [0,1].
     expect(scene.background.allSatisfy { $0.isFinite && $0 >= 0 && $0 <= 1 },
            "фон: значения конечны и в [0,1]")
@@ -51,6 +61,9 @@ func testLayerRenderer() {
     let objPixels = scene.mask.filter { $0 == 1 }.count
     expect(objPixels > 0 && objPixels < n, "маска покрывает часть, а не весь кадр")
 
+}
+
+func testLayerComposition(_ scene: LayeredScene, _ n: Int) {
     // Композиция восстанавливается из слоёв ТОЧНО (формула декодера).
     let rebuilt = composeLayers(w: scene.w, h: scene.h, background: scene.background,
                                 objects: scene.objects, mask: scene.mask, light: scene.light)
@@ -86,6 +99,9 @@ func testLayerRenderer() {
         expect(okBg, "вне маски кадр = фон·свет")
     }
 
+}
+
+func testLightGradient(_ scene: LayeredScene) {
     // Свет: направленный (у солнца ярче) + виньетка → есть перепад.
     do {
         var mn = Float.greatestFiniteMagnitude, mx = -Float.greatestFiniteMagnitude
@@ -94,6 +110,9 @@ func testLayerRenderer() {
         expect(mn >= 0.05, "свет: нет чёрных дыр (min ≥ 0.05)")
     }
 
+}
+
+func testLayerChwLayout(_ scene: LayeredScene, _ n: Int) {
     // CHW-раскладка: 8 каналов, порядок bgR..bgB objR..objB mask light.
     do {
         let ch = scene.channelsCHW()
@@ -108,6 +127,9 @@ func testLayerRenderer() {
         expect(ok, "CHW: порядок каналов фон|объекты|маска|свет")
     }
 
+}
+
+func testLayer480pSmoke() {
     // 480p smoke: рендерится целиком, макет цел. Порог времени — для -O
     // (штатный scripts/test.sh). Под -Onone Swift-массивы без оптимизации
     // дают ~100× замедления, это не показатель архитектуры.
@@ -120,6 +142,9 @@ func testLayerRenderer() {
         expect(dt < 5, "480p: рендер < 5 с (фактически \(String(format: "%.2f", dt)) с)")
     }
 
+}
+
+func testLayerPreviewSave(_ scene: LayeredScene) {
     // Предпросмотр: 4 PNG создаются и не пустые.
     do {
         let dir = FileManager.default.temporaryDirectory
@@ -138,6 +163,7 @@ func testLayerRenderer() {
         expect(false, "превью слоёв: ошибка \(error)")
     }
 }
+
 
 // MARK: - Универсальная слоистая архитектура
 

@@ -36,7 +36,6 @@ KNOWN_OVERSIZED = {
 KNOWN_LARGE_FUNCS = {
     ("Sources/YumeLayersCore/SelfTest.swift", 9): "runSelfTest: монолит самопроверки (см. долг)",
     ("Sources/YumeLayersCore/ConvTrainer.swift", 131): "trainConvVAE: ядро обучения (см. долг)",
-    ("Tests/YumeLayersTests/TestGroup6.swift", 13): "длинная тест-функция (см. долг)",
     ("Tests/YumeLayersTests/TestGroup5.swift", 184): "длинная тест-функция (см. долг)",
     ("Tests/YumeLayersTests/TestGroup5.swift", 334): "длинная тест-функция (см. долг)",
 }
