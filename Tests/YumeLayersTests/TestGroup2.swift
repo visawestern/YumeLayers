@@ -424,7 +424,6 @@ func testCodeGuideLimits() {
         "Sources/YumeLayersCore/ParallelExtractor.swift:268",
         "Sources/YumeLayersCore/SelfTest.swift:9",
         "Sources/YumeLayersCore/ConvTrainer.swift:131",
-        "Sources/YumeLayersUI/main.swift:242",
         "Tests/YumeLayersTests/TestGroup6.swift:13",
         "Tests/YumeLayersTests/TestGroup5.swift:184",
         "Tests/YumeLayersTests/TestGroup5.swift:334",
