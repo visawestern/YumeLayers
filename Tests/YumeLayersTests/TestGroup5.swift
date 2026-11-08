@@ -183,7 +183,16 @@ func testTrainStepLogging() {
 
 func testThermalGovernor() {
     section("Термо-регулятор GPU")
+    testDutySleep()
+    testTargetDuty()
+    testHeatLevel()
+    testHeatDriftNoTemp()
+    testHeatDebouncer()
+    testStepBaseline()
+    testThrottleDecision()
+}
 
+func testDutySleep() {
     // --- Доля работы: сколько спать после шага ---
     // GPU занят `gpuMs`, значит доля занятости = gpu/(gpu+sleep).
     // Чтобы уложиться в duty: sleep = gpu·(1/duty − 1).
@@ -217,6 +226,9 @@ func testThermalGovernor() {
     expectClose(sleepAt99, 170 * (1 / 0.99 - 1), 1e-9, "99% → пауза по формуле")
     expect(sleepAt99 < 2.5, "99% → пауза меньше 2.5 мс на шаге 170 мс")
 
+}
+
+func testTargetDuty() {
     // --- Целевая доля работы по уровню нагрева ---
     let dn = targetDuty(for: .nominal)
     let dw = targetDuty(for: .warm)
@@ -226,6 +238,9 @@ func testThermalGovernor() {
     expect(dn > dw && dw > dh && dh > dc, "чем жарче, тем ниже доля работы")
     expect(dc > 0, "критический уровень всё же не 0 — обучение не встаёт навсегда")
 
+}
+
+func testHeatLevel() {
     // --- Уровень нагрева ---
     // Без базовой линии дрейф измерить не из чего.
     expectEqual(heatLevel(stepMs: 500, baselineMs: 0, thermalRaw: 0), .nominal,
@@ -248,6 +263,9 @@ func testThermalGovernor() {
     expectEqual(heatLevel(stepMs: 200, baselineMs: 200, thermalRaw: 0), .nominal,
                 "нет дрейфа и нет жара → nominal")
 
+}
+
+func testHeatDriftNoTemp() {
     // --- Дрейф без температуры — это не нагрев ---
     // Ровно случай из журнала 4 ноября: шаг 366 мс против базы 139 мс
     // (2.6×) при 64 °C. Раньше это давало «критично» на холодной карте.
@@ -262,6 +280,9 @@ func testThermalGovernor() {
     expectEqual(heatLevel(stepMs: 366, baselineMs: 139, thermalRaw: 0), .critical,
                 "без датчика остаётся прежнее поведение по дрейфу")
 
+}
+
+func testHeatDebouncer() {
     // --- Гаситель дребезга ---
     // 328/366 мс на пороге 2.5× переключали уровень каждый шаг.
     var deb = HeatDebouncer(steps: 3)
@@ -283,6 +304,9 @@ func testThermalGovernor() {
     expectEqual(deb2.update(.nominal), .hot, "два сброса подряд — ещё держим")
     expectEqual(deb2.update(.nominal), .nominal, "три подряд — снизились")
 
+}
+
+func testStepBaseline() {
     // --- Базовая линия шага ---
     expectEqual(updateStepBaseline(0, sample: 170), 170, "первый замер задаёт базу")
     expectEqual(updateStepBaseline(170, sample: 200), 170, "база не растёт от медленного шага")
@@ -290,6 +314,9 @@ func testThermalGovernor() {
     expectEqual(updateStepBaseline(170, sample: Double.nan), 170, "NaN не портит базу")
     expectEqual(updateStepBaseline(170, sample: 0), 170, "ноль не портит базу")
 
+}
+
+func testThrottleDecision() {
     // --- Решение на шаг (это вызывает цикл обучения) ---
     // Первый шаг: базы нет, ОС спокойна, пользовательская пауза 250 мс.
     let d1 = throttleDecision(gpuMs: 170, wallMs: 170, baselineMs: 0, thermalRaw: 0,
@@ -328,12 +355,23 @@ func testThermalGovernor() {
     expect(d6.level >= .hot, "медленный шаг распознан как нагрев")
 }
 
+
 // MARK: - 7c. Замкнутый контур по температуре GPU
 
 
 func testPowerController() {
     section("Контур по температуре GPU")
+    testDutyCeiling()
+    testPowerNoTelemetryAndThermal()
+    testPowerClosedLoop()
+    testFreqNoiseIgnored()
+    testParseGpuStats()
+    testCalibrationThresholds()
+    testDriftVsHeat()
+    testEpochCoolPause()
+}
 
+func testDutyCeiling() {
     // Потолок из «мощности» в процентах.
     expectClose(dutyCeiling(powerPercent: 100), 0.98, 1e-9, "100% → 0.98")
     expectClose(dutyCeiling(powerPercent: 85), 0.833, 1e-9, "85% → 0.833")
@@ -344,6 +382,9 @@ func testPowerController() {
     expect(maxSafeDuty < 1.0, "даже 100% оставляет слоты WindowServer")
     expectClose(maxSafeDuty, 0.98, 1e-9, "100% мощности → 98% доли работы")
 
+}
+
+func testPowerNoTelemetryAndThermal() {
     // Без телеметрии режим не меняем: гадать хуже, чем держать текущий.
     var none = PowerController(ceiling: 0.765, startDuty: 0.5)
     expectClose(none.update(stats: nil), 0.5, 1e-9, "нет датчика — доля работы та же")
@@ -363,6 +404,9 @@ func testPowerController() {
     }
     expectClose(d, 0.765, 1e-9, "на холоде упирается в потолок, а не в 1.0")
 
+}
+
+func testPowerClosedLoop() {
     // Замкнутый контур с простой тепловой моделью: должен сойтись и не
     // раскачаться. Это главная проверка — именно раскачка и перегревала.
     var loop = PowerController(ceiling: 0.9, startDuty: 0.9)
@@ -379,6 +423,9 @@ func testPowerController() {
     expect(temp <= 85.5, "температура не выходит за потолок 85 °C")
     expect(duties.min()! > 0.05, "нагрузка не проваливается в ноль")
 
+}
+
+func testFreqNoiseIgnored() {
     // Детектор троттлинга по частоте сознательно убран: замер показал, что
     // Core Clock в PerformanceStatistics скачет 0…468 МГц на реальной
     // нагрузке (срезы попадают в промежутки между command buffer'ами).
@@ -392,6 +439,9 @@ func testPowerController() {
     expect(noisyDuty > 0.8, "падение частоты в срезе не считается троттлингом")
     expectClose(noise.peakClockMHz, 1400, 1e-9, "пик частоты — только для журнала")
 
+}
+
+func testParseGpuStats() {
     // --- Разбор словаря телеметрии ---
     let raw: [String: Any] = ["Temperature(C)": 67, "Core Clock(MHz)": 268,
                               "GPU Activity(%)": 18, "Total Power(W)": 17]
@@ -409,6 +459,9 @@ func testPowerController() {
     expectEqual(Int(parseGpuStats(["Temperature(C)": "71"])?.temperatureC ?? 0), 71,
                 "температура строкой разобрана")
 
+}
+
+func testCalibrationThresholds() {
     // Пороги откалиброваны замерами `yume gpuheat`: при 74 °C на краю
     // кристалла шаг уже замедлялся, значит запас кончился. 93 °C — точка, на
     // которой машина уходит в перезагрузку, поэтому 85 °C — жёсткий потолок,
@@ -420,6 +473,9 @@ func testPowerController() {
     expect(defaults.targetTempC < defaults.maxTempC, "рабочая точка ниже потолка")
     expect(emergencyTempC > defaults.maxTempC, "аварийный порог выше потолка")
 
+}
+
+func testDriftVsHeat() {
     // Дрейф считается по времени GPU, поэтому собственная пауза не может
     // выглядеть как нагрев. Иначе: больше пауза → больше дрейф → ещё пауза.
     var base = 0.0
@@ -444,6 +500,9 @@ func testPowerController() {
     }
     expect(risen >= .warm, "рост времени GPU с 140 до 260 мс распознан как нагрев")
 
+}
+
+func testEpochCoolPause() {
     // --- Пауза между эпохами: только по теплу ---
     // Пауза — тепловой инструмент, а не часть расписания. Холодная карта
     // не должна «остывать»: замер на 99% показал, что она и так не греется.
@@ -465,6 +524,7 @@ func testPowerController() {
     expectEqual(epochCoolPauseMs(tempC: .nan, pauseMs: 250), 0, "NaN → 0")
     expectEqual(epochCoolPauseMs(tempC: 0, pauseMs: 250), 0, "нулевая температура → 0")
 }
+
 
 // MARK: - 8. Чистые функции UI/логики (регрессия)
 
