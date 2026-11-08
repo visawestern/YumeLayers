@@ -34,7 +34,7 @@ KNOWN_OVERSIZED = {
 # Долг: крупные (неатомарные) функции в файлах, которые сами по себе в лимите.
 # Ключ — (относительный путь, номер строки func). Убираются рефакторингом.
 KNOWN_LARGE_FUNCS = {
-    ("Sources/YumeLayersCore/ConvTrainer.swift", 131): "trainConvVAE: ядро обучения (см. долг)",
+    ("Sources/YumeLayersCore/TrainConvVAE.swift", 9): "trainConvVAE: ядро обучения (см. долг)",
 }
 
 FUNC_RE = re.compile(r"\bfunc\s+[A-Za-z_][A-Za-z0-9_]*\s*\(")
