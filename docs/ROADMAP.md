@@ -149,6 +149,7 @@
 - [x] Сюита **897 PASS**; `testCodeGuideLimits` зелёный.
 - [x] Декомпозиция монолитов (подробно в 8.1): respond, buildRemaining, buildLeftPanel, applicationDidFinishLaunching, startTrainingInternal, ParallelExtractor.run, trainLayeredVAE, runSelfTest, trainConvVAE, тесты TestGroup5/6.
 - [x] Кнопка запуска VAE восстановлена (рендер-фикс: bordered+bezelColor вместо невидимой layer-пилюли; подтверждено сканом пикселей окна).
+- [x] Таблица производительности 96/128/192px собрана и закреплена тестом `testConvPerf` (Фаза 7).
 - [x] Полный пайплайн на 2000 кадров (извлечение → обучение 3 эпохи → чекпоинт → реконструкции) отработал: loss 0.025→0.0106, PSNR 17.4→20.7 дБ.
 
 ### Осталось
