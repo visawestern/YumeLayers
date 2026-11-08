@@ -3,8 +3,11 @@
 //   GET  /api/status           — состояние обучения, последние метрики
 //   GET  /api/log?lines=100    — последние строки журнала
 //   GET  /api/preview          — путь к последнему превью (PNG)
+//   GET  /api/interpolation    — итог последней интерполяции А→Б
 //   POST /api/train            — запуск обучения (JSON-параметры)
 //   POST /api/stop             — остановка обучения
+//   POST /api/interpolate      — интерполяция А→Б (JSON-параметры)
+//   POST /api/interpolate/stop — остановка интерполяции
 import Foundation
 import Network
 import YumeLayersCore
@@ -27,10 +30,24 @@ final class ApiServer {
     private var _lastPreview: String?
     private var _isExtracting = false
     private var _extractProgress: Double = 0
+    private var _isInterpolating = false
+    private var _interpolationProgress: Double = 0
+    private var _lastInterpolation: [String: Any]?
+    private var _lastLayered: [String: Any]?
 
     var onTrain: ((Int, Bool) -> Void)?
     var onStop: (() -> Void)?
     var onExtract: (([String], Int?) -> Void)?
+    /// Запуск интерполяции А→Б: (путь A, путь B, длительность, fps, путь результата).
+    /// Последний параметр может быть nil — тогда файл кладётся в ~/YumeLayers/outputs.
+    var onInterpolate: ((String, String, Double, Int, String?) -> Void)?
+    /// Остановка текущей интерполяции.
+    var onInterpolateStop: (() -> Void)?
+    /// Запуск слойного контура (видео → слои → обучение → превью):
+    /// (видео, w, h, шаги, ёмкость латента, чекпоинт).
+    var onLayeredTrain: ((String?, Int, Int, Int, Int, String?) -> Void)?
+    /// Сохранение реконструкций на диск. Тело: {"dir": путь} (необязательно).
+    var onSaveRecons: ((String?) -> Void)?
     /// Применение произвольного набора параметров интерфейса.
     /// Возвращает (ok, применено, нераспознано). Вызывается на главном потоке.
     var onSetParam: (([String: Any]) -> (ok: Bool, applied: [String], unknown: [String]))?
@@ -119,6 +136,31 @@ final class ApiServer {
         _extractProgress = p
     }
 
+    /// Интерполяция идёт / не идёт.
+    func setInterpolatingActive(_ active: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        _isInterpolating = active
+        if active { _interpolationProgress = 0 }
+    }
+
+    /// Прогресс интерполяции (0…1).
+    func updateInterpolationProgress(_ p: Double) {
+        lock.lock(); defer { lock.unlock() }
+        _interpolationProgress = p
+    }
+
+    /// Итог последней интерполяции (путь, кадры, fps, размеры) или ошибка.
+    func setLastInterpolation(_ info: [String: Any]?) {
+        lock.lock(); defer { lock.unlock() }
+        _lastInterpolation = info
+    }
+
+    /// Итог последнего слойного прогона (PSNR/SSIM, превью, чекпоинт).
+    func setLastLayered(_ info: [String: Any]?) {
+        lock.lock(); defer { lock.unlock() }
+        _lastLayered = info
+    }
+
     // MARK: - Обработка соединений
 
     private func handle(_ conn: NWConnection) {
@@ -169,6 +211,8 @@ final class ApiServer {
         switch (method, path) {
         case ("GET", "/api/status"):
             send(status: 200, body: statusJSON(), to: conn)
+        case ("GET", "/api/interpolation"):
+            send(status: 200, body: interpolationJSON(), to: conn)
         case ("GET", "/api/log"):
             let linesCount = queryInt(pathWithQuery, "lines", def: 100)
             send(status: 200, body: logJSON(lines: linesCount), to: conn)
@@ -249,6 +293,60 @@ final class ApiServer {
         case ("POST", "/api/autotune"):
             onAutoTune?()
             send(status: 200, body: "{\"ok\":true}", to: conn)
+        case ("POST", "/api/interpolate"):
+            // Интерполяция между двумя опорными картинками.
+            // Тело: {"imageA": путь, "imageB": путь, "seconds": N, "fps": N,
+            //        "out": путь к .mp4 (необязательно)}.
+            guard let data = body.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let imageA = obj["imageA"] as? String, !imageA.isEmpty,
+                  let imageB = obj["imageB"] as? String, !imageB.isEmpty else {
+                send(status: 400, body: "{\"error\":\"нужны imageA и imageB\"}", to: conn); return
+            }
+            let seconds = (obj["seconds"] as? Double) ?? 5
+            let fps = (obj["fps"] as? Int) ?? 24
+            let out = obj["out"] as? String
+            onInterpolate?(imageA, imageB, seconds, fps, out)
+            send(status: 200, body: "{\"ok\":true}", to: conn)
+        case ("POST", "/api/interpolate/stop"):
+            onInterpolateStop?()
+            send(status: 200, body: "{\"ok\":true}", to: conn)
+        case ("POST", "/api/layered/train"):
+            // Слойный контур: видео → слои (фон/объекты/свет) → обучение → превью.
+            // Тело: {"video": путь, "w": N, "h": N, "steps": N,
+            //        "latentChannels": N, "checkpoint": путь}. Все кроме video
+            // необязательны. Итог — через GET /api/layered/result.
+            var video: String?
+            var lw = 96, lh = 72, lsteps = 200, llatent = 32
+            var lck: String?
+            if let data = body.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                video = obj["video"] as? String
+                lw = (obj["w"] as? Int) ?? 96
+                lh = (obj["h"] as? Int) ?? 72
+                lsteps = (obj["steps"] as? Int) ?? 200
+                llatent = (obj["latentChannels"] as? Int) ?? 32
+                lck = obj["checkpoint"] as? String
+            }
+            onLayeredTrain?(video, lw, lh, lsteps, llatent, lck)
+            send(status: 200, body: "{\"ok\":true}", to: conn)
+        case ("GET", "/api/layered/result"):
+            lock.lock(); defer { lock.unlock() }
+            if let info = _lastLayered {
+                send(status: 200, body: json(["result": info]), to: conn)
+            } else {
+                send(status: 200, body: "{\"result\":null}", to: conn)
+            }
+        case ("POST", "/api/save-recons"):
+            // Сохранение реконструкций в памяти на диск.
+            // Тело: {"dir": путь к папке} — папка необязательна.
+            var dir: String?
+            if let data = body.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                dir = obj["dir"] as? String
+            }
+            onSaveRecons?(dir)
+            send(status: 200, body: "{\"ok\":true}", to: conn)
         case ("POST", "/api/test-frames"):
             // Проверка текущих кадров в памяти. Тело: {"count": N}
             // (0 — все кадры). Отчёт возвращается сразу.
@@ -283,8 +381,17 @@ final class ApiServer {
         return """
         {"training":\(_isTraining),"epoch":\(_epoch),"totalEpochs":\(_totalEpochs),\
         "loss":\(_loss),"psnr":\(_psnr),"progress":\(_progress),\
-        "extracting":\(_isExtracting),"extractProgress":\(_extractProgress)}
+        "extracting":\(_isExtracting),"extractProgress":\(_extractProgress),\
+        "interpolating":\(_isInterpolating),"interpolationProgress":\(_interpolationProgress)}
         """
+    }
+
+    /// Итог последней интерполяции — отдельным JSON, чтобы не тащить
+    /// вложенный объект в /api/status.
+    private func interpolationJSON() -> String {
+        lock.lock(); defer { lock.unlock() }
+        guard let info = _lastInterpolation else { return "{\"result\":null}" }
+        return json(["result": info])
     }
 
     private func logJSON(lines: Int) -> String {

@@ -7,18 +7,6 @@ import Foundation
 /// Раньше веса брались из `Float.random` без seed: два запуска с одним и тем же
 /// датасетом давали разные модели, а тесты были невоспроизводимы. Для обучения
 /// это ещё и мешает сравнивать изменения гиперпараметров.
-struct SplitMix64: RandomNumberGenerator {
-    private var state: UInt64
-    init(seed: UInt64) { state = seed }
-    mutating func next() -> UInt64 {
-        state &+= 0x9E3779B97F4A7C15
-        var z = state
-        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
-        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
-        return z ^ (z >> 31)
-    }
-}
-
 /// Один свёрточный слой на GPU.
 public final class ConvLayerGPU {
     let ic: Int
@@ -109,6 +97,26 @@ public struct ConvCache {
     let ow: Int
 }
 
+/// Результат кодирования: активации энкодера и латент.
+///
+/// Отдельная структура нужна для интерполяции: там энкодер применяется к двум
+/// опорным картинкам, а декодер — к произвольному промежуточному латенту.
+struct EncoderOutput {
+    let c1: ConvCache, p1: GPUTensor, a1: GPUTensor
+    let c2: ConvCache, p2: GPUTensor, a2: GPUTensor
+    let c3: ConvCache, p3: GPUTensor
+    let mu: GPUTensor, logvar: GPUTensor, sigma: GPUTensor, eps: GPUTensor
+    let z: GPUTensor
+}
+
+/// Результат декодирования: активации декодера и реконструкция.
+struct DecoderOutput {
+    let u1: GPUTensor, c4: ConvCache, p4: GPUTensor, a4: GPUTensor
+    let u2: GPUTensor, c5: ConvCache, p5: GPUTensor, a5: GPUTensor
+    let u3: GPUTensor, c6: ConvCache, p6: GPUTensor
+    let recon: GPUTensor
+}
+
 /// Кэш прямого прохода VAE.
 ///
 /// Латент вариационный: энкодер выдаёт 2·C каналов, они делятся на `mu` и
@@ -139,108 +147,10 @@ public struct VAECache {
 /// один слой. Прежняя формула учитывала лишь сам кадр (`3·hw` float'ов,
 /// 4.9 МБ) и потому разрешала пачку 16 — это ~8.6 ГБ активаций при 8.18 ГБ
 /// видеопамяти, то есть гарантированный OOM.
-public func convVAEBytesPerSample(w: Int, h: Int, channels: Int = 3,
-                                  layered: Bool = false,
-                                  latentChannels: Int = ConvVAEGPU.latentC) -> Int {
-    let hw = w * h
-    // Ёмкость латента теперь параметр. При C=32 буферы mu/logvar/sigma/eps/z,
-    // u1 и im2col декодера d1 вдвое больше — бюджет обязан это видеть, иначе
-    // effectiveBatchSize снова разрешит невлезающую пачку (история §C2 AUDIT).
-    let C = max(latentChannels, 1)
-    let ic = max(channels, 1)
-    var f = 0
-    // e1: channels → 16, stride 2
-    f += 16 * hw / 4 * 2            // p1, a1
-    f += (ic * 9) * hw / 4          // cols1 (im2col растёт с числом входных каналов)
-    // e2: 16 → 32, stride 2
-    f += 32 * hw / 16 * 2           // p2, a2
-    f += (16 * 9) * hw / 16         // cols2
-    // e3: 32 → 2C, stride 2
-    f += (2 * C) * hw / 64          // p3
-    f += 5 * C * hw / 64            // mu, logvar, sigma, eps, z
-    // d1: C → 32, stride 1
-    f += C * hw / 16                // u1
-    f += (C * 9) * hw / 16          // cols4
-    f += 32 * hw / 16 * 2           // p4, a4
-    // d2: 32 → 16, stride 1
-    f += 32 * hw / 4                // u2
-    f += (32 * 9) * hw / 4          // cols5
-    f += 16 * hw / 4 * 2            // p5, a5
-    // d3: 16 → channels, stride 1
-    f += 16 * hw                    // u3
-    f += (16 * 9) * hw              // cols6
-    f += ic * hw * 2                // p6, recon
-    // layered: таргет 8n + градиент 8n + композит 3n поверх активаций
-    return f * 4 + (layered ? layeredActivationBytes(w: w, h: h) : 0)
-}
-
-/// Доля рабочего набора видеопамяти под активации обучения.
-///
-/// Бюджет делится явно: 60% — пул кадров (`gpuFramePoolCapacity`), 30% —
-/// активации, 10% — запас на фрагментацию и служебные буферы. Раньше два
-/// бюджета считались независимо (60% и «сколько влезет»), и вместе они
-/// превышали рабочий набор: на 8.18 ГБ пул занимал 4.9 ГБ, а пачка из 16
-/// кадров требовала ещё 8.6 ГБ — гарантированный OOM.
-public let activationBudgetFraction = 0.30
-
-/// Байт под активации одного шага обучения.
-public func activationBudgetBytes(workingSet: UInt64) -> Int {
-    Int(Double(workingSet) * activationBudgetFraction)
-}
-
-/// Сколько кадров в пачке влезает в `budgetBytes` с учётом активаций.
-/// Ровно один кадр разрешён всегда: иначе обучение невозможно в принципе,
-/// и лучше упасть на явной проверке размера, чем молча не работать.
-public func effectiveBatchSize(requested: Int, w: Int, h: Int,
-                               budgetBytes: Int,
-                               channels: Int = 3,
-                               layered: Bool = false,
-                               latentChannels: Int = ConvVAEGPU.latentC) -> Int {
-    let per = max(convVAEBytesPerSample(w: w, h: h, channels: channels,
-                                        layered: layered,
-                                        latentChannels: latentChannels), 1)
-    let fits = max(1, budgetBytes / per)
-    return max(1, min(max(requested, 1), fits))
-}
-
-/// Сообщение при нехватке видеопамяти.
-///
-/// Metal возвращает `nil` из `makeBuffer`, если памяти не хватило; без этого
-/// текста пользователь видел только падение на разыменовании `nil` и не понимал,
-/// что уменьшать. Формат проверяется тестом.
-public func allocationFailureMessage(bytes: Int, availableBytes: Int, what: String) -> String {
-    let mb = max(bytes, 0) / 1_048_576
-    let av = max(availableBytes, 0) / 1_048_576
-    return "не хватило видеопамяти: нужно \(mb) МБ под \(what), свободно ~\(av) МБ. "
-         + "Уменьшите разрешение кадра или размер пачки."
-}
-
-/// Ошибка «чекпоинт от другой архитектуры» — не битый файл, а модель других
-/// размеров (например, латент до перехода на вариационный путь: e3 был 64
-/// канала вместо 2·C). Такую ситуацию можно пережить, начав обучение с новых
-/// весов, поэтому её надо отличать от настоящих ошибок чтения.
-public func isIncompatibleCheckpoint(_ error: Error) -> Bool {
-    let e = error as NSError
-    // 10 — неверное число матриц, 11 — несовпадение формы слоя (см. ConvVAEGPU.load).
-    return e.domain == "Yume" && (e.code == 10 || e.code == 11)
-}
-
-/// Полная потеря VAE: `MSE(recon, target) + β·KL`. Считается по CPU-копиям.
-/// Должна совпадать с формулой в `ConvVAEGPU.backward`, иначе численная
-/// проверка градиентов показывает расхождение там, где его нет.
-public func vaeLoss(cache: VAECache, target: [Float], beta: Float = 1.0) -> Double {
-    let r = cache.recon.toArray()
-    let n = min(r.count, target.count)
-    guard n > 0 else { return .infinity }
-    var mse = 0.0
-    for i in 0..<n {
-        let d = Double(r[i] - target[i])
-        mse += d * d
-    }
-    mse /= Double(n)
-    return mse + Double(beta) * ConvVAEGPU.klMean(cache)
-}
-
+/// Бюджет памяти, эффективный размер пачки, сообщения об ошибках и потеря VAE
+/// вынесены в `ConvVAEHelpers.swift` (см. convVAEBytesPerSample,
+/// activationBudgetBytes, effectiveBatchSize, allocationFailureMessage,
+/// isIncompatibleCheckpoint, vaeLoss).
 /// Свёрточный VAE: `channels` → 16 → 32 → 2·C (mu, logvar) → z (C) → C → 32 → 16 → `channels`.
 ///
 /// Сжатие 8× по каждой оси, латент (h/8, w/8). Веса — 6 слоёв × (W, b) = 12
@@ -339,6 +249,27 @@ public final class ConvVAEGPU {
     ///   - seed: seed гауссова шума; одинаковый seed → одинаковый `z`.
     func forward(_ s: GpuSession, image: GPUTensor, w: Int, h: Int,
                  deterministic: Bool = false, seed: UInt32 = 0) -> VAECache {
+        let e = encode(s, image: image, w: w, h: h,
+                       deterministic: deterministic, seed: seed)
+        let d = decode(s, z: e.z, w: w, h: h)
+        return VAECache(image: image,
+                        c1: e.c1, p1: e.p1, a1: e.a1,
+                        c2: e.c2, p2: e.p2, a2: e.a2,
+                        c3: e.c3, p3: e.p3,
+                        mu: e.mu, logvar: e.logvar, sigma: e.sigma, eps: e.eps, z: e.z,
+                        u1: d.u1, c4: d.c4, p4: d.p4, a4: d.a4,
+                        u2: d.u2, c5: d.c5, p5: d.p5, a5: d.a5,
+                        u3: d.u3, c6: d.c6, p6: d.p6,
+                        recon: d.recon, w: w, h: h)
+    }
+
+    /// Кодирование кадра в латент (без декодирования).
+    ///
+    /// Выделено из `forward`, потому что интерполяция между двумя картинками
+    /// устроена именно так: кодируем A и B отдельно, смешиваем их латенты
+    /// и декодируем результат. Математика та же, что и в `forward`.
+    func encode(_ s: GpuSession, image: GPUTensor, w: Int, h: Int,
+                deterministic: Bool = false, seed: UInt32 = 0) -> EncoderOutput {
         precondition(w % 8 == 0 && h % 8 == 0, "ширина и высота должны делиться на 8")
         let h1 = h / 2, w1 = w / 2
         let h2 = h / 4, w2 = w / 4
@@ -364,6 +295,21 @@ public final class ConvVAEGPU {
             eps = s.randn(seed: seed, rows: C, cols: plane)
         }
         let z = s.fma(mu, sigma, eps)
+        return EncoderOutput(c1: c1, p1: p1, a1: a1,
+                             c2: c2, p2: p2, a2: a2,
+                             c3: c3, p3: p3,
+                             mu: mu, logvar: logvar, sigma: sigma, eps: eps, z: z)
+    }
+
+    /// Декодирование латента в картинку (без кодирования).
+    ///
+    /// Принимает любой латент размером C × (h/8 × w/8) — в том числе
+    /// промежуточный, полученный смешиванием латентов A и B.
+    func decode(_ s: GpuSession, z: GPUTensor, w: Int, h: Int) -> DecoderOutput {
+        precondition(w % 8 == 0 && h % 8 == 0, "ширина и высота должны делиться на 8")
+        let h1 = h / 2, w1 = w / 2
+        let h2 = h / 4, w2 = w / 4
+        let h3 = h / 8, w3 = w / 8
 
         let u1 = s.upsample2x(z, h: h3, w: w3)
         let (p4, c4) = d1.forward(s, u1, ih: h2, iw: w2)
@@ -374,15 +320,10 @@ public final class ConvVAEGPU {
         let u3 = s.upsample2x(a5, h: h1, w: w1)
         let (p6, c6) = d3.forward(s, u3, ih: h, iw: w)
         let recon = s.sigmoid(p6)
-
-        return VAECache(image: image, c1: c1, p1: p1, a1: a1,
-                        c2: c2, p2: p2, a2: a2,
-                        c3: c3, p3: p3,
-                        mu: mu, logvar: logvar, sigma: sigma, eps: eps, z: z,
-                        u1: u1, c4: c4, p4: p4, a4: a4,
-                        u2: u2, c5: c5, p5: p5, a5: a5,
-                        u3: u3, c6: c6, p6: p6,
-                        recon: recon, w: w, h: h)
+        return DecoderOutput(u1: u1, c4: c4, p4: p4, a4: a4,
+                             u2: u2, c5: c5, p5: p5, a5: a5,
+                             u3: u3, c6: c6, p6: p6,
+                             recon: recon)
     }
 
     /// Возвращает (градиенты входов, градиенты слоёв в порядке layers).
@@ -472,6 +413,50 @@ public final class ConvVAEGPU {
         var out: [Matrix] = []
         for l in layers { out.append(l.W.toMatrix()); out.append(l.b.toMatrix()) }
         return out
+    }
+
+    /// Моменты Adam в порядке: для каждого слоя — `mW`, `vW`, `mb`, `vb`.
+    ///
+    /// Порядок совпадает с порядком весов (`W0, b0, W1, b1, …`): для веса с
+    /// номером `p` моменты лежат под номерами `2p` (m) и `2p+1` (v).
+    func optimizerMoments() -> [Matrix] {
+        var out: [Matrix] = []
+        for l in layers {
+            out.append(l.mW.toMatrix())
+            out.append(l.vW.toMatrix())
+            out.append(l.mb.toMatrix())
+            out.append(l.vb.toMatrix())
+        }
+        return out
+    }
+
+    /// Загрузка моментов Adam (порядок: `mW, vW, mb, vb` на слой).
+    ///
+    /// Без этого продолжение обучения стартует с нулевых моментов, и первая
+    /// коррекция смещения Adam сносит модель (шаг ±lr по каждому весу).
+    func loadOptimizerMoments(_ moments: [Matrix]) throws {
+        let needed = layers.count * 4
+        guard moments.count == needed else {
+            throw NSError(domain: "Yume", code: 13,
+                          userInfo: [NSLocalizedDescriptionKey:
+                            "состояние оптимизатора: нужно \(needed) моментов, найдено \(moments.count)"])
+        }
+        for (i, layer) in layers.enumerated() {
+            let mW = moments[i * 4], vW = moments[i * 4 + 1]
+            let mb = moments[i * 4 + 2], vb = moments[i * 4 + 3]
+            guard mW.rows == layer.W.rows, mW.cols == layer.W.cols,
+                  vW.rows == layer.W.rows, vW.cols == layer.W.cols,
+                  mb.rows == layer.b.rows, mb.cols == layer.b.cols,
+                  vb.rows == layer.b.rows, vb.cols == layer.b.cols else {
+                throw NSError(domain: "Yume", code: 13,
+                              userInfo: [NSLocalizedDescriptionKey:
+                                "состояние оптимизатора: несовпадение формы слоя \(i)"])
+            }
+            layer.mW.copyFrom(GPUTensor(engine: layer.mW.engine, data: mW.data, rows: mW.rows))
+            layer.vW.copyFrom(GPUTensor(engine: layer.vW.engine, data: vW.data, rows: vW.rows))
+            layer.mb.copyFrom(GPUTensor(engine: layer.mb.engine, data: mb.data, rows: mb.rows))
+            layer.vb.copyFrom(GPUTensor(engine: layer.vb.engine, data: vb.data, rows: vb.rows))
+        }
     }
 
     /// Загрузка весов из checkpoint. Формат: W0,b0,W1,b1,...

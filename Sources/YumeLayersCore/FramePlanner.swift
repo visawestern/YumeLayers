@@ -131,6 +131,35 @@ public func createBackups(forPaths paths: [String]) -> [String] {
     paths.compactMap { createCheckpointBackup(fromPath: $0) }
 }
 
+/// Путь «защищённой» финальной модели рядом с рабочим чекпоинтом.
+///
+/// `.../conv.safetensors` → `.../conv-final.safetensors`.
+///
+/// Зачем: промежуточные чекпоинты пишутся в рабочий файл каждые 500 шагов,
+/// а в него же писалась финальная модель. Следующий прерванный прогон
+/// continuation затирал выученную модель промежуточными весами — хорошая
+/// модель пропадала безвозвратно. Финальная модель теперь живёт в отдельном
+/// файле, который промежуточные сохранения не трогают.
+public func finalCheckpointPath(for convPath: String) -> String {
+    let ns = convPath as NSString
+    let dir = ns.deletingLastPathComponent
+    let base = ns.lastPathComponent
+    let ext = (base as NSString).pathExtension
+    let stem = (base as NSString).deletingPathExtension
+    let name = ext.isEmpty ? "\(stem)-final" : "\(stem)-final.\(ext)"
+    return (dir as NSString).appendingPathComponent(name)
+}
+
+/// Лучшая доступная модель для использования (интерполяция, реконструкции).
+///
+/// Приоритет — защищённая финальная модель: она всегда новее и лучше рабочего
+/// файла (рабочий файл может содержать веса прерванного прогона).
+public func bestCheckpointPath(for convPath: String) -> String {
+    let finalPath = finalCheckpointPath(for: convPath)
+    if isNonEmptyFile(finalPath) { return finalPath }
+    return convPath
+}
+
 /// Итог подготовки чекпоинта к старту обучения.
 public enum CheckpointPrepareOutcome: Equatable {
     /// Файла не было — обучение начнётся с новых весов.

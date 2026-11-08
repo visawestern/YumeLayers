@@ -6,20 +6,20 @@ import CoreGraphics
 
 // ---------- Чтение/запись изображений через ImageIO (нет внешних зависимостей) ----------
 
-/// Кодирует RGB-массив (Float 0…1) в PNG-данные В ПАМЯТИ (без записи на диск).
-/// Возвращает Data или nil при ошибке. Чистая, тестируемая функция.
-public func encodePNG(width: Int, height: Int, rgb: [Float]) -> Data? {
+/// RGB-массив (Float 0…1, раскладка HWC, строки сверху вниз) → CGImage.
+///
+/// CGContext с `data:` хранит строку 0 СНИЗУ, а наши массивы — top-down
+/// (так же их читает decodeImageRGB). Без этого сдвига каждый сохранённый
+/// PNG был перевёрнут по вертикали: превью слоёв и реконструкции показывали
+/// небо внизу, землю вверху. Инвариант:
+/// decodeImageRGB(encodePNG(rgb)) == rgb с точностью до 1/255
+/// (проверяется тестом итерации 6).
+public func makeCGImage(rgb: [Float], width: Int, height: Int) -> CGImage? {
     guard width > 0, height > 0, rgb.count >= width * height * 3 else { return nil }
     var pixels = [UInt8](repeating: 0, count: width * height * 4)
     for y in 0..<height {
         for x in 0..<width {
             let si = (y * width + x) * 3
-            // CGContext с `data:` хранит строку 0 СНИЗУ, а наши массивы —
-            // top-down (так же их читает decodeImageRGB). Без этого сдвига
-            // каждый сохранённый PNG был перевёрнут по вертикали: превью
-            // слоёв и реконструкции показывали небо внизу, землю вверху.
-            // Инвариант: decodeImageRGB(encodePNG(rgb)) == rgb с точностью
-            // до 1/255 (проверяется тестом итерации 6).
             let di = ((height - 1 - y) * width + x) * 4
             pixels[di] = UInt8(min(255, max(0, rgb[si] * 255)))
             pixels[di+1] = UInt8(min(255, max(0, rgb[si+1] * 255)))
@@ -28,10 +28,16 @@ public func encodePNG(width: Int, height: Int, rgb: [Float]) -> Data? {
         }
     }
     let cs = CGColorSpaceCreateDeviceRGB()
-    let ctx = CGContext(data: &pixels, width: width, height: height, bitsPerComponent: 8,
-                        bytesPerRow: width * 4, space: cs,
-                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-    guard let img = ctx.makeImage() else { return nil }
+    guard let ctx = CGContext(data: &pixels, width: width, height: height, bitsPerComponent: 8,
+                              bytesPerRow: width * 4, space: cs,
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+    return ctx.makeImage()
+}
+
+/// Кодирует RGB-массив (Float 0…1) в PNG-данные В ПАМЯТИ (без записи на диск).
+/// Возвращает Data или nil при ошибке. Чистая, тестируемая функция.
+public func encodePNG(width: Int, height: Int, rgb: [Float]) -> Data? {
+    guard let img = makeCGImage(rgb: rgb, width: width, height: height) else { return nil }
     let data = NSMutableData()
     guard let dest = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else { return nil }
     CGImageDestinationAddImage(dest, img, nil)
