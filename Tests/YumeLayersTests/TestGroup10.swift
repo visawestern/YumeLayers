@@ -78,14 +78,15 @@ func testCheckpointModelWidth() {
     let tmp = NSTemporaryDirectory() + "yume-cp-width-\(UUID().uuidString).safetensors"
     defer { try? FileManager.default.removeItem(atPath: tmp) }
 
-    let wide = ConvVAEGPU(engine: engine, width: 2)
+    let wide = ConvVAEGPU(engine: engine, latentChannels: 32, width: 2)
     try? saveState(wide.matrices, to: tmp, epoch: 1, step: 5, totalSteps: 10,
                    optimizer: CheckpointOptimizerState(step: 5, moments: wide.optimizerMoments()),
-                   modelWidth: 2)
+                   modelWidth: 2, latentChannels: 32)
     guard let st = try? loadStateWithMeta(path: tmp) else {
         expect(false, "чекпоинт с шириной прочитан"); return
     }
     expectEqual(st.modelWidth, 2, "modelWidth=2 сохранён и прочитан")
+    expectEqual(st.latentChannels, 32, "latentChannels=32 сохранён и прочитан")
     let stMats = st.mats
     expectEqual(stMats.count, wide.layers.count * 2, "число матриц соответствует ширине модели")
 

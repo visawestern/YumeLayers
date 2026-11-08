@@ -149,6 +149,8 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
     var lastParams = Params()
     /// Кратность ширины VAE для следующего обучения (по умолчанию 1).
     var requestedModelWidth = 1
+    /// Число каналов латента для следующего обучения.
+    var requestedLatentChannels = 16
 
     // ——— Генерация A→B: интерполяция между двумя опорными картинками ———
     let interpAButton = NSButton(title: "Выбрать…", target: nil, action: nil)

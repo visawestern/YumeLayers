@@ -55,7 +55,8 @@ public func saveState(_ mats: [Matrix], to path: String, epoch: Int? = nil,
                       step: Int? = nil, totalSteps: Int? = nil,
                       dataFingerprint: String? = nil,
                       optimizer: CheckpointOptimizerState? = nil,
-                      modelWidth: Int? = nil) throws {
+                      modelWidth: Int? = nil,
+                      latentChannels: Int? = nil) throws {
     var dict: [String: Any] = [:]
     var offset = 0
     var order: [String] = []
@@ -81,6 +82,7 @@ public func saveState(_ mats: [Matrix], to path: String, epoch: Int? = nil,
     // был обучен на ТЕХ ЖЕ кадрах, а не на другом файле.
     if let fp = dataFingerprint { meta["dataFingerprint"] = fp }
     if let w = modelWidth { meta["modelWidth"] = w }
+    if let lc = latentChannels { meta["latentChannels"] = lc }
     // Моменты Adam — отдельными тензорами "adam.mN"/"adam.vN", чтобы старые
     // чекпоинты (без них) продолжали читаться как есть.
     var momentData: [[Float]] = []
@@ -137,14 +139,18 @@ public struct CheckpointState {
     public let optimizer: CheckpointOptimizerState?
     /// Кратность ширины свёрточных каналов модели (1 — базовая).
     public let modelWidth: Int
+    /// Число каналов латента модели (16 — базовое).
+    public let latentChannels: Int
     public init(mats: [Matrix], epoch: Int, step: Int, fingerprint: String? = nil,
-                optimizer: CheckpointOptimizerState? = nil, modelWidth: Int = 1) {
+                optimizer: CheckpointOptimizerState? = nil, modelWidth: Int = 1,
+                latentChannels: Int = 16) {
         self.mats = mats
         self.epoch = epoch
         self.step = step
         self.fingerprint = fingerprint
         self.optimizer = optimizer
         self.modelWidth = modelWidth
+        self.latentChannels = latentChannels
     }
 }
 
@@ -272,12 +278,14 @@ public func loadStateWithMeta(path: String) throws -> CheckpointState {
     var metaFingerprint: String? = nil
     var metaOptimizerStep = 0
     var metaModelWidth = 1
+    var metaLatentChannels = 16
     if let meta = obj["__metadata__"] as? [String: Any] {
         metaEpoch = (meta["epoch"] as? NSNumber)?.intValue ?? 0
         metaStep = (meta["step"] as? NSNumber)?.intValue ?? 0
         metaFingerprint = meta["dataFingerprint"] as? String
         metaOptimizerStep = (meta["optimizerStep"] as? NSNumber)?.intValue ?? 0
         metaModelWidth = max(1, (meta["modelWidth"] as? NSNumber)?.intValue ?? 1)
+        metaLatentChannels = max(1, (meta["latentChannels"] as? NSNumber)?.intValue ?? 16)
     }
 
     let entries = try parseCheckpointEntries(obj, baseOffset: baseOffset)
@@ -296,5 +304,6 @@ public func loadStateWithMeta(path: String) throws -> CheckpointState {
                                               step: metaOptimizerStep)
     return CheckpointState(mats: result, epoch: metaEpoch, step: metaStep,
                            fingerprint: metaFingerprint, optimizer: optimizer,
-                           modelWidth: metaModelWidth)
+                           modelWidth: metaModelWidth,
+                           latentChannels: metaLatentChannels)
 }

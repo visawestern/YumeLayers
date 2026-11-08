@@ -130,6 +130,8 @@ public struct Params {
     /// Кратность ширины свёрточных слоёв VAE (1 — базовая архитектура;
     /// >1 — увеличенная ёмкость для ворот Фазы 1–2).
     public var modelWidth = 1
+    /// Число каналов латента VAE (ёмкость узкого места).
+    public var latentChannels = 16
     public var epochs = 20
     public var steps = 20
     public var batch = 1

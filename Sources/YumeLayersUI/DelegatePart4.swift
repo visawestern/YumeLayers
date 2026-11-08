@@ -252,6 +252,11 @@ extension YumeAppDelegate {
                             self.requestedModelWidth = w
                             applied.append(key)
                         } else { unknown.append(key) }
+                    case "latentChannels":
+                        if let s = paramStringValue(value), let c = Int(s), c >= 1 {
+                            self.requestedLatentChannels = c
+                            applied.append(key)
+                        } else { unknown.append(key) }
                     case "pauseMs":
                         if let s = paramStringValue(value) { self.pauseCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
                     case "gpuPowerPercent":

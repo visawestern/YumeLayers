@@ -145,6 +145,7 @@ extension YumeAppDelegate {
         if resume { p.resume = true }   // API: продолжить с чекпоинта без диалога
         p.adaptiveThrottle = adaptiveSwitch.state == .on
         p.modelWidth = max(1, requestedModelWidth)
+        p.latentChannels = max(1, requestedLatentChannels)
         p.convPath = (convPathCtl.stringValue as NSString).expandingTildeInPath
 
         guard p.lr.isFinite, p.lr > 0, p.lr <= 1,

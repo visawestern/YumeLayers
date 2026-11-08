@@ -89,9 +89,10 @@ private func runReconsOn(engine: MetalEngine, items: [(name: String, jpeg: Data)
     let sensor = GpuSensor()
     if FileManager.default.fileExists(atPath: convPath) {
         let st = try loadStateWithMeta(path: convPath)
-        // Модель той же ширины, что и обученная: иначе формы слоёв
-        // не совпадают и загрузка падает («несовпадение формы слоя 0»).
-        vae = ConvVAEGPU(engine: engine, width: st.modelWidth)
+        // Модель той же архитектуры (ширина + латент), что и обученная:
+        // иначе формы слоёв не совпадают и загрузка падает.
+        vae = ConvVAEGPU(engine: engine, latentChannels: st.latentChannels,
+                          width: st.modelWidth)
         try vae.load(from: st.mats)
     } else {
         return [:]

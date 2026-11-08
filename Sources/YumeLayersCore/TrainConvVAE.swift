@@ -387,7 +387,9 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
 
     yumeLog("Свёрточный VAE: кадр \(realW)×\(realH) → внутренний \(pw)×\(ph), латент \(pw/8)×\(ph/8)×\(ConvVAEGPU.latentC) (сжатие \(Int(ConvVAEGPU.compressionRatio))×)")
 
-    let vae = ConvVAEGPU(engine: engine, width: max(p.modelWidth, 1))
+    let vae = ConvVAEGPU(engine: engine,
+                          latentChannels: max(p.latentChannels, 1),
+                          width: max(p.modelWidth, 1))
     let currentFingerprint: String
     if let mem = p.memoryFrames, !mem.isEmpty {
         currentFingerprint = dataFingerprint(frames: mem)
