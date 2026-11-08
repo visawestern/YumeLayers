@@ -34,7 +34,6 @@ KNOWN_OVERSIZED = {
 # Долг: крупные (неатомарные) функции в файлах, которые сами по себе в лимите.
 # Ключ — (относительный путь, номер строки func). Убираются рефакторингом.
 KNOWN_LARGE_FUNCS = {
-    ("Sources/YumeLayersCore/LayeredTrainer.swift", 133): "цикл слоёного обучения (см. долг)",
     ("Sources/YumeLayersCore/SelfTest.swift", 9): "runSelfTest: монолит самопроверки (см. долг)",
     ("Sources/YumeLayersCore/ConvTrainer.swift", 131): "trainConvVAE: ядро обучения (см. долг)",
     ("Tests/YumeLayersTests/TestGroup6.swift", 13): "длинная тест-функция (см. долг)",

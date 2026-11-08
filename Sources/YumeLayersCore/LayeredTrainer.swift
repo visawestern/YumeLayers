@@ -174,12 +174,73 @@ public func trainLayeredVAE(steps: Int = 60,
     }
     let vae = ConvVAEGPU(engine: engine, channels: LayeredScene.layerChannels,
                          latentChannels: latentChannels)
+    let batch = max(batchSize, 1)
+    let invBatch = 1.0 / Float(batch)
+        let first = evaluateLayered(session: session, vae: vae, xs: xs, targets: targets,
+        pw: pw, ph: ph, beta: beta, layerWeight: layerWeight, composeWeight: composeWeight,
+        pacer: pacer)
+        if overlap {
+        runOverlapSteps(session: session, vae: vae, xs: xs, targets: targets,
+                       targetsGPU: targetsGPU, pw: pw, ph: ph, beta: beta,
+                       layerWeight: layerWeight, composeWeight: composeWeight,
+                       total: total, batch: batch, invBatch: invBatch, lr: lr,
+                       cosineSchedule: cosineSchedule, pacer: pacer, sensor: sensor)
+        } else {
+        runNormalSteps(session: session, vae: vae, xs: xs, targets: targets,
+                       targetsGPU: targetsGPU, pw: pw, ph: ph, beta: beta,
+                       layerWeight: layerWeight, composeWeight: composeWeight,
+                       total: total, batch: batch, invBatch: invBatch, lr: lr,
+                       cosineSchedule: cosineSchedule, pacer: pacer, sensor: sensor)
+        }
+        let last = evaluateLayered(session: session, vae: vae, xs: xs, targets: targets,
+        pw: pw, ph: ph, beta: beta, layerWeight: layerWeight, composeWeight: composeWeight,
+        pacer: pacer)
 
-    /// Детерминированный замер потери по ВСЕМ сценам + реконструкции.
-    /// Пауза по доле работы применяется и здесь: замер — такая же GPU-работа,
-    /// как шаг обучения, и раньше именно короткие eval-прогоны перегревали
-    /// машину, потому что шли без пауз вообще.
-    func evaluate() -> (loss: Double, recons: [[Float]]) {
+    // Пол качества — по СОБРАННОМУ кадру, а не по 8 каналам по отдельности.
+    // Берём первую сцену: она же уходит в PNG-превью конвейера.
+    let quality = composedQuality(recon: last.recons[0], target: targets[0])
+    let floor = QualityFloor()
+    let reconHWC = composeHWC(w: pw, h: ph, recon: last.recons[0])
+    let accepted = floor.accepts(reference: targets[0].compositeHWC,
+                                 reconstruction: reconHWC)
+
+    var saved = false
+    var savedPath: String?
+    if let path = checkpointPath {
+        do {
+            let dir = (path as NSString).deletingLastPathComponent
+            if !dir.isEmpty {
+                try FileManager.default.createDirectory(atPath: dir,
+                                                         withIntermediateDirectories: true)
+            }
+            try saveState(vae.matrices, to: path, step: total, totalSteps: total,
+                          dataFingerprint: layeredFingerprint(targets))
+            saved = true
+            savedPath = path
+        } catch {
+            yumeLog("чекпоинт не сохранён: \(error.localizedDescription)")
+        }
+    }
+
+    return LayeredTrainReport(steps: total,
+                              firstLoss: first.loss, lastLoss: last.loss,
+                              psnr: quality.psnr, ssim: quality.ssim,
+                              acceptedByFloor: accepted,
+                              compositeChannels: 3,
+                              duty: dutyGuard.duty,
+                              sceneCount: targets.count,
+                              latentChannels: vae.latentChannels,
+                              reconstructionHWC: reconHWC,
+                              checkpointPath: savedPath,
+                              checkpointSaved: saved,
+                              totalGpuMs: pacer.totalGpuMs,
+                              totalPauseMs: pacer.totalPauseMs,
+                              sleepCalls: pacer.sleepCalls,
+                              emergencyPauses: pacer.emergencyPauses,
+                              measuredDuty: pacer.measuredDuty)
+}
+
+private func evaluateLayered(session: GpuSession, vae: ConvVAEGPU, xs: [GPUTensor], targets: [LayeredTarget], pw: Int, ph: Int, beta: Float, layerWeight: Float, composeWeight: Float, pacer: GpuDutyPacer) -> (loss: Double, recons: [[Float]]) {
         var sum = 0.0
         var recons: [[Float]] = []
         recons.reserveCapacity(targets.count)
@@ -202,19 +263,9 @@ public func trainLayeredVAE(steps: Int = 60,
             }
         }
         return (sum / Double(targets.count), recons)
-    }
+}
 
-    let batch = max(batchSize, 1)
-    let invBatch = 1.0 / Float(batch)
-
-    let first = evaluate()
-    if overlap {
-        // Double-buffering CPU↔GPU. Один command buffer держим «в полёте»:
-        // отправляем шаг N, а дозаждаться будем шага N-1 (он уже считается на
-        // GPU). Так кодирование шага N+1 перекрывается со счётом шага N, и простой
-        // CPU в ожидании GPU уходит из критического пути. Математика не меняется:
-        // параметры, записанные Adam'ом шага N, читаются forward'ом шага N+1 — а
-        // Metal гарантирует порядок выполнения buffer'ов в одной очереди.
+private func runOverlapSteps(session: GpuSession, vae: ConvVAEGPU, xs: [GPUTensor], targets: [LayeredTarget], targetsGPU: [LayeredTargetGPU], pw: Int, ph: Int, beta: Float, layerWeight: Float, composeWeight: Float, total: Int, batch: Int, invBatch: Float, lr: Float, cosineSchedule: Bool, pacer: GpuDutyPacer, sensor: GpuSensor) {
         var inFlight: GpuSession.CommittedStep? = nil
         for step in 1...total {
             autoreleasepool {
@@ -261,7 +312,9 @@ public func trainLayeredVAE(steps: Int = 60,
             pacer.wait(gpuMs: ms)
         }
         pacer.sleepDebt()
-    } else {
+}
+
+private func runNormalSteps(session: GpuSession, vae: ConvVAEGPU, xs: [GPUTensor], targets: [LayeredTarget], targetsGPU: [LayeredTargetGPU], pw: Int, ph: Int, beta: Float, layerWeight: Float, composeWeight: Float, total: Int, batch: Int, invBatch: Float, lr: Float, cosineSchedule: Bool, pacer: GpuDutyPacer, sensor: GpuSensor) {
         for step in 1...total {
             autoreleasepool {
                 let stepLR = cosineSchedule
@@ -313,49 +366,5 @@ public func trainLayeredVAE(steps: Int = 60,
             }
         }
         pacer.sleepDebt()
-    }
-    let last = evaluate()
-
-    // Пол качества — по СОБРАННОМУ кадру, а не по 8 каналам по отдельности.
-    // Берём первую сцену: она же уходит в PNG-превью конвейера.
-    let quality = composedQuality(recon: last.recons[0], target: targets[0])
-    let floor = QualityFloor()
-    let reconHWC = composeHWC(w: pw, h: ph, recon: last.recons[0])
-    let accepted = floor.accepts(reference: targets[0].compositeHWC,
-                                 reconstruction: reconHWC)
-
-    var saved = false
-    var savedPath: String?
-    if let path = checkpointPath {
-        do {
-            let dir = (path as NSString).deletingLastPathComponent
-            if !dir.isEmpty {
-                try FileManager.default.createDirectory(atPath: dir,
-                                                         withIntermediateDirectories: true)
-            }
-            try saveState(vae.matrices, to: path, step: total, totalSteps: total,
-                          dataFingerprint: layeredFingerprint(targets))
-            saved = true
-            savedPath = path
-        } catch {
-            yumeLog("чекпоинт не сохранён: \(error.localizedDescription)")
-        }
-    }
-
-    return LayeredTrainReport(steps: total,
-                              firstLoss: first.loss, lastLoss: last.loss,
-                              psnr: quality.psnr, ssim: quality.ssim,
-                              acceptedByFloor: accepted,
-                              compositeChannels: 3,
-                              duty: dutyGuard.duty,
-                              sceneCount: targets.count,
-                              latentChannels: vae.latentChannels,
-                              reconstructionHWC: reconHWC,
-                              checkpointPath: savedPath,
-                              checkpointSaved: saved,
-                              totalGpuMs: pacer.totalGpuMs,
-                              totalPauseMs: pacer.totalPauseMs,
-                              sleepCalls: pacer.sleepCalls,
-                              emergencyPauses: pacer.emergencyPauses,
-                              measuredDuty: pacer.measuredDuty)
 }
+
