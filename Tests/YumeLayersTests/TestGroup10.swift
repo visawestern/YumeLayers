@@ -98,3 +98,66 @@ func testCheckpointModelWidth() {
     }
     expectEqual(st2.modelWidth, 1, "без метаданных modelWidth = 1")
 }
+
+// MARK: - Этап 0. Диагностика, ворота G1
+
+/// G1: overfit на 16 кадрах → цель PSNR ≥35 дБ.
+///
+/// Если сеть не может запомнить 16 кадров одной сцены, это баг в обучении/
+/// лоссе, а не «не хватает ёмкости». Тест идёт по продуктовой трассе:
+/// forward → vaeLoss/backward → applyAdam, детерминированный z.
+func testOverfitGate_16Frames() {
+    section("G1: overfit на 16 кадрах — цель PSNR ≥35 дБ (Этап 0)")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let session = GpuSession(engine)
+    let w = 128, h = 72
+    let nFrames = 16
+    var frames = [[Float]]()
+    for f in 0..<nFrames {
+        var rng = SplitMix64(seed: UInt64(0xABCD_F000 + f))
+        frames.append(makeSyntheticScene(w: w, h: h, rng: &rng))
+    }
+
+    // Финальная диагностика этапа 0: подтверждённый конфиг (β=0.01, lr=0.004,
+    // до 9500 шагов; ранний выход при достижении ≥35 дБ).
+    let beta: Float = 0.01
+    let lr: Float = 0.004
+    let totalSteps = 9500
+
+    let vae = ConvVAEGPU(engine: engine)
+    // Модель ожидает CHW (как в продуктовом gatherBatch: hwcToChw).
+    func avgPSNR() -> Float {
+        var sum: Float = 0
+        for img in frames {
+            let chw = hwcToChw(img)
+            let x = GPUTensor(engine: engine, data: chw, rows: 3)
+            session.begin()
+            let c = vae.forward(session, image: x, w: w, h: h, deterministic: true)
+            _ = session.end()
+            let reconHWC = chwToHwc(c.recon.toArray())
+            sum += psnr(reference: img, candidate: reconHWC)
+        }
+        return sum / Float(nFrames)
+    }
+    var reachedAt = -1
+    for step in 1...totalSteps {
+        let img = frames[(step - 1) % nFrames]
+        let x = GPUTensor(engine: engine, data: hwcToChw(img), rows: 3)
+        session.begin()
+        let c = vae.forward(session, image: x, w: w, h: h, deterministic: true)
+        let (_, g) = vae.backward(session, c, target: x, beta: beta)
+        vae.applyAdam(session, grads: g, t: step, lr: lr)
+        _ = session.end()
+        if step % 500 == 0, avgPSNR() >= 35 {
+            reachedAt = step
+            break
+        }
+    }
+
+    let p = avgPSNR()
+    let atNote = reachedAt > 0 ? "35 дБ достигнут на шаге \(reachedAt)" : "не достигнут за \(totalSteps)"
+    print("      G1: PSNR = " + String(format: "%.2f", p)
+          + " дБ (β \(beta), lr \(lr); " + atNote + ")")
+    expect(p >= 35, String(format: "G1: overfit 16 кадров ≥35 дБ (получено %.2f)", p))
+}

@@ -464,6 +464,20 @@ func testVideoWriterOrientation() {
 func testLoadImageOrientation() {
     section("loadImageRGB: конвенция низ-вверх")
 
+    // Самодостаточность: тест не зависит от внешнего /tmp/orient.png.
+    // loadImageRGB возвращает top-down (верх первой строкой), поэтому эталон
+    // задаём с чёрным верхом и белым низом: строка 0 → чёрный, строка 31 →
+    // белый.
+    var gradient = [Float](repeating: 0, count: 32 * 32 * 3)
+    for y in 0..<32 {
+        let v = Float(y) / 31
+        for x in 0..<32 {
+            let i = (y * 32 + x) * 3
+            gradient[i] = v; gradient[i + 1] = v; gradient[i + 2] = v
+        }
+    }
+    try? savePNG(path: "/tmp/orient.png", width: 32, height: 32, rgb: gradient)
+
     guard let frame = loadImageRGB(path: "/tmp/orient.png", w: 32, h: 32) else {
         expect(false, "картинка прочитана"); return
     }
