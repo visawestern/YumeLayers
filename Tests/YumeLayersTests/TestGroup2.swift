@@ -430,6 +430,7 @@ func testCodeGuideLimits() {
         "Sources/YumeLayersUI/main.swift:242",
         "Sources/YumeLayersUI/DelegatePart1.swift:170",
         "Sources/YumeLayersUI/DelegatePart4.swift:201",
+        "Sources/YumeLayersUI/DelegatePart7.swift:9",
         "Tests/YumeLayersTests/TestGroup6.swift:13",
         "Tests/YumeLayersTests/TestGroup5.swift:184",
         "Tests/YumeLayersTests/TestGroup5.swift:334",
