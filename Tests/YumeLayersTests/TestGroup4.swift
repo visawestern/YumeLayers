@@ -505,6 +505,17 @@ func testVRAMBudget() {
     expect(poolFraction > 0.5,
            String(format: "пул загружает больше половины VRAM (%.1f%%)", poolFraction * 100))
 
+    // Фаза 1: бюджеты под новые целевые разрешения (96/128/192px).
+    for (w, h) in [(96, 56), (128, 72), (192, 112)] {
+        let perSample = convVAEBytesPerSample(w: w, h: h)
+        expect(perSample > 0, "\(w)×\(h): байт на сэмпл > 0")
+        let batch = effectiveBatchSize(requested: 16, w: w, h: h,
+                                       budgetBytes: Int(ws))
+        expect(batch >= 1, "\(w)×\(h): пачка ≥ 1 (получено \(batch))")
+        expect(perSample * batch <= Int(ws),
+               "\(w)×\(h): активации пачки ≤ рабочий набор (\(perSample / 1_048_576) МБ×\(batch))")
+    }
+
     // Сообщение при OOM должно называть объём и подсказывать, что делать.
     let msg = allocationFailureMessage(bytes: 512 * 1_048_576, availableBytes: 100 * 1_048_576,
                                        what: "тензор 16×410880")
