@@ -9,632 +9,187 @@ import UniformTypeIdentifiers
 import YumeLayersCore
 
 final class YumeAppDelegate: NSObject, NSApplicationDelegate {
-    private var window: NSWindow!
+    var window: NSWindow!
 
     // Поля параметров
-    private let folderField = NSTextField(string: "")
-    private let widthField = NSTextField(string: "854")
-    private let heightField = NSTextField(string: "480")
-    private let extractLimitCtl = EditableValueControl(value: "0")
-    private let epochsCtl = EditableValueControl(value: "20")
-    private let stepsCtl = EditableValueControl(value: "20")
-    private let batchCtl = EditableValueControl(value: "1")
-    private let lrCtl = EditableValueControl(value: "0.0003")
-    private let pauseCtl = EditableValueControl(value: "250")
-    private let powerCtl = EditableValueControl(value: "90")
+    let folderField = NSTextField(string: "")
+    let widthField = NSTextField(string: "854")
+    let heightField = NSTextField(string: "480")
+    let extractLimitCtl = EditableValueControl(value: "0")
+    let epochsCtl = EditableValueControl(value: "20")
+    let stepsCtl = EditableValueControl(value: "20")
+    let batchCtl = EditableValueControl(value: "1")
+    let lrCtl = EditableValueControl(value: "0.0003")
+    let pauseCtl = EditableValueControl(value: "250")
+    let powerCtl = EditableValueControl(value: "90")
     /// Размер кадра, на котором обучается VAE. Исходные JPEG остаются
     /// полноразмерными — декодер уменьшает их на лету (как старый стенд
     /// 80×56, на котором сеть сходилась заметно лучше 480p).
-    private let widthCtl = EditableValueControl(value: "80")
-    private let heightCtl = EditableValueControl(value: "56")
-    private let convPathCtl = EditableValueControl(value: "~/YumeLayers/checkpoints/conv.safetensors", width: 0)
-    private let resumeSwitch = NSSwitch()
-    private let adaptiveSwitch = NSSwitch()
+    let widthCtl = EditableValueControl(value: "80")
+    let heightCtl = EditableValueControl(value: "56")
+    let convPathCtl = EditableValueControl(value: "~/YumeLayers/checkpoints/conv.safetensors", width: 0)
+    let resumeSwitch = NSSwitch()
+    let adaptiveSwitch = NSSwitch()
 
-    private let trainButton = NSButton(title: "Обучить VAE", target: nil, action: nil)
-    private let stopButton = NSButton(title: "Стоп", target: nil, action: nil)
-    private let browseButton = NSButton(title: "Обзор", target: nil, action: nil)
+    let trainButton = NSButton(title: "Обучить VAE", target: nil, action: nil)
+    let stopButton = NSButton(title: "Стоп", target: nil, action: nil)
+    let browseButton = NSButton(title: "Обзор", target: nil, action: nil)
 
     // Статус, прогресс, превью, лог
-    private let statusLabel = NSTextField(labelWithString: "Готово к обучению")
+    let statusLabel = NSTextField(labelWithString: "Готово к обучению")
     // Прогресс каждого действия живёт рядом с его кнопкой (см. карточки 1 и 3).
-    private let extractProgressBar = NSProgressIndicator()
-    private let extractPercentLabel = NSTextField(labelWithString: "0%")
-    private let extractEtaLabel = NSTextField(labelWithString: "—")
-    private var extractProgressBlock: NSStackView!
-    private let trainProgressBar = NSProgressIndicator()
-    private let trainPercentLabel = NSTextField(labelWithString: "0%")
-    private let trainEtaLabel = NSTextField(labelWithString: "—")
-    private var trainProgressBlock: NSStackView!
+    let extractProgressBar = NSProgressIndicator()
+    let extractPercentLabel = NSTextField(labelWithString: "0%")
+    let extractEtaLabel = NSTextField(labelWithString: "—")
+    var extractProgressBlock: NSStackView!
+    let trainProgressBar = NSProgressIndicator()
+    let trainPercentLabel = NSTextField(labelWithString: "0%")
+    let trainEtaLabel = NSTextField(labelWithString: "—")
+    var trainProgressBlock: NSStackView!
     // Живой индикатор: спиннер + состояние + текущий кадр/шаг/скорость.
-    private let trainSpinner = NSProgressIndicator()
-    private let trainStateLabel = NSTextField(labelWithString: "Обучение идёт")
-    private let trainFrameLabel = NSTextField(labelWithString: "Ожидание первого шага…")
-    private var trainLiveBlock: NSStackView!
-    private var trainHeartbeatTimer: Timer?
-    private var lastTrainStepAt: Date?
-    private var lastTrainReport: TrainStepReport?
-    private let reconsProgressBar = NSProgressIndicator()
-    private let reconsPercentLabel = NSTextField(labelWithString: "0%")
-    private var reconsProgressBlock: NSStackView!
-    private let epochCard = MetricCard(title: "Эпоха", symbol: "clock")
-    private let lossCard = MetricCard(title: "Loss", symbol: "chart.line.downtrend.xyaxis")
-    private let psnrCard = MetricCard(title: "PSNR, дБ", symbol: "speedometer")
-    private let chart = HistoryChart()
-    private let previewView = NSImageView()
-    private let playerView = AVPlayerView()
-    private let queuePlayer = AVQueuePlayer()
-    private var looper: AVPlayerLooper?
-    private var videoEmptyState: NSStackView!
-    private var videoURLs: [URL] = []
-    private var isExtracting = false
-    private var currentExtractor: FrameExtractor?
-    private var extractCancelled = false
-    private var extractedCount = 0
-    private var skippedBlackTotal = 0
-    private let extractButton = NSButton(title: "Вытащить кадры", target: nil, action: nil)
-    private let stopExtractButton = NSButton(title: "Стоп", target: nil, action: nil)
-    private let resetParamsButton = NSButton(title: "Сброс к умолчаниям", target: nil, action: nil)
-    private let autoTuneButton = NSButton(title: "Авто-расчёт параметров", target: nil, action: nil)
-    private var extractStartTime = Date()
-    private var trainStartTime = Date()
-    private var lastCollageRender = Date.distantPast
+    let trainSpinner = NSProgressIndicator()
+    let trainStateLabel = NSTextField(labelWithString: "Обучение идёт")
+    let trainFrameLabel = NSTextField(labelWithString: "Ожидание первого шага…")
+    var trainLiveBlock: NSStackView!
+    var trainHeartbeatTimer: Timer?
+    var lastTrainStepAt: Date?
+    var lastTrainReport: TrainStepReport?
+    let reconsProgressBar = NSProgressIndicator()
+    let reconsPercentLabel = NSTextField(labelWithString: "0%")
+    var reconsProgressBlock: NSStackView!
+    let epochCard = MetricCard(title: "Эпоха", symbol: "clock")
+    let lossCard = MetricCard(title: "Loss", symbol: "chart.line.downtrend.xyaxis")
+    let psnrCard = MetricCard(title: "PSNR, дБ", symbol: "speedometer")
+    let chart = HistoryChart()
+    let previewView = NSImageView()
+    let playerView = AVPlayerView()
+    let queuePlayer = AVQueuePlayer()
+    var looper: AVPlayerLooper?
+    var videoEmptyState: NSStackView!
+    var videoURLs: [URL] = []
+    var isExtracting = false
+    var currentExtractor: FrameExtractor?
+    var extractCancelled = false
+    var extractedCount = 0
+    var skippedBlackTotal = 0
+    let extractButton = NSButton(title: "Вытащить кадры", target: nil, action: nil)
+    let stopExtractButton = NSButton(title: "Стоп", target: nil, action: nil)
+    let resetParamsButton = NSButton(title: "Сброс к умолчаниям", target: nil, action: nil)
+    let autoTuneButton = NSButton(title: "Авто-расчёт параметров", target: nil, action: nil)
+    var extractStartTime = Date()
+    var trainStartTime = Date()
+    var lastCollageRender = Date.distantPast
 
     // Асинхронная выдача извлечённых кадров: фон складывает кадры в буфер,
     // main thread забирает их пачками по таймеру. Так на 44 000 кадров
     // не приходится 44 000 обновлений интерфейса.
-    private struct PendingExtractFrame {
+    struct PendingExtractFrame {
         let name: String
         let jpeg: Data
         let source: String
         let isControl: Bool
     }
-    private let extractBatch = ExtractBatchPolicy()
-    private let pendingExtractLock = NSLock()
-    private var pendingExtractFrames: [PendingExtractFrame] = []
-    private var pendingExtractProgress: Double = 0
-    private var pendingExtractDone = 0
-    private var extractTotalAll = 0
-    private var extractFlushTimer: Timer?
-    private var lastExtractFlush = Date.distantPast
-    private var flushedFirstExtractBatch = false
-    private let carouselPrev = NSButton(image: NSImage(systemSymbolName: "chevron.left", accessibilityDescription: "Назад")!, target: nil, action: nil)
-    private let carouselNext = NSButton(image: NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Вперёд")!, target: nil, action: nil)
-    private let carouselFirst = NSButton(image: NSImage(systemSymbolName: "chevron.left.to.line", accessibilityDescription: "В начало")!, target: nil, action: nil)
-    private let carouselLast = NSButton(image: NSImage(systemSymbolName: "chevron.right.to.line", accessibilityDescription: "В конец")!, target: nil, action: nil)
-    private var pageDots: [NSButton] = []
+    let extractBatch = ExtractBatchPolicy()
+    let pendingExtractLock = NSLock()
+    var pendingExtractFrames: [PendingExtractFrame] = []
+    var pendingExtractProgress: Double = 0
+    var pendingExtractDone = 0
+    var extractTotalAll = 0
+    var extractFlushTimer: Timer?
+    var lastExtractFlush = Date.distantPast
+    var flushedFirstExtractBatch = false
+    let carouselPrev = NSButton(image: NSImage(systemSymbolName: "chevron.left", accessibilityDescription: "Назад")!, target: nil, action: nil)
+    let carouselNext = NSButton(image: NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Вперёд")!, target: nil, action: nil)
+    let carouselFirst = NSButton(image: NSImage(systemSymbolName: "chevron.left.to.line", accessibilityDescription: "В начало")!, target: nil, action: nil)
+    let carouselLast = NSButton(image: NSImage(systemSymbolName: "chevron.right.to.line", accessibilityDescription: "В конец")!, target: nil, action: nil)
+    var pageDots: [NSButton] = []
     /// Ограничения ширины кружочков-страниц (обновляются под число цифр).
-    private var dotWidthConstraints: [NSLayoutConstraint] = []
-    private let dotPoolSize = 30   // запас кнопок; видимое число считается по ширине
-    private let paginatorRow = NSStackView()
-    private var framesStore: [MemoryFrame] = []
+    var dotWidthConstraints: [NSLayoutConstraint] = []
+    let dotPoolSize = 30   // запас кнопок; видимое число считается по ширине
+    let paginatorRow = NSStackView()
+    var framesStore: [MemoryFrame] = []
     /// Контрольная выборка (1 кадр/сек по каждому видео) — для визуальной
     /// оценки качества реконструкций на итоговой модели. Живёт отдельно и не
     /// освобождается по ходу обучения.
-    private var controlFramesStore: [MemoryFrame] = []
-    private var processedFrames: [Bool] = []
+    var controlFramesStore: [MemoryFrame] = []
+    var processedFrames: [Bool] = []
     /// Реконструкции в памяти: имя кадра → PNG-данные (без записи на диск).
-    private var reconMemory: [String: Data] = [:]
-    private var carouselPage = 0
-    private let pageSize = 10   // 5 внизу + 5 справа вокруг большой
-    private let collageBig = NSImageView()
-    private let collageBigBadge = NSImageView()
-    private var collageThumbs: [NSButton] = []
-    private var thumbBadges: [NSImageView] = []
-    private var selectedFrameIndex = -1
-    private let collageEmpty = NSTextField(labelWithString: "Кадры появятся после извлечения видео")
-    private let sourceSwitch = NSSegmentedControl(labels: ["Оригинал", "Реконструкция"], trackingMode: .selectOne, target: nil, action: nil)
-    private let framesChip = CountChip()
-    private var showRecon = false
-    private var epochsEditedByUser = false
-    private var stepsEditedByUser = false
-    private var lrEditedByUser = false
-    private let videoListScroll = NSScrollView()
-    private let videoListStack = NSStackView()
+    var reconMemory: [String: Data] = [:]
+    var carouselPage = 0
+    let pageSize = 10   // 5 внизу + 5 справа вокруг большой
+    let collageBig = NSImageView()
+    let collageBigBadge = NSImageView()
+    var collageThumbs: [NSButton] = []
+    var thumbBadges: [NSImageView] = []
+    var selectedFrameIndex = -1
+    let collageEmpty = NSTextField(labelWithString: "Кадры появятся после извлечения видео")
+    let sourceSwitch = NSSegmentedControl(labels: ["Оригинал", "Реконструкция"], trackingMode: .selectOne, target: nil, action: nil)
+    let framesChip = CountChip()
+    var showRecon = false
+    var epochsEditedByUser = false
+    var stepsEditedByUser = false
+    var lrEditedByUser = false
+    let videoListScroll = NSScrollView()
+    let videoListStack = NSStackView()
 
     /// Порядок кадров в L: нижний ряд 0-4 (слева → справа), затем правый
     /// столбец 5-9 (снизу → вверх, конец — правый верхний).
-    private func frameOffset(forSlot slot: Int) -> Int {
-        frameOffsetForSlot(slot)
-    }
-    private let carouselStack = NSStackView()
-    private let carouselScroll = NSScrollView()
-    private var carouselPlaceholder: NSStackView!
-    private let logView = NSTextView()
+    let carouselStack = NSStackView()
+    let carouselScroll = NSScrollView()
+    var carouselPlaceholder: NSStackView!
+    let logView = NSTextView()
 
-    private var isTraining = false
+    var isTraining = false
     /// Идут ли реконструкции в фоне (управляются кнопкой «Стоп»).
-    private var isReconstructing = false
-    private var lastEpoch = 0
-    private let api = ApiServer()
-    private var layoutViews: [String: NSView] = [:]
-    private var debugGrids: [NSView] = []
-    private var lastParams = Params()
+    var isReconstructing = false
+    var lastEpoch = 0
+    let api = ApiServer()
+    var layoutViews: [String: NSView] = [:]
+    var debugGrids: [NSView] = []
+    var lastParams = Params()
 
     // ——— Генерация A→B: интерполяция между двумя опорными картинками ———
-    private let interpAButton = NSButton(title: "Выбрать…", target: nil, action: nil)
-    private let interpBButton = NSButton(title: "Выбрать…", target: nil, action: nil)
-    private let interpALabel = NSTextField(labelWithString: "не выбран")
-    private let interpBLabel = NSTextField(labelWithString: "не выбран")
-    private let interpSecondsCtl = EditableValueControl(value: "5")
-    private let interpFpsCtl = EditableValueControl(value: "24")
-    private let interpRunButton = NSButton(title: "Создать видео", target: nil, action: nil)
-    private let interpStopButton = NSButton(title: "Стоп", target: nil, action: nil)
-    private let interpProgressBar = NSProgressIndicator()
-    private let interpPercentLabel = NSTextField(labelWithString: "0%")
-    private var interpProgressBlock: NSStackView!
-    private let interpResultLabel = NSTextField(wrappingLabelWithString: "")
-    private var interpImageAPath = ""
-    private var interpImageBPath = ""
-    private var isInterpolating = false
+    let interpAButton = NSButton(title: "Выбрать…", target: nil, action: nil)
+    let interpBButton = NSButton(title: "Выбрать…", target: nil, action: nil)
+    let interpALabel = NSTextField(labelWithString: "не выбран")
+    let interpBLabel = NSTextField(labelWithString: "не выбран")
+    let interpSecondsCtl = EditableValueControl(value: "5")
+    let interpFpsCtl = EditableValueControl(value: "24")
+    let interpRunButton = NSButton(title: "Создать видео", target: nil, action: nil)
+    let interpStopButton = NSButton(title: "Стоп", target: nil, action: nil)
+    let interpProgressBar = NSProgressIndicator()
+    let interpPercentLabel = NSTextField(labelWithString: "0%")
+    var interpProgressBlock: NSStackView!
+    let interpResultLabel = NSTextField(wrappingLabelWithString: "")
+    var interpImageAPath = ""
+    var interpImageBPath = ""
+    var isInterpolating = false
     /// Чекпоинт, которым сделана последняя интерполяция.
-    private var lastInterpolationModel = ""
+    var lastInterpolationModel = ""
 
     // Плеер для ГОТОВОГО видео (результат интерполяции) + вкладки.
-    private let resultPlayerView = AVPlayerView()
-    private let resultQueuePlayer = AVQueuePlayer()
-    private var resultLooper: AVPlayerLooper?
-    private var resultEmptyState: NSStackView!
-    private let mediaTabsControl = NSSegmentedControl(
+    let resultPlayerView = AVPlayerView()
+    let resultQueuePlayer = AVQueuePlayer()
+    var resultLooper: AVPlayerLooper?
+    var resultEmptyState: NSStackView!
+    let mediaTabsControl = NSSegmentedControl(
         labels: ["Входящее видео", "Готовое видео"],
         trackingMode: .selectOne, target: nil, action: nil)
-    private var videoMediaCard: NSView!
-    private var resultMediaCard: NSView!
+    var videoMediaCard: NSView!
+    var resultMediaCard: NSView!
 
-    private func referenceRow(_ label: String, _ button: NSButton, _ lbl: NSTextField) -> NSStackView {
-        let tag = NSTextField(labelWithString: label)
-        let row = NSStackView(views: [tag, button, lbl])
-        row.orientation = .horizontal
-        row.spacing = 6
-        return row
-    }
 
-    @objc private func chooseReferenceA() { pickReference(isA: true) }
-    @objc private func chooseReferenceB() { pickReference(isA: false) }
 
-    private func pickReference(isA: Bool) {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = [.png, .jpeg, .tiff, .bmp, .heic, .gif, .image]
-        panel.message = isA ? "Опорная картинка A — начало ролика" : "Опорная картинка B — конец ролика"
-        panel.prompt = "Выбрать"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        if isA {
-            interpImageAPath = url.path
-            interpALabel.stringValue = url.lastPathComponent
-            interpALabel.toolTip = url.path
-        } else {
-            interpImageBPath = url.path
-            interpBLabel.stringValue = url.lastPathComponent
-            interpBLabel.toolTip = url.path
-        }
-        updateInterpolateButtons()
-    }
 
-    @objc private func runInterpolation() {
-        startInterpolation(imageA: interpImageAPath,
-                           imageB: interpImageBPath,
-                           seconds: interpSecondsCtl.doubleValue(def: 5),
-                           fps: interpFpsCtl.intValue(def: 24),
-                           outputPath: nil)
-    }
 
-    @objc private func stopInterpolation() {
-        InterpolationControl.shared.cancel()
-        setStatus("Остановка интерполяции…", ok: false)
-        log("=== Остановка интерполяции по запросу ===")
-    }
 
-    private func updateInterpolateButtons() {
-        let ready = !interpImageAPath.isEmpty && !interpImageBPath.isEmpty
-            && !isInterpolating && convPathExists()
-        interpRunButton.isEnabled = ready
-        interpStopButton.isEnabled = isInterpolating
-    }
 
-    private func convPathExists() -> Bool {
-        let p = (convPathCtl.stringValue as NSString).expandingTildeInPath
-        return FileManager.default.fileExists(atPath: bestCheckpointPath(for: p))
-    }
 
-    @objc private func mediaTabChanged(_ sender: NSSegmentedControl) {
-        let showResult = sender.selectedSegment == 1
-        videoMediaCard?.isHidden = showResult
-        resultMediaCard?.isHidden = !showResult
-    }
 
-    private func defaultInterpolationOutputPath() -> String {
-        let dir = (NSHomeDirectory() as NSString).appendingPathComponent("YumeLayers/outputs")
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        let df = DateFormatter()
-        df.dateFormat = "dd.MM.yyyy, HH-mm"
-        return (dir as NSString).appendingPathComponent("interp_\(df.string(from: Date())).mp4")
-    }
 
-    private func startInterpolation(imageA: String, imageB: String,
-                                    seconds: Double, fps: Int, outputPath: String?) {
-        guard !isInterpolating else {
-            setStatus("Интерполяция уже идёт", ok: false)
-            return
-        }
-        guard !imageA.isEmpty, !imageB.isEmpty else {
-            setStatus("Нужны обе опорные картинки (A и B)", ok: false)
-            return
-        }
-        let checkpoint = bestCheckpointPath(for: (convPathCtl.stringValue as NSString).expandingTildeInPath)
-        guard FileManager.default.fileExists(atPath: checkpoint) else {
-            setStatus("Нет файла модели — сначала обучите VAE", ok: false)
-            return
-        }
-        lastInterpolationModel = checkpoint
-        let out = outputPath ?? defaultInterpolationOutputPath()
-        InterpolationControl.shared.reset()
-        isInterpolating = true
-        api.setInterpolatingActive(true)
-        api.setLastInterpolation(nil)
-        if interpProgressBlock == nil {
-            interpProgressBlock = makeProgressBlock(bar: interpProgressBar,
-                                                   percent: interpPercentLabel, eta: nil)
-            interpProgressBlock.widthAnchor.constraint(equalToConstant: 360).isActive = true
-        }
-        interpProgressBlock.isHidden = false
-        interpProgressBar.doubleValue = 0
-        interpPercentLabel.stringValue = "0%"
-        interpResultLabel.stringValue = "Готовим кадры…"
-        updateInterpolateButtons()
-        setStatus("Интерполяция A→B…", ok: true)
-        log("=== Интерполяция A→B: \(imageA) → \(imageB), \(seconds) с × \(fps) fps ===")
-        log("   Модель: \(checkpoint)")
 
-        let request = InterpolationRequest(imageAPath: imageA,
-                                           imageBPath: imageB,
-                                           seconds: seconds,
-                                           fps: fps,
-                                           outputPath: out,
-                                           modelWidth: widthCtl.intValue(def: 80),
-                                           modelHeight: heightCtl.intValue(def: 56),
-                                           checkpointPath: checkpoint)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            do {
-                let result = try interpolateVideo(request) { done, total in
-                    DispatchQueue.main.async {
-                        guard let self = self else { return }
-                        let ratio = Double(done) / Double(max(total, 1))
-                        self.interpProgressBar.doubleValue = ratio
-                        self.interpPercentLabel.stringValue = "\(Int(ratio * 100))%"
-                        self.api.updateInterpolationProgress(ratio)
-                    }
-                }
-                DispatchQueue.main.async { self?.finishInterpolation(result) }
-            } catch {
-                DispatchQueue.main.async {
-                    self?.isInterpolating = false
-                    self?.api.setInterpolatingActive(false)
-                    self?.interpResultLabel.stringValue = "Ошибка: \(error.localizedDescription)"
-                    self?.setStatus("Интерполяция не удалась", ok: false)
-                    self?.log("⚠️ Интерполяция: \(error.localizedDescription)")
-                    self?.updateInterpolateButtons()
-                }
-            }
-        }
-    }
 
-    private func finishInterpolation(_ result: InterpolationResult) {
-        isInterpolating = false
-        api.setInterpolatingActive(false)
-        api.updateInterpolationProgress(1)
-        interpProgressBar.doubleValue = 1
-        interpPercentLabel.stringValue = "100%"
-        interpResultLabel.stringValue =
-            "Готово: \(result.frameCount) кадров, \(result.width)×\(result.height), \(result.fps) fps — \(result.path)\n"
-            + "Модель: \((lastInterpolationModel as NSString).lastPathComponent)"
-        api.setLastInterpolation(["path": result.path,
-                                  "frames": result.frameCount,
-                                  "fps": result.fps,
-                                  "seconds": result.seconds,
-                                  "width": result.width,
-                                  "height": result.height,
-                                  "model": lastInterpolationModel,
-                                  "ok": true])
-        updateInterpolateButtons()
-        setStatus("Видео A→B готово", ok: true)
-        log("✅ Интерполяция готова: \(result.frameCount) кадров, \(result.width)×\(result.height), \(result.fps) fps")
-        log("   Файл: \(result.path)")
 
-        // Показываем результат в плеере «Готовое видео».
-        let url = URL(fileURLWithPath: result.path)
-        guard FileManager.default.fileExists(atPath: result.path) else { return }
-        resultLooper?.disableLooping()
-        resultQueuePlayer.pause()
-        resultQueuePlayer.removeAllItems()
-        let item = AVPlayerItem(url: url)
-        resultLooper = AVPlayerLooper(player: resultQueuePlayer, templateItem: item)
-        resultEmptyState.isHidden = true
-        mediaTabsControl.selectedSegment = 1
-        videoMediaCard?.isHidden = true
-        resultMediaCard?.isHidden = false
-    }
-
-    private func saveReconstructionsToDisk(dir: String?) {
-        let baseDir = dir ?? (NSHomeDirectory() as NSString).appendingPathComponent("YumeLayers/outputs/recons")
-        try? FileManager.default.createDirectory(atPath: baseDir, withIntermediateDirectories: true)
-        var saved = 0
-        for (name, data) in reconMemory {
-            let path = (baseDir as NSString).appendingPathComponent(name)
-            try? data.write(to: URL(fileURLWithPath: path))
-            saved += 1
-        }
-        log("Реконструкции сохранены: \(saved) файлов в \(baseDir)")
-    }
-
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
-        NSApp.mainMenu = buildMenu()
-
-        _ = api.start()
-        // Вся отладка core-кода (yumeLog) — в журнал приложения, а не только в консоль.
-        YumeLogBus.shared.subscribe { [weak self] line in
-            DispatchQueue.main.async { self?.appendCoreLog(line) }
-        }
-        // API /api/train запускает ТУ ЖЕ функцию, что и кнопка «Обучить VAE»
-        // (та же логика бэкапа/диалога и те же параметры из интерфейса).
-        api.onTrain = { [weak self] maxFrames, resume in
-            DispatchQueue.main.async { self?.startTraining(maxFrames: maxFrames, resume: resume) }
-        }
-        api.onStop = { [weak self] in
-            DispatchQueue.main.async { self?.stopTraining() }
-        }
-        api.onExtract = { [weak self] paths, maxFrames in
-            DispatchQueue.main.async {
-                guard let self = self, !paths.isEmpty else { return }
-                let urls = paths.map { URL(fileURLWithPath: $0) }
-                // Та же регистрация, что и при выборе в UI: список, поле, показ.
-                self.setSelectedVideos(urls)
-                self.saveSelection()
-                // Тот же запуск извлечения, что и у кнопки «Вытащить кадры».
-                self.startExtraction(urls: self.videoURLs, append: false, maxFrames: maxFrames ?? 0)
-            }
-        }
-        // /api/set: универсальный сеттер всех параметров интерфейса. Каждый
-        // ключ обновляет тот же элемент управления, что и ручной ввод в UI,
-        // поэтому следующий вызов /api/train использует эти значения.
-        api.onSetParam = { [weak self] params in
-            guard let self = self else { return (false, [], params.keys.map { "\($0)" }) }
-            var applied: [String] = []
-            var unknown: [String] = []
-            DispatchQueue.main.sync {
-                for (key, value) in params {
-                    // Текстовый параметр: число/строка/bool → строка поля.
-                    func textParam(_ ctl: EditableValueControl, _ markUserEdited: inout Bool) -> Bool {
-                        guard let s = paramStringValue(value) else { return false }
-                        ctl.setValue(s)
-                        markUserEdited = true
-                        return true
-                    }
-                    switch key {
-                    case "lr":
-                        if textParam(self.lrCtl, &self.lrEditedByUser) { applied.append(key) } else { unknown.append(key) }
-                    case "epochs":
-                        if textParam(self.epochsCtl, &self.epochsEditedByUser) { applied.append(key) } else { unknown.append(key) }
-                    case "steps":
-                        if textParam(self.stepsCtl, &self.stepsEditedByUser) { applied.append(key) } else { unknown.append(key) }
-                    case "batch":
-                        if let s = paramStringValue(value) { self.batchCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
-                    case "width":
-                        if let s = paramStringValue(value) { self.widthCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
-                    case "height":
-                        if let s = paramStringValue(value) { self.heightCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
-                    case "pauseMs":
-                        if let s = paramStringValue(value) { self.pauseCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
-                    case "gpuPowerPercent":
-                        if let s = paramStringValue(value) { self.powerCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
-                    case "extractLimit":
-                        if let s = paramStringValue(value) { self.extractLimitCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
-                    case "convPath":
-                        if let s = paramStringValue(value) { self.convPathCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
-                    case "resume":
-                        if let b = paramBoolValue(value) { self.resumeSwitch.state = b ? .on : .off; applied.append(key) } else { unknown.append(key) }
-                    case "adaptiveThrottle":
-                        if let b = paramBoolValue(value) { self.adaptiveSwitch.state = b ? .on : .off; applied.append(key) } else { unknown.append(key) }
-                    case "selectedVideos":
-                        if let arr = value as? [String] {
-                            self.setSelectedVideos(arr.map { URL(fileURLWithPath: $0) })
-                            self.saveSelection()
-                            applied.append(key)
-                        } else { unknown.append(key) }
-                    default:
-                        unknown.append(key)
-                    }
-                }
-            }
-            return (unknown.isEmpty, applied, unknown)
-        }
-        api.onResetParams = { [weak self] in
-            DispatchQueue.main.async { self?.resetParams() }
-        }
-        api.onAutoTune = { [weak self] in
-            DispatchQueue.main.async { self?.autoTuneNow() }
-        }
-        api.onInterpolate = { [weak self] imageA, imageB, seconds, fps, out in
-            DispatchQueue.main.async {
-                self?.startInterpolation(imageA: imageA, imageB: imageB,
-                                         seconds: seconds, fps: fps, outputPath: out)
-            }
-        }
-        api.onInterpolateStop = {
-            InterpolationControl.shared.cancel()
-        }
-        api.onSaveRecons = { [weak self] dir in
-            DispatchQueue.main.async { self?.saveReconstructionsToDisk(dir: dir) }
-        }
-        api.onLayeredTrain = { [weak self] video, w, h, steps, latentChannels, checkpoint in
-            DispatchQueue.global(qos: .userInitiated).async {
-                guard let self = self else { return }
-                do {
-                    let report = try runLayerPipeline(
-                        videoPath: video,
-                        w: w, h: h,
-                        frameCount: 24,
-                        steps: steps,
-                        latentChannels: latentChannels,
-                        lr: 0.01,
-                        checkpointPath: checkpoint,
-                        previewPrefix: nil)
-                    let dict: [String: Any] = [
-                        "source": report.sourcePath,
-                        "width": report.width, "height": report.height,
-                        "frames": report.frameCount,
-                        "psnr": Double(report.train.psnr),
-                        "ssim": Double(report.train.ssim),
-                        "acceptedByFloor": report.train.acceptedByFloor,
-                        "sceneCount": report.train.sceneCount,
-                        "latentChannels": report.train.latentChannels,
-                        "checkpoint": report.checkpointPath ?? "",
-                        "previews": report.previewPaths,
-                        "ok": true,
-                    ]
-                    self.api.setLastLayered(dict)
-                    self.log("✅ Слойный VAE: PSNR \(String(format: "%.2f", report.train.psnr)) дБ, SSIM \(String(format: "%.3f", report.train.ssim)), принят=\(report.train.acceptedByFloor)")
-                } catch {
-                    self.api.setLastLayered(["ok": false, "error": error.localizedDescription])
-                    self.log("⚠️ Слойный контур: \(error.localizedDescription)")
-                }
-            }
-        }
-        // /api/test-frames: проверка текущих кадров в памяти (JPEG-сигнатура,
-        // декодирование, имена). count — сколько кадров проверить (0 — все).
-        api.testFramesProvider = { [weak self] count in
-            guard let self = self else { return "{\"error\":\"no window\"}" }
-            var report = ""
-            DispatchQueue.main.sync {
-                func decodeJPEG(_ data: Data) -> Bool {
-                    guard let src = CGImageSourceCreateWithData(data as CFData, nil)
-                    else { return false }
-                    return CGImageSourceCreateImageAtIndex(src, 0, nil) != nil
-                }
-                let r = frameValidation(frames: self.framesStore, limit: count,
-                                        decode: decodeJPEG)
-                self.log("Проверка кадров: \(r.checked) проверено, \(r.passed) ок, \(r.failed) провалов")
-                for issue in r.issues.prefix(10) {
-                    self.log("  \(issue)")
-                }
-                let obj: [String: Any] = [
-                    "ok": true,
-                    "total": self.framesStore.count,
-                    "requested": r.requested,
-                    "checked": r.checked,
-                    "passed": r.passed,
-                    "failed": r.failed,
-                    "issues": Array(r.issues.prefix(20)),
-                ]
-                report = (try? String(data: JSONSerialization.data(withJSONObject: obj),
-                                      encoding: .utf8)) ?? "{}"
-            }
-            return report
-        }
-        api.screenshotProvider = { [weak self] in
-            guard let self = self else { return nil }
-            var path: String? = nil
-            DispatchQueue.main.sync { path = self.makeScreenshot() }
-            return path
-        }
-        api.layoutProvider = { [weak self] in
-            guard let self = self else { return "{}" }
-            var json = ""
-            DispatchQueue.main.sync {
-                var parts: [String] = []
-                for (name, view) in self.layoutViews {
-                    let r = view.convert(view.bounds, to: nil)
-                    parts.append("\"\(name)\":{\"x\":\(Int(r.minX)),\"y\":\(Int(r.minY)),\"w\":\(Int(r.width)),\"h\":\(Int(r.height))}")
-                }
-                json = "{" + parts.joined(separator: ",") + "}"
-            }
-            return json
-        }
-        api.stateProvider = { [weak self] in
-            guard let self = self else { return "{}" }
-            var json = ""
-            DispatchQueue.main.sync {
-                let dict: [String: Any] = [
-                    "windowVisible": self.window?.isVisible ?? false,
-                    "windowMiniaturized": self.window?.isMiniaturized ?? false,
-                    "contentSubviews": self.window?.contentView?.subviews.count ?? 0,
-                    "selectedVideos": self.videoURLs.map { $0.path },
-                    "framesCount": self.framesStore.count,
-                    "processedCount": self.processedFrames.filter { $0 }.count,
-                    "extractLimit": self.extractLimitCtl.stringValue,
-                    "epochs": self.epochsCtl.stringValue,
-                    "steps": self.stepsCtl.stringValue,
-                    "batch": self.batchCtl.stringValue,
-                    "width": self.widthCtl.stringValue,
-                    "height": self.heightCtl.stringValue,
-                    "lr": self.lrCtl.stringValue,
-                    "pauseMs": self.pauseCtl.stringValue,
-                    "gpuPowerPercent": self.powerCtl.stringValue,
-                    "resume": self.resumeSwitch.state == .on,
-                    "adaptiveThrottle": self.adaptiveSwitch.state == .on,
-                    "training": self.isTraining,
-                    "extracting": self.isExtracting,
-                    "thermal": self.thermalStateName(),
-                    "gpuBufferAllocations": MetalEngine.shared.totalBufferAllocations,
-                    "gpuStagingAllocations": MetalEngine.shared.totalStagingAllocations,
-                ]
-                if let data = try? JSONSerialization.data(withJSONObject: dict),
-                   let s = String(data: data, encoding: .utf8) {
-                    json = s
-                } else {
-                    json = "{}"
-                }
-            }
-            return json
-        }
-
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1360, height: 840),
-                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                          backing: .buffered, defer: false)
-        window.backgroundColor = .windowBackgroundColor
-        window.appearance = NSAppearance(named: .aqua)
-        window.title = "YumeLayers"
-        window.subtitle = "Студия обучения"
-        window.titlebarAppearsTransparent = true
-        window.toolbarStyle = .unified
-        
-        window.minSize = NSSize(width: 1280, height: 780)
-        window.isReleasedWhenClosed = false
-        window.contentView = buildUI()
-        // Диагностика запуска: если buildUI() оборвался (например, исключение
-        // в NSGridView), окно останется пустым — эта строка сразу это покажет
-        // в журнале и в /api/log.
-        log("Интерфейс собран: контейнеров \(window.contentView?.subviews.count ?? 0), элементов учёта \(layoutViews.count)")
-        maximizeOnLaunch()
-        showMainWindow()
-        // Пагинатор: при изменении ширины окна пересчитываем видимое число
-        // кружков от ширины центральной колонки. Ширина колонки при этом
-        // не меняется — меняется только количество показанных страниц.
-        NotificationCenter.default.addObserver(
-            forName: NSWindow.didResizeNotification, object: window, queue: .main
-        ) { [weak self] _ in
-            guard let self = self else { return }
-            let pages = max(1, (self.framesStore.count + self.pageSize - 1) / self.pageSize)
-            self.renderPageDots(pages: pages)
-        }
-        restoreSelection()
-        log("Готово. Добавьте видео → извлеките кадры → начните обучение.")
-    }
-
-    @objc private func showMainWindow() {
-        guard let window = window else { return }
-        if window.isMiniaturized { window.deminiaturize(nil) }
-        window.makeKeyAndOrderFront(nil)
-        // NSApp.activate(ignoringOtherApps:) на macOS 14+ ничего не делает
-        // (deprecated, «will have no effect»). NSRunningApplication.activate
-        // реально выводит приложение на передний план и переносит окно на
-        // активный рабочий стол (Space), если сейчас открыт полноэкранный
-        // другой приложение.
-        NSRunningApplication.current.activate(options: [.activateAllWindows])
-    }
 
     /// Разворачивает окно на весь рабочий стол при старте.
     ///
@@ -642,278 +197,49 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
     /// месте, окно просто занимает `visibleFrame` — ровно то же, что даёт
     /// зелёная кнопка (или «Увеличить» в меню «Окно»). `visibleFrame` уже
     /// исключает полосу меню и Dock, поэтому окно ничего не перекрывает.
-    private func maximizeOnLaunch() {
-        guard let window = window else { return }
-        guard let screen = window.screen ?? NSScreen.main else { return }
-        window.setFrame(screen.visibleFrame, display: false)
-    }
 
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showMainWindow()
-        return true
-    }
 
     // MARK: - Стандартное главное меню (HIG)
 
-    private func buildMenu() -> NSMenu {
-        let mainMenu = NSMenu()
-
-        // Приложение
-        let appItem = NSMenuItem()
-        mainMenu.addItem(appItem)
-        let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "О YumeLayers",
-                        action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Скрыть YumeLayers",
-                        action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-        appMenu.addItem(withTitle: "Скрыть остальные",
-                        action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
-        appMenu.addItem(withTitle: "Показать все",
-                        action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Выйти из YumeLayers",
-                        action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        appItem.submenu = appMenu
-
-        // Правка (работает с полями ввода)
-        let editItem = NSMenuItem()
-        mainMenu.addItem(editItem)
-        let editMenu = NSMenu(title: "Правка")
-        editMenu.addItem(withTitle: "Отменить", action: Selector(("undo:")), keyEquivalent: "z")
-        editMenu.addItem(withTitle: "Повторить", action: Selector(("redo:")), keyEquivalent: "Z")
-        editMenu.addItem(.separator())
-        editMenu.addItem(withTitle: "Вырезать", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        editMenu.addItem(withTitle: "Копировать", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "Вставить", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        editMenu.addItem(withTitle: "Выбрать всё", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-        editItem.submenu = editMenu
-
-        // Окно
-        let windowItem = NSMenuItem()
-        mainMenu.addItem(windowItem)
-        let windowMenu = NSMenu(title: "Окно")
-        windowMenu.addItem(withTitle: "Свернуть", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
-        windowMenu.addItem(withTitle: "Увеличить", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
-        windowMenu.addItem(.separator())
-        windowMenu.addItem(withTitle: "На передний план", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
-        windowMenu.addItem(withTitle: "Показать YumeLayers", action: #selector(showMainWindow), keyEquivalent: "0")
-        NSApp.windowsMenu = windowMenu
-        windowItem.submenu = windowMenu
-
-        return mainMenu
-    }
 
     // MARK: - Вспомогательное
 
-    private func sectionHeader(_ text: String) -> NSTextField {
-        let l = NSTextField(labelWithString: text)
-        l.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        l.textColor = .labelColor
-        return l
-    }
 
     /// Строка формы, которая растягивается на всю ширину карточки:
     /// [надпись | ⓘ | …поле…] — поле занимает всё расстояние от кнопки
     /// info до правого края строки/колонки.
-    private final class StretchRow: NSStackView {}
+    final class StretchRow: NSStackView {}
 
     /// Строка формы: [надпись | ⓘ | …поле…] — кнопка info сразу после
     /// надписи, поле растягивается на всё расстояние до правого края.
     /// `info` — полное описание для выпадающей карточки.
-    private let labelW: CGFloat = 141
-    private let rowGap: CGFloat = 6
-    private let accW: CGFloat = 76
-    private let infoW: CGFloat = 16
+    let labelW: CGFloat = 141
+    let rowGap: CGFloat = 6
+    let accW: CGFloat = 76
+    let infoW: CGFloat = 16
 
-    private func fieldRow(_ label: String, _ field: NSTextField, tooltip: String? = nil, accessory: NSView? = nil, info: String? = nil) -> StretchRow {
-        let l = NSTextField(labelWithString: label)
-        l.font = NSFont.systemFont(ofSize: 12)
-        l.textColor = .secondaryLabelColor
-        l.alignment = .left
-        l.lineBreakMode = .byTruncatingTail
-        field.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)
-        field.alignment = .natural
-        field.bezelStyle = .roundedBezel
-        field.heightAnchor.constraint(equalToConstant: 26).isActive = true
-        // Поле занимает всё расстояние от кнопки info до правого края строки.
-        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        field.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
-        if let tip = tooltip { field.toolTip = tip }
-
-        var views: [NSView] = [l]
-        if let infoText = info {
-            views.append(makeInfoButton(infoText))
-        }
-        views.append(field)
-        if let acc = accessory {
-            acc.widthAnchor.constraint(equalToConstant: accW).isActive = true
-            acc.heightAnchor.constraint(equalToConstant: 26).isActive = true
-            views.append(acc)
-        }
-        return makeStretchRow(views)
-    }
 
     /// Строка с редактируемым значением: [надпись | ⓘ | …поле…].
     /// Кнопка info — сразу после надписи, значение/поле занимают всё
     /// расстояние от неё до правого края строки.
-    private func valueRow(_ label: String, _ ctl: EditableValueControl, info: String? = nil) -> StretchRow {
-        let l = NSTextField(labelWithString: label)
-        l.font = NSFont.systemFont(ofSize: 12)
-        l.textColor = .secondaryLabelColor
-        l.alignment = .left
-        l.lineBreakMode = .byTruncatingTail
-        var views: [NSView] = [l]
-        if let infoText = info {
-            views.append(makeInfoButton(infoText))
-        }
-        // Разделитель с низким приоритетом: всё свободное расстояние
-        // скапливается между кнопкой info и полем (justify-space-between),
-        // а поле прижато к правому краю строки.
-        let spacer = NSView()
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        views.append(spacer)
-        views.append(ctl)
-        return makeStretchRow(views)
-    }
 
-    private func makeStretchRow(_ views: [NSView]) -> StretchRow {
-        let row = StretchRow(views: views)
-        row.orientation = .horizontal
-        row.distribution = .fill
-        row.alignment = .centerY
-        row.spacing = rowGap
-        row.heightAnchor.constraint(equalToConstant: 28).isActive = true
-        // Надпись не ужимается: вся лишняя ширина уходит разделителю.
-        if let l = views.first as? NSTextField {
-            l.setContentHuggingPriority(.required, for: .horizontal)
-            l.setContentCompressionResistancePriority(.required, for: .horizontal)
-        }
-        debugGrids.append(row)
-        return row
-    }
 
     /// Компактная строка переключателя (как в web-admin-panels): switch + лейбл.
     /// Лейбл — в той же колонке, что и у строк с числами, переключатель —
     /// в колонке значений (по правому краю). Единая сетка карточки.
-    private func switchRow(_ label: String, _ control: NSSwitch,
-                           tooltip: String? = nil) -> NSGridView {
-        let l = NSTextField(labelWithString: label)
-        l.font = NSFont.systemFont(ofSize: 12)
-        l.textColor = .secondaryLabelColor
-        l.alignment = .left
-        l.lineBreakMode = .byTruncatingTail
-        l.toolTip = tooltip
-        control.toolTip = tooltip
-
-        // Переключатель прижат к правому краю колонки значений — как в
-        // системных настройках macOS.
-        let holder = NSView()
-        holder.translatesAutoresizingMaskIntoConstraints = false
-        holder.addSubview(control)
-        control.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            control.trailingAnchor.constraint(equalTo: holder.trailingAnchor),
-            control.centerYAnchor.constraint(equalTo: holder.centerYAnchor),
-            holder.widthAnchor.constraint(equalToConstant: 120),
-        ])
-
-        // Одна строка, две колонки: лейбл | переключатель. Индексы колонок
-        // обязаны существовать — иначе NSGridView бросает исключение и
-        // buildUI() обрывается, оставляя пустое окно.
-        let g = NSGridView(views: [[l, holder]])
-        g.column(at: 0).width = labelW
-        g.column(at: 1).width = 120
-        g.rowSpacing = 8
-        g.columnSpacing = rowGap
-        g.widthAnchor.constraint(equalToConstant: labelW + rowGap + 120).isActive = true
-        return g
-    }
 
     /// Блок пути: подпись с info на первой строке, поле — на отдельной
     /// строке во всю ширину карточки, чтобы длинный путь был виден целиком.
-    private func pathBlock(_ label: String, _ ctl: EditableValueControl, info: String) -> NSStackView {
-        let l = NSTextField(labelWithString: label)
-        l.font = NSFont.systemFont(ofSize: 12)
-        l.textColor = .secondaryLabelColor
-        l.alignment = .left
-        l.lineBreakMode = .byTruncatingTail
-
-        let head = NSStackView(views: [l, makeInfoButton(info)])
-        head.orientation = .horizontal
-        head.spacing = rowGap
-        head.alignment = .centerY
-
-        let block = NSStackView(views: [head, ctl])
-        block.orientation = .vertical
-        block.alignment = .leading
-        block.spacing = 6
-        block.widthAnchor.constraint(equalToConstant: 360).isActive = true
-        ctl.widthAnchor.constraint(equalToConstant: 360).isActive = true
-        return block
-    }
 
     // MARK: - Кнопка info с выпадающей карточкой-описанием
-    private var infoTexts: [String] = []
-    private var openPopovers: [Int: NSPopover] = [:]
+    var infoTexts: [String] = []
+    var openPopovers: [Int: NSPopover] = [:]
 
-    private func makeInfoButton(_ text: String) -> NSButton {
-        let idx = infoTexts.count
-        infoTexts.append(text)
-        let b = NSButton(title: "", target: self, action: #selector(infoTapped(_:)))
-        b.tag = idx
-        b.isBordered = false
-        b.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: "Подробнее")
-        b.imagePosition = .imageOnly
-        b.contentTintColor = .secondaryLabelColor
-        b.toolTip = "Подробнее о параметре"
-        b.widthAnchor.constraint(equalToConstant: infoW).isActive = true
-        b.heightAnchor.constraint(equalToConstant: infoW).isActive = true
-        return b
-    }
 
-    @objc private func infoTapped(_ sender: NSButton) {
-        let idx = sender.tag
-        guard idx < infoTexts.count else { return }
-        if let pop = openPopovers[idx], pop.isShown {
-            pop.performClose(nil)
-            openPopovers[idx] = nil
-            return
-        }
-        let text = NSTextField(wrappingLabelWithString: infoTexts[idx])
-        text.font = NSFont.systemFont(ofSize: 12)
-        text.textColor = .labelColor
-        text.widthAnchor.constraint(equalToConstant: 280).isActive = true
-
-        let card = NSVisualEffectView()
-        card.material = .popover
-        card.blendingMode = .withinWindow
-        card.state = .active
-        card.wantsLayer = true
-        card.layer?.cornerRadius = 8
-        card.addSubview(text)
-        text.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            text.topAnchor.constraint(equalTo: card.topAnchor, constant: 12),
-            text.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -12),
-            text.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 12),
-            text.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -12),
-        ])
-
-        let vc = NSViewController()
-        vc.view = card
-        let pop = NSPopover()
-        pop.contentViewController = vc
-        pop.behavior = .transient
-        pop.show(relativeTo: sender.bounds, of: sender, preferredEdge: .maxY)
-        openPopovers[idx] = pop
-    }
 
     // MARK: - UI
 
-    private func buildUI() -> NSView {
+    func buildUI() -> NSView {
         // ——— Левая колонка: параметры ———
         folderField.placeholderString = "Выберите видеофайл (MP4)"
         folderField.font = NSFont.systemFont(ofSize: 12)
@@ -1773,1131 +1099,126 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
         return root
     }
 
-    private func setStatus(_ text: String, ok: Bool) {
-        statusLabel.stringValue = text
-        statusLabel.textColor = ok ? .labelColor : .systemRed
-    }
 
     // MARK: - Действия
 
     /// Выбор одного или нескольких видеофайлов (MP4/MOV).
-    @objc private func chooseVideo() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-        panel.allowsMultipleSelection = true
-        panel.prompt = "Выбрать"
-        panel.allowedContentTypes = [.mpeg4Movie, .movie, .quickTimeMovie]
-        guard panel.runModal() == .OK else { return }
-        let urls = panel.urls
-        guard !urls.isEmpty else { return }
-        setSelectedVideos(urls)
-        saveSelection()
-    }
 
     /// Единая регистрация выбранных видео: список справа, поле «Файл:»,
     /// активность кнопки извлечения, показ первого видео. Используется и UI,
     /// и API — чтобы оба пути вели себя одинаково.
-    private func setSelectedVideos(_ urls: [URL]) {
-        guard !urls.isEmpty else { return }
-        videoURLs = urls   // порядок выбора сохраняется
-        renderVideoList()
-        if urls.count == 1 {
-            folderField.stringValue = urls[0].path
-        } else {
-            folderField.stringValue = "Выбрано MP4: \(urls.count) (порядок сохранится)"
-        }
-        extractButton.isEnabled = true
-        // Показ первого видео по центру, зациклено.
-        selectVideo(urls[0])
-    }
 
     /// Блок прогресса действия: [полоса | проценты | ETA]. Один вид для
     /// извлечения кадров, обучения и реконструкций. Ширина задаётся снаружи
     /// под карточку, полоса тянется на свободное место.
-    private func makeProgressBlock(bar: NSProgressIndicator,
-                                   percent: NSTextField,
-                                   eta: NSTextField?) -> NSStackView {
-        bar.style = .bar
-        bar.isIndeterminate = false
-        bar.minValue = 0
-        bar.maxValue = 1
-        bar.doubleValue = 0
-        bar.controlSize = .small
-        bar.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        bar.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        percent.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
-        percent.textColor = .secondaryLabelColor
-        percent.alignment = .right
-        percent.widthAnchor.constraint(equalToConstant: 40).isActive = true
-
-        var views: [NSView] = [bar, percent]
-        if let eta = eta {
-            eta.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
-            eta.textColor = .tertiaryLabelColor
-            eta.alignment = .right
-            eta.widthAnchor.constraint(equalToConstant: 64).isActive = true
-            views.append(eta)
-        }
-        let row = NSStackView(views: views)
-        row.orientation = .horizontal
-        row.spacing = 8
-        row.alignment = .centerY
-        row.isHidden = true
-        return row
-    }
 
     /// Прогресс извлечения — под кнопкой «Вытащить кадры».
-    private func setExtractProgress(_ p: Double, done: Int, total: Int) {
-        let clamped = min(max(0, p), 1)
-        extractProgressBar.doubleValue = clamped
-        extractPercentLabel.stringValue = String(format: "%d%%", Int(clamped * 100))
-        updateETALabel(extractEtaLabel,
-                       elapsed: Date().timeIntervalSince(extractStartTime),
-                       done: done, total: total)
-    }
 
     /// Прогресс обучения — под кнопкой «Обучить VAE».
-    private func setTrainProgress(_ p: Double, done: Int, total: Int) {
-        let clamped = min(max(0, p), 1)
-        trainProgressBar.doubleValue = clamped
-        trainPercentLabel.stringValue = String(format: "%d%%", Int(clamped * 100))
-        updateETALabel(trainEtaLabel,
-                       elapsed: Date().timeIntervalSince(trainStartTime),
-                       done: done, total: total)
-    }
 
     /// Раз в секунду проверяем, живой ли тренировочный цикл: если отчётов
     /// о шагах давно нет, спиннер останавливается и строка честно говорит,
     /// сколько секунд нет прогресса.
-    private func startTrainHeartbeat() {
-        trainHeartbeatTimer?.invalidate()
-        trainHeartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.refreshTrainLiveStatus()
-        }
-    }
 
-    private func stopTrainHeartbeat() {
-        trainHeartbeatTimer?.invalidate()
-        trainHeartbeatTimer = nil
-    }
 
-    private func refreshTrainLiveStatus() {
-        guard isTraining, let last = lastTrainStepAt else { return }
-        let since = Date().timeIntervalSince(last)
-        let phase = trainLivePhase(secondsSinceStep: since,
-                                   stepSeconds: lastTrainReport?.secondsPerStep)
-        let stage = lastTrainReport?.stage ?? .training
-        trainStateLabel.stringValue = trainLiveStateText(phase: phase, stage: stage)
-        switch phase {
-        case .running:
-            trainStateLabel.textColor = .labelColor
-            trainSpinner.startAnimation(nil)
-        case .waiting:
-            trainStateLabel.textColor = .secondaryLabelColor
-            trainSpinner.startAnimation(nil)
-        case .stalled:
-            trainStateLabel.textColor = .systemOrange
-            trainSpinner.stopAnimation(nil)
-        }
-    }
 
     /// Прогресс реконструкций — отдельная строка под прогрессом обучения.
-    private func setReconsProgress(_ p: Double) {
-        let clamped = min(max(0, p), 1)
-        reconsProgressBar.doubleValue = clamped
-        reconsPercentLabel.stringValue = String(format: "%d%%", Int(clamped * 100))
-    }
 
     /// Обновление прогноза времени (ETA) рядом с прогрессбаром действия.
     /// Считается линейно: (затраченное / сделано) × осталось.
-    private func updateETALabel(_ label: NSTextField, elapsed: TimeInterval, done: Int, total: Int) {
-        guard done > 0, total > 0 else {
-            label.stringValue = "—"
-            return
-        }
-        let remaining = elapsed / Double(done) * Double(max(0, total - done))
-        label.stringValue = "≈ " + formatDuration(remaining)
-    }
 
-    private func formatDuration(_ seconds: TimeInterval) -> String {
-        let s = Int(seconds.rounded())
-        if s < 60 { return "\(s) с" }
-        let m = s / 60
-        if m < 60 { return "\(m) мин" }
-        return "\(m / 60) ч \(m % 60) мин"
-    }
 
     /// Текущий тепловой уровень macOS (для /api/state и контроля нагрева).
-    private func thermalStateName() -> String {
-        switch ProcessInfo.processInfo.thermalState {
-        case .nominal: return "nominal"
-        case .fair: return "fair"
-        case .serious: return "serious"
-        case .critical: return "critical"
-        @unknown default: return "unknown"
-        }
-    }
 
     /// Рендер списка выбранных видео в правой колонке (имя + удалить).
-    private func renderVideoList() {
-        for v in videoListStack.arrangedSubviews { videoListStack.removeArrangedSubview(v); v.removeFromSuperview() }
-        for (i, url) in videoURLs.enumerated() {
-            let name = NSTextField(labelWithString: url.lastPathComponent)
-            name.font = NSFont.systemFont(ofSize: 11)
-            name.textColor = .secondaryLabelColor
-            name.lineBreakMode = .byTruncatingMiddle
-            name.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-            let del = NSButton(title: "", target: self, action: #selector(removeVideo(_:)))
-            del.tag = i
-            del.isBordered = false
-            del.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Удалить из списка")
-            del.contentTintColor = .tertiaryLabelColor
-            del.widthAnchor.constraint(equalToConstant: 20).isActive = true
-            del.heightAnchor.constraint(equalToConstant: 20).isActive = true
-
-            let row = NSStackView(views: [name, del])
-            row.orientation = .horizontal
-            row.spacing = 8
-            row.alignment = .centerY
-            videoListStack.addArrangedSubview(row)
-        }
-    }
 
     /// Удаление видео из выбранного списка (кнопка × в правой колонке).
-    @objc private func removeVideo(_ sender: NSButton) {
-        guard sender.tag >= 0, sender.tag < videoURLs.count else { return }
-        videoURLs.remove(at: sender.tag)
-        saveSelection()
-        if videoURLs.isEmpty {
-            folderField.stringValue = ""
-            extractButton.isEnabled = false
-            videoEmptyState.isHidden = false
-        } else {
-            folderField.stringValue = videoURLs.count == 1
-                ? videoURLs[0].path
-                : "Выбрано MP4: \(videoURLs.count) (порядок сохранится)"
-            selectVideo(videoURLs[0])
-        }
-        renderVideoList()
-    }
 
-    private func selectVideo(_ url: URL) {
-        videoEmptyState.isHidden = true
-        looper?.disableLooping()
-        queuePlayer.pause()
-        queuePlayer.removeAllItems()
-        let item = AVPlayerItem(url: url)
-        looper = AVPlayerLooper(player: queuePlayer, templateItem: item)
-        // Без автозапуска: воспроизведение — по кнопке плеера.
-        setStatus("Видео выбрано. Нажмите «Вытащить кадры»", ok: true)
-    }
 
-    private func saveSelection() {
-        let paths = videoURLs.map { $0.path }
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("YumeLayers", isDirectory: true)
-            .appendingPathComponent("last_video.json")
-        if let data = try? JSONSerialization.data(withJSONObject: ["videos": paths]) {
-            try? data.write(to: url)
-        }
-    }
 
-    private func restoreSelection() {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("YumeLayers", isDirectory: true)
-            .appendingPathComponent("last_video.json")
-        guard let data = try? Data(contentsOf: url),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let arr = obj["videos"] as? [String], !arr.isEmpty else { return }
-        let urls = arr.map { URL(fileURLWithPath: $0) }
-        setSelectedVideos(urls)
-    }
 
-    @objc private func extractFrames() {
-        guard !videoURLs.isEmpty else { return }
-        // Лимит для теста: 0 — все кадры, N — первые N кадров подряд.
-        let limit = max(0, extractLimitCtl.intValue(def: 0))
-        // Если в редакторе уже есть кадры — спрашиваем: обнулить или добавить.
-        if framesStore.isEmpty {
-            startExtraction(urls: videoURLs, append: false, maxFrames: limit)
-            return
-        }
-        let alert = NSAlert()
-        alert.messageText = "В редакторе уже есть кадры (\(framesStore.count))"
-        alert.informativeText = "Обнулить и извлечь заново или добавить новые кадры к текущим?"
-        alert.addButton(withTitle: "Добавить к текущим")
-        alert.addButton(withTitle: "Обнулить")
-        alert.addButton(withTitle: "Отмена")
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            startExtraction(urls: videoURLs, append: true, maxFrames: limit)
-        case .alertSecondButtonReturn:
-            startExtraction(urls: videoURLs, append: false, maxFrames: limit)
-        default:
-            break
-        }
-    }
 
-    @objc private func stopExtraction() {
-        guard isExtracting else { return }
-        extractCancelled = true
-        currentExtractor?.cancel()
-        setStatus("Остановка извлечения…", ok: false)
-        log("=== Остановка извлечения ===")
-    }
 
-    @objc private func carouselPagePrev() { changeCarouselPage(-1) }
-    @objc private func carouselPageNext() { changeCarouselPage(1) }
-    @objc private func carouselPageFirst() {
-        let pages = max(1, (framesStore.count + pageSize - 1) / pageSize)
-        carouselPage = edgePage(current: carouselPage, pages: pages, toStart: true)
-        selectedFrameIndex = carouselPage * pageSize
-        renderCollagePage()
-    }
-    @objc private func carouselPageLast() {
-        let pages = max(1, (framesStore.count + pageSize - 1) / pageSize)
-        carouselPage = edgePage(current: carouselPage, pages: pages, toStart: false)
-        selectedFrameIndex = carouselPage * pageSize
-        renderCollagePage()
-    }
 
-    @objc private func sourceSwitchChanged(_ sender: NSSegmentedControl) {
-        showRecon = sender.selectedSegment == 1
-        renderCollagePage()
-    }
 
     /// Переключение страницы пагинатора (по 9 кадров: большая + 9 малых).
-    private func changeCarouselPage(_ d: Int) {
-        let total = framesStore.count
-        let pages = max(1, (total + pageSize - 1) / pageSize)
-        carouselPage = min(max(0, carouselPage + d), pages - 1)
-        selectedFrameIndex = carouselPage * pageSize
-        renderCollagePage()
-    }
 
     /// Клик по кружочку-странице.
-    @objc private func pageDotClicked(_ sender: NSButton) {
-        let pages = max(1, (framesStore.count + pageSize - 1) / pageSize)
-        let visible = paginatorVisiblePages(current: carouselPage, pages: pages, limit: fittedDotCount())
-        guard sender.tag >= 0, sender.tag < visible.count else { return }
-        carouselPage = visible[sender.tag]
-        selectedFrameIndex = carouselPage * pageSize
-        renderCollagePage()
-    }
 
     /// Сколько кружочков реально влезает в строку пагинатора.
     /// Считаем от фактической ширины строки (колонка минус отступы 24+24),
     /// а не от ширины самой строки: иначе кружочки распирают строку, строка
     /// «видит» большую ширину и показывает ещё больше кружков — колонка растёт.
-    private func fittedDotCount() -> Int {
-        let dot = paginatorDotWidth(pageNumber: carouselPage + 1)
-        let rowWidth = paginatorRowWidth(columnWidth: Double(centerColumnWidth()))
-        let n = dotCapacity(columnWidth: rowWidth, dotWidth: dot)
-        return max(1, min(pageDots.count, n))
-    }
 
     /// Ширина центральной колонки из фактической ширины окна:
     /// (контент − левая колонка 440 − два разделителя по 1) / 2.
-    private func centerColumnWidth() -> CGFloat {
-        let content = window?.contentView?.bounds.width ?? 1360
-        return max(320, (content - 442) / 2)
-    }
 
     /// Рендер кружочков-страниц: столько, сколько влезает по ширине,
     /// активная выделена. Ширина кружочка адаптивная: под число цифр
     /// (например «1000» не влезает в 28 pt — расширяем и делаем овал).
-    private func renderPageDots(pages: Int) {
-        let limit = fittedDotCount()
-        let visible = paginatorVisiblePages(current: carouselPage, pages: pages, limit: limit)
-        for (i, b) in pageDots.enumerated() {
-            if i < visible.count {
-                let page = visible[i]
-                b.isHidden = false
-                b.isEnabled = true
-                let active = page == carouselPage
-                let label = "\(page + 1)"
-                // Ширина овала — из той же чистой функции, по которой
-                // считается вместимость: цифры номера не обрезаются.
-                let width = CGFloat(paginatorDotWidth(pageNumber: page + 1))
-                if i < dotWidthConstraints.count {
-                    dotWidthConstraints[i].constant = width
-                }
-                b.layer?.cornerRadius = 14   // овал: в 28 pt — круг, шире — овал
-                b.layer?.backgroundColor = active
-                    ? NSColor.systemBlue.cgColor
-                    : NSColor.clear.cgColor
-                let name: NSColor = active ? .white : .secondaryLabelColor
-                b.attributedTitle = NSAttributedString(string: label,
-                                                       attributes: [.foregroundColor: name])
-            } else {
-                b.isHidden = true
-                b.isEnabled = false
-                b.layer?.backgroundColor = NSColor.clear.cgColor
-            }
-        }
-    }
 
     /// Извлечение кадров из одного или нескольких MP4.
     /// Кадры нумеруются строго по порядку файлов (глобально), чтобы движение
     /// можно было привязать к seed'у.
     /// - `append`: false — очистить старые кадры; true — продолжить нумерацию с текущих.
     /// - `maxFrames`: лимит кадров (0 — авто от доступной памяти).
-    private func startExtraction(urls: [URL], append: Bool, maxFrames: Int = 0) {
-        guard !isExtracting, !isTraining, !isReconstructing, !urls.isEmpty else { return }
-        isExtracting = true
-        extractCancelled = false
-        api.setExtractingActive(true)
-        extractButton.isEnabled = false
-        stopExtractButton.isEnabled = true
-        trainButton.isEnabled = false
-        // Прогресс — рядом с кнопкой «Вытащить кадры».
-        extractProgressBlock.isHidden = false
-        extractProgressBar.doubleValue = 0
-        extractPercentLabel.stringValue = "0%"
-        extractEtaLabel.stringValue = "…"
-        setStatus("Извлечение кадров…", ok: true)
-        if !append { clearCarousel() }
-        let initialFrameCount = framesStore.count
-        extractedCount = 0
-        skippedBlackTotal = 0
-        extractStartTime = Date()
-        resetExtractBatch()
-        startExtractFlushTimer()
-        log("=== Извлечение кадров ===")
-        for (i, u) in urls.enumerated() {
-            log("Видео \(i + 1)/\(urls.count): \(u.lastPathComponent)")
-        }
-
-        log("extract: urls=\(urls.count), append=\(append), maxFrames=\(maxFrames) (первые N кадров)")
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            // Лимит — общий на всю операцию: раздаём его видео по порядку.
-            // 0 означает «все кадры», поэтому отдельный массив нужен, чтобы
-            // после исчерпания лимита не запускать оставшиеся видео.
-            var videoLimits: [Int] = []
-            if maxFrames > 0 {
-                var remaining = maxFrames
-                for u in urls {
-                    guard remaining > 0 else { videoLimits.append(0); continue }
-                    let count = FrameExtractor(
-                        url: u,
-                        options: FrameExtractor.Options(maxFrames: remaining)
-                    ).estimatedCount()
-                    let take = min(remaining, count)
-                    videoLimits.append(take)
-                    remaining -= take
-                }
-            } else {
-                videoLimits = urls.map { FrameExtractor(url: $0).estimatedCount() }
-            }
-            let totalAll = videoLimits.reduce(0, +)
-            guard totalAll > 0 else {
-                DispatchQueue.main.async {
-                    self.finishExtraction(.failure(FrameExtractError.unreadableAsset))
-                }
-                return
-            }
-            DispatchQueue.main.async { self.extractTotalAll = totalAll }
-
-            let sem = DispatchSemaphore(value: 0)
-            var lastResult: Result<Void, Error> = .success(())
-            var videoIndex = 0
-            var globalDone = 0
-            // При добавлении продолжаем нумерацию с текущего количества кадров.
-            var startIndex = initialFrameCount
-
-            for (i, u) in urls.enumerated() {
-                if DispatchQueue.main.sync(execute: { self.extractCancelled }) {
-                    lastResult = .failure(FrameExtractError.cancelled); break
-                }
-                let videoLimit = maxFrames > 0 ? videoLimits[i] : 0
-                if maxFrames > 0 && videoLimit <= 0 { continue }
-                videoIndex = i
-                DispatchQueue.main.async {
-                    self.setStatus("Извлечение: видео \(i + 1)/\(urls.count)", ok: true)
-                }
-                let extractor = FrameExtractor(url: u, options: FrameExtractor.Options(maxFrames: videoLimit, startIndex: startIndex))
-                DispatchQueue.main.sync {
-                    self.currentExtractor = extractor
-                    if self.extractCancelled { extractor.cancel() }
-                }
-                // 1 кадр в секунду видео = каждый round(fps)-й кадр этого видео.
-                let fps = extractor.frameRate()
-                extractor.run(
-                    onFrame: { [weak self] idx, _, ordinal, jpeg in
-                        guard let self = self else { return }
-                        globalDone += 1
-                        // Только складываем в буфер: интерфейс забирает
-                        // кадры пачками по таймеру, а не на каждый кадр.
-                        let name = String(format: "frame_%04d.jpg", ordinal)
-                        self.enqueueExtractedFrame(
-                            name: name, jpeg: jpeg, source: u.lastPathComponent,
-                            // Контрольная выборка: первый кадр каждой секунды видео.
-                            isControl: isControlFrame(index: idx, fps: fps))
-                    },
-                    progress: { [weak self] p in
-                        self?.storeExtractProgress(p, done: Int(p * Double(totalAll)))
-                    },
-                    completion: { result in
-                        DispatchQueue.main.async { self.skippedBlackTotal += extractor.skippedLeadingBlack }
-                        lastResult = result
-                        sem.signal()
-                    })
-                sem.wait()
-                if case .failure = lastResult { break }
-                startIndex = initialFrameCount + globalDone
-            }
-
-            _ = videoIndex
-            DispatchQueue.main.async {
-                self.finishExtraction(lastResult)
-            }
-        }
-    }
 
     /// Финализация извлечения: общий статус, кнопки, лог.
-    private func finishExtraction(_ result: Result<Void, Error>) {
-        stopExtractFlushTimer()
-        // Забираем остаток буфера, чтобы ни один кадр не потерялся.
-        flushExtractBatch(force: true)
-        isExtracting = false
-        currentExtractor = nil
-        api.setExtractingActive(false)
-        extractButton.isEnabled = true
-        stopExtractButton.isEnabled = false
-        trainButton.isEnabled = true
-        // Прогресс извлечения закончен — результат остаётся в строке статуса.
-        extractProgressBlock.isHidden = true
-        switch result {
-        case .success:
-            setStatus("Извлечено кадров: \(extractedCount)", ok: true)
-            log("=== Извлечение завершено: \(extractedCount) кадров в строгом порядке ===")
-            log("Кадры хранятся в памяти (без записи на диск)")
-            if skippedBlackTotal > 0 {
-                log("Пропущено чёрных кадров в начале видео: \(skippedBlackTotal)")
-            }
-            autoTuneParams(frames: framesStore.count)
-            // Остаёмся на первой странице: в коллаже первые 10 кадров,
-            // остальные доступны через пагинацию.
-            if !framesStore.isEmpty {
-                carouselPage = 0
-                selectedFrameIndex = min(pageSize - 1, framesStore.count - 1)
-                renderCollagePage()
-            }
-        case .failure(FrameExtractError.cancelled):
-            setStatus("Извлечение остановлено", ok: false)
-            log("=== Извлечение остановлено: \(extractedCount) кадров ===")
-        case .failure(let e):
-            setStatus("Извлечение прервано", ok: false)
-            log("Ошибка извлечения: \(e.localizedDescription)")
-        }
-    }
 
     /// Кладём кадр в буфер, который main thread забирает пачками.
     /// Вызывается из фонового потока извлечения — без обновления UI.
-    private func enqueueExtractedFrame(name: String, jpeg: Data, source: String,
-                                       isControl: Bool) {
-        pendingExtractLock.lock()
-        pendingExtractFrames.append(PendingExtractFrame(name: name, jpeg: jpeg,
-                                                        source: source,
-                                                        isControl: isControl))
-        pendingExtractLock.unlock()
-    }
 
-    private func storeExtractProgress(_ p: Double, done: Int) {
-        pendingExtractLock.lock()
-        pendingExtractProgress = p
-        pendingExtractDone = done
-        pendingExtractLock.unlock()
-    }
 
-    private func resetExtractBatch() {
-        pendingExtractLock.lock()
-        pendingExtractFrames.removeAll()
-        pendingExtractProgress = 0
-        pendingExtractDone = 0
-        pendingExtractLock.unlock()
-        extractTotalAll = 0
-        lastExtractFlush = Date.distantPast
-        flushedFirstExtractBatch = false
-    }
 
     /// Таймер на main thread забирает накопленные кадры пачками.
     /// 200 мс достаточно, чтобы первые кадры появились почти сразу,
     /// и при этом на 44 000 кадров не приходится 44 000 обновлений UI.
-    private func startExtractFlushTimer() {
-        stopExtractFlushTimer()
-        lastExtractFlush = Date()
-        let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
-            self?.flushExtractBatch()
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        extractFlushTimer = timer
-    }
 
-    private func stopExtractFlushTimer() {
-        extractFlushTimer?.invalidate()
-        extractFlushTimer = nil
-    }
 
     /// Забирает пачку из буфера и добавляет кадры в интерфейс.
     /// - Parameter force: забрать всё, даже неполную пачку (финализация/остановка).
-    private func flushExtractBatch(force: Bool = false) {
-        let now = Date()
-        let elapsedMs = now.timeIntervalSince(lastExtractFlush) * 1000
-
-        pendingExtractLock.lock()
-        let pending = pendingExtractFrames.count
-        let due = force || extractBatch.shouldFlush(pending: pending,
-                                                    sinceLastFlushMs: elapsedMs,
-                                                    flushedFirstBatch: flushedFirstExtractBatch)
-        var batch: [PendingExtractFrame] = []
-        if due && pending > 0 {
-            batch = pendingExtractFrames
-            pendingExtractFrames.removeAll(keepingCapacity: true)
-        }
-        let progress = pendingExtractProgress
-        let done = pendingExtractDone
-        pendingExtractLock.unlock()
-
-        if !batch.isEmpty {
-            lastExtractFlush = now
-            flushedFirstExtractBatch = true
-            appendExtractedFrames(batch)
-        }
-        // Прогресс обновляем на тике таймера, а не на каждый кадр.
-        setExtractProgress(progress, done: done, total: extractTotalAll)
-        api.updateExtractProgress(progress)
-    }
 
     /// Добавление пачки кадров в память. `processed` = true только когда кадр
     /// обработан моделью (тогда ставится галочка ✓).
-    private func appendExtractedFrames(_ batch: [PendingExtractFrame]) {
-        let totalBefore = framesStore.count
-        for item in batch {
-            framesStore.append(MemoryFrame(name: item.name, jpeg: item.jpeg,
-                                           source: item.source))
-            processedFrames.append(false)
-            if item.isControl {
-                controlFramesStore.append(MemoryFrame(name: item.name, jpeg: item.jpeg,
-                                                      source: item.source))
-            }
-        }
-        extractedCount += batch.count
-        if selectedFrameIndex < 0 && !framesStore.isEmpty {
-            selectedFrameIndex = 0
-        }
-        // Пока заполняется первая страница — показываем кадры по мере
-        // поступления. Дальше только пагинация: остальные кадры грузятся
-        // по клику, а не на каждый извлечённый кадр.
-        if extractBatch.shouldRenderCollage(page: carouselPage,
-                                            totalBefore: totalBefore,
-                                            totalAfter: framesStore.count,
-                                            pageSize: pageSize) {
-            renderCollagePage()
-        } else {
-            updatePagination()
-        }
-    }
 
-    private func clearCarousel() {
-        reconMemory.removeAll()
-        framesStore.removeAll()
-        controlFramesStore.removeAll()
-        processedFrames.removeAll()
-        selectedFrameIndex = -1
-        carouselPage = 0
-        renderCollagePage()
-    }
 
     /// Путь к реконструкции того же кадра (recons/frame_XXXX.jpg).
     /// PNG-данные реконструкции кадра из памяти (nil, если ещё нет).
-    private func reconData(for name: String) -> Data? {
-        reconMemory[name]
-    }
 
     /// Рендер коллажа: большая (выбранная) + 9 малых текущей страницы.
-    private func renderCollagePage() {
-        framesChip.setCount(framesStore.count)
-        guard collageThumbs.count == 10 else { return }
-        let total = framesStore.count
-        collageEmpty.isHidden = total > 0
-        let pages = max(1, (total + pageSize - 1) / pageSize)
-        carouselPage = min(max(0, carouselPage), pages - 1)
-        let start = carouselPage * pageSize
-        let end = min(start + pageSize, total)
-
-        for (slot, btn) in collageThumbs.enumerated() {
-            let off = frameOffset(forSlot: slot)
-            let idx = start + off
-            if idx < end {
-                if showRecon {
-                    // В режиме реконструкции ВСЕ миниатюры — реконструкции
-                    // тех же номеров кадров, что и в оригинале (из памяти).
-                    let rd = reconData(for: framesStore[idx].name)
-                    btn.image = rd.map { NSImage(data: $0) } ?? nil
-                    btn.toolTip = "Реконструкция кадра \(idx + 1)"
-                    btn.isEnabled = true
-                    btn.contentTintColor = nil
-                    thumbBadges[slot].isHidden = true
-                } else {
-                    btn.image = NSImage(data: framesStore[idx].jpeg)
-                    btn.toolTip = "Кадр \(idx + 1)"
-                    btn.isEnabled = true
-                    btn.contentTintColor = nil
-                    // Галочка — ТОЛЬКО после обработки моделью.
-                    thumbBadges[slot].isHidden = !processedFrames[idx]
-                }
-            } else {
-                btn.image = nil
-                btn.isEnabled = false
-                thumbBadges[slot].isHidden = true
-            }
-        }
-
-        if total > 0 {
-            let sel = min(max(0, selectedFrameIndex), total - 1)
-            selectedFrameIndex = sel
-            if showRecon {
-                // Реконструкция с тем же номером кадра (из памяти).
-                let reconData = reconData(for: framesStore[sel].name)
-                if let rd = reconData, let img = NSImage(data: rd) {
-                    collageBig.image = img
-                    collageBig.toolTip = "Реконструкция кадра \(sel + 1)"
-                    collageBigBadge.isHidden = false
-                } else {
-                    collageBig.image = nil
-                    collageBig.toolTip = "Реконструкция кадра \(sel + 1) появится после обучения"
-                    collageBigBadge.isHidden = true
-                }
-            } else {
-                collageBig.image = NSImage(data: framesStore[sel].jpeg)
-                collageBig.toolTip = "Кадр \(sel + 1)"
-                collageBigBadge.isHidden = !processedFrames[sel]
-            }
-        } else {
-            collageBig.image = nil
-            collageBigBadge.isHidden = true
-        }
-
-        renderPageDots(pages: pages)
-        carouselPrev.isEnabled = carouselPage > 0
-        carouselNext.isEnabled = carouselPage < pages - 1
-        carouselFirst.isEnabled = carouselPage > 0
-        carouselLast.isEnabled = carouselPage < pages - 1
-    }
 
     /// Обновляет счётчик кадров и пагинацию, не трогая картинки.
     /// Используется во время извлечения: новые кадры сразу доступны
     /// по страницам, но коллаж не перерисовывается на каждый кадр.
-    private func updatePagination() {
-        framesChip.setCount(framesStore.count)
-        let total = framesStore.count
-        let pages = max(1, (total + pageSize - 1) / pageSize)
-        carouselPage = min(max(0, carouselPage), pages - 1)
-        renderPageDots(pages: pages)
-        carouselPrev.isEnabled = carouselPage > 0
-        carouselNext.isEnabled = carouselPage < pages - 1
-        carouselFirst.isEnabled = carouselPage > 0
-        carouselLast.isEnabled = carouselPage < pages - 1
-    }
 
     /// Клик по малому кадру — ставит его в центр коллажа.
-    @objc private func thumbClicked(_ sender: NSButton) {
-        let off = frameOffset(forSlot: sender.tag)
-        let idx = carouselPage * pageSize + off
-        guard idx >= 0, idx < framesStore.count else { return }
-        selectedFrameIndex = idx
-        renderCollagePage()
-    }
 
     /// Рендер собственного окна в PNG (для диагностики интерфейса).
-    private func makeScreenshot() -> String? {        guard let content = window.contentView else { return nil }
-        content.layoutSubtreeIfNeeded()
-        let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds)!
-        content.cacheDisplay(in: content.bounds, to: rep)
-        guard let data = rep.representation(using: .png, properties: [:]) else { return nil }
-        let path = "/tmp/yume_window_shot.png"
-        do {
-            try data.write(to: URL(fileURLWithPath: path))
-            return path
-        } catch {
-            return nil
-        }
-    }
 
-    @objc private func startTraining() {
-        startTraining(maxFrames: 0, resume: false)
-    }
 
     /// Запуск обучения. `maxFrames` > 0 — учиться только на первых N кадрах
     /// (для тестов вместо полного датасета). 0 — все кадры.
     /// `resume` = true — продолжить с существующего чекпоинта без диалога
     /// (используется API; в UI решение принимает человек).
-    private func startTraining(maxFrames: Int, resume: Bool) {
-        log("startTraining(maxFrames=\(maxFrames), resume=\(resume))")
-        log("guards: isTraining=\(isTraining) isReconstructing=\(isReconstructing) isExtracting=\(isExtracting) sheet=\(window.attachedSheet != nil)")
-        guard !isTraining, !isReconstructing, !isExtracting, window.attachedSheet == nil else { return }
-        window.makeFirstResponder(nil)
-        var p = Params()
-        // Размер обучения читается из полей как есть. Кадры в памяти
-        // остаются полноразмерными: VAE декодирует их сразу в этот размер.
-        p.width = widthCtl.intValue(def: 80)
-        p.height = heightCtl.intValue(def: 56)
-        guard p.width >= 8, p.height >= 8, p.width <= 8192, p.height <= 8192 else {
-            log("Недопустимый размер обучения: \(p.width)×\(p.height) — допустимо 8…8192")
-            return
-        }
-        p.epochs = max(1, epochsCtl.intValue(def: 20))
-        p.steps = max(1, stepsCtl.intValue(def: 20))
-        p.batch = max(1, batchCtl.intValue(def: 1))
-        p.lr = Float(lrCtl.doubleValue(def: 0.0005))
-        p.pauseMs = max(0, pauseCtl.intValue(def: 250))
-        // Поле читается как есть; ограничиваем только физическим пределом,
-        // чтобы интерфейс не обещал недостижимое.
-        p.gpuPowerPercent = min(max(powerCtl.intValue(def: defaultGpuPowerPercent), 10),
-                                Int(safeDutyCap * 100))
-        p.resume = resumeSwitch.state == .on
-        if resume { p.resume = true }   // API: продолжить с чекпоинта без диалога
-        p.adaptiveThrottle = adaptiveSwitch.state == .on
-        p.convPath = (convPathCtl.stringValue as NSString).expandingTildeInPath
-
-        guard p.lr.isFinite, p.lr > 0, p.lr <= 1,
-              p.epochs <= 100_000, p.steps <= 1_000_000, p.batch <= 16 else {
-            log("Недопустимые параметры: lr должен быть (0, 1], батч 1…16, эпох ≤ 100000, шагов ≤ 1000000")
-            return
-        }
-
-        // Подготовка чекпоинта: при resume=false старый чекпоинт удаляется
-        // (с бэкапом), и обучение всегда начинается с новых весов — без
-        // диалогов. При resume=true файл сохраняется для дообучения.
-        switch prepareCheckpointForTraining(convPath: p.convPath, resume: p.resume) {
-        case .keep:
-            log("Режим: продолжение с чекпоинта")
-        case .fresh:
-            log("Чекпоинт отсутствует — обучение начнётся с новых весов")
-        case .removed(let backup):
-            log("Старый чекпоинт удалён — обучение с нуля (бэкап: \(backup))")
-        }
-
-        startTrainingInternal(p, maxFrames: maxFrames)
-    }
 
     /// Единая точка входа обучения: и кнопка «Обучить», и API вызывают её.
     /// Кадры для обучения всегда берутся из памяти (единый источник).
     /// `maxFrames` > 0 — обучаться только на первых N кадрах.
-    private func startTrainingInternal(_ pIn: Params, maxFrames: Int = 0) {
-        guard !isTraining, !isReconstructing else { return }
-        // Нельзя запускать обучение, пока идёт раскадровка: оба процесса
-        // будут мешать друг другу (кнопка «Стоп» извлечения оставалась бы
-        // активной, а GPU был бы перегружен).
-        guard !isExtracting else {
-            log("Обучение нельзя запустить во время извлечения кадров — дождитесь завершения")
-            return
-        }
-        var p = pIn
-        if maxFrames > 0 {
-            let limit = min(maxFrames, framesStore.count)
-            guard limit > 0 else {
-                log("Обучение: нет кадров для лимита \(maxFrames)")
-                return
-            }
-            p.memoryFrames = Array(framesStore.prefix(limit))
-            let names = Set(p.memoryFrames!.map { $0.name })
-            p.controlFrames = controlFramesStore.filter { names.contains($0.name) }
-            log("Обучение ограничено первыми \(limit) кадрами из \(framesStore.count)")
-        } else {
-            p.memoryFrames = framesStore.isEmpty ? nil : framesStore
-            // Контрольная выборка (1 кадр/сек) для реконструкций на итоговой модели.
-            p.controlFrames = controlFramesStore.isEmpty ? nil : controlFramesStore
-        }
-        lastParams = p
-        TrainingControl.shared.reset()
-        isTraining = true
-        api.setTrainingActive(true, totalEpochs: p.epochs)
-        trainButton.isEnabled = false
-        stopButton.isEnabled = true
-        // Прогресс — рядом с кнопкой «Обучить VAE»; реконструкции ещё не идут.
-        trainProgressBlock.isHidden = false
-        trainProgressBar.doubleValue = 0
-        trainPercentLabel.stringValue = "0%"
-        trainEtaLabel.stringValue = "…"
-        // Живой индикатор: сразу показываем, что цикл запущен, и ждём первый шаг.
-        trainLiveBlock.isHidden = false
-        trainStateLabel.stringValue = "Обучение идёт"
-        trainStateLabel.textColor = .labelColor
-        trainFrameLabel.stringValue = "Ожидание первого шага…"
-        lastTrainStepAt = Date()
-        lastTrainReport = nil
-        trainSpinner.startAnimation(nil)
-        startTrainHeartbeat()
-        reconsProgressBlock.isHidden = true
-        reconsProgressBar.doubleValue = 0
-        reconsPercentLabel.stringValue = "0%"
-        trainStartTime = Date()
-        chart.reset()
-        epochCard.setValue("0")
-        lossCard.setValue("0")
-        psnrCard.setValue("0")
-        videoEmptyState.isHidden = false
-        // Кадры оригинала НЕ сбрасываются при старте обучения.
-        lastEpoch = 0
-        setStatus("Обучение…", ok: true)
-        log("=== Запуск обучения ===")
 
-        log(String(format: "Кадр %d×%d, эпох %d, шагов %d, батч %d, lr %.5f, пауза %d мс",
-                   p.width, p.height, p.epochs, p.steps, p.batch, p.lr, p.pauseMs))
-        // Термо-регулятор держит температуру GPU, а не просто «увеличивает паузы
-        // между эпохами»: пауза применяется на КАЖДОМ шаге.
-        log(String(format: "Термо-регулятор: потолок нагрузки %d%%, рабочая %.0f °C, стоп-порог %.0f °C",
-                   p.gpuPowerPercent, defaultTargetTempC, defaultMaxTempC))
-        log(p.adaptiveThrottle
-            ? "Авто-пауза при перегреве: включена (снижает нагрузку при подходе к стоп-порогу)"
-            : "Авто-пауза при перегреве: выключена (нагрузка держится постоянной)")
-        log("API: http://127.0.0.1:17851 (только локальные запросы)")
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                try trainConvVAE(
-                    p: p,
-                    onProgress: { ep, loss, psnr, previewPath in
-                        DispatchQueue.main.async {
-                            self.lastEpoch = ep
-                            let line = String(format: "эпоха %d: loss %.6f  psnr %.2f дБ", ep, loss, psnr)
-                            self.log(line)
-                            self.epochCard.setValue("\(ep + 1)/\(p.epochs)")
-                            self.lossCard.setValue(String(format: "%.4f", loss))
-                            self.psnrCard.setValue(String(format: "%.2f", psnr))
-                            self.chart.add(loss: loss, psnr: psnr)
-                            self.api.updateProgress(epoch: ep + 1, loss: loss, psnr: psnr,
-                                                   progress: Double(ep + 1) / Double(p.epochs))
-                            if let path = previewPath {
-                                // Обучение НЕ меняет список оригиналов (галочки/добавления
-                                // относятся только к обработанным моделью кадрам отдельного списка).
-                                self.api.setPreview(path: path)
-                            }
-                        }
-                    },
-                    onStep: { [weak self] report in
-                        DispatchQueue.main.async {
-                            guard let self = self else { return }
-                            self.lastTrainStepAt = Date()
-                            self.lastTrainReport = report
-                            // Полосу прогресса двигают только настоящие шаги.
-                            // Служебные отчёты (подготовка, догрузка окна VRAM)
-                            // приходят с done = 0, и раньше из-за них полоса
-                            // откатывалась на 0% каждые 1024 кадра.
-                            if report.done > 0 {
-                                let pv = Double(report.done) / Double(max(report.total, 1))
-                                self.setTrainProgress(pv, done: report.done, total: report.total)
-                            }
-                            self.trainFrameLabel.stringValue = trainLiveText(report)
-                            self.refreshTrainLiveStatus()
-                            // Периодический лог в «Журнал» (каждые 200 шагов),
-                            // чтобы было видно, что обучение идёт и на каком кадре.
-                            // Служебные отчёты (подготовка, догрузка VRAM) приходят
-                            // с done = 0 — их не пишем, иначе на каждое окно в
-                            // 1024 кадра журнал получает 64 строки «шаг 0».
-                            if shouldLogTrainStep(done: report.done, total: report.total) {
-                                let pct = Double(report.done) / Double(max(report.total, 1)) * 100
-                                let frameInfo = report.framesTotal > 0
-                                    ? " · кадр \(report.frame) из \(report.framesTotal)" : ""
-                                self.log(String(format: "обучение: шаг %d/%d (%.0f%%) · эпоха %d/%d%@",
-                                               report.done, report.total, pct,
-                                               report.epoch, report.epochs, frameInfo))
-                            }
-                        }
-                    }
-                )
-                DispatchQueue.main.async {
-                    self.finishTraining(ok: true)
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.log("Ошибка: \(error.localizedDescription)")
-                    self.finishTraining(ok: false)
-                }
-            }
-        }
-    }
-
-    @objc private func stopTraining() {
-        TrainingControl.shared.cancel()
-        setStatus("Остановка…", ok: false)
-        log("=== Остановка по запросу ===")
-    }
 
     /// Авто-настройка «Эпохи»/«Шагов за эпоху» под фактическое число кадров.
     /// Поле подстраивается, пока пользователь не подтвердил своё значение
     /// вручную: шаги = число кадров (полный проход за эпоху),
     /// эпохи = 3…10 полных проходов (около 3000 сэмплов суммарно).
     /// Повторный запуск извлечения пересчитывает авто-поля под новый размер очереди.
-    private func autoTuneParams(frames: Int) {
-        let batch = max(1, batchCtl.intValue(def: 1))
-        let resume = resumeSwitch.state == .on
-        let currentSteps = max(1, stepsCtl.intValue(def: 20))
-        let currentEpochs = max(1, epochsCtl.intValue(def: 20))
-        let currentLr = Float(lrCtl.doubleValue(def: 0.0005))
-        // Чистая протестированная логика: resume=true → шаги/эпохи не
-        // пересчитываются, но LR авто-снижается (если не задан вручную).
-        let res = autoTuneValues(frames: frames, batch: batch, resume: resume,
-                                 currentSteps: currentSteps, currentEpochs: currentEpochs,
-                                 currentLr: currentLr,
-                                 stepsEditedByUser: stepsEditedByUser,
-                                 epochsEditedByUser: epochsEditedByUser,
-                                 lrEditedByUser: lrEditedByUser)
-        var applied = res.changed
-        if res.changed {
-            stepsCtl.setValue("\(res.steps)")
-            epochsCtl.setValue("\(res.epochs)")
-        }
-        if let lr = res.lr {
-            lrCtl.setValue(String(format: "%.6f", lr))
-            applied = true
-        }
-        if applied {
-            log("Авто-настройка под \(frames) кадров (батч \(batch), resume=\(resume)): \(res.epochs) эпох × \(res.steps) шагов, LR=\(lrCtl.stringValue)")
-        } else if resume {
-            log("Авто-расчёт: продолжение с чекпоинта — параметры не пересчитываются (все заданы вручную)")
-        }
-    }
 
     /// Кнопка «Авто-расчёт параметров»: пересчёт под текущие кадры.
-    @objc private func autoTuneNow() {
-        guard !framesStore.isEmpty else {
-            log("Авто-расчёт: нет кадров — сначала извлеките видео")
-            return
-        }
-        autoTuneParams(frames: framesStore.count)
-    }
 
-    @objc private func resetParams() {
-        epochsEditedByUser = false
-        stepsEditedByUser = false
-        lrEditedByUser = false
-        epochsCtl.setValue("20")
-        stepsCtl.setValue("20")
-        batchCtl.setValue("1")
-        widthCtl.setValue("80")
-        heightCtl.setValue("56")
-        lrCtl.setValue("0.0003")
-        pauseCtl.setValue("250")
-        powerCtl.setValue("90")
-        resumeSwitch.state = .off
-        adaptiveSwitch.state = .on
-        convPathCtl.setValue("~/YumeLayers/checkpoints/conv.safetensors")
-        log("Параметры сброшены к умолчаниям")
-    }
 
-    private func finishTraining(ok: Bool) {
-        isTraining = false
-        api.setTrainingActive(false, totalEpochs: 0)
-        trainButton.isEnabled = true
-        stopButton.isEnabled = false
-        // Прогресс и живой индикатор обучения закончены — их место занимает
-        // строка реконструкций.
-        stopTrainHeartbeat()
-        trainSpinner.stopAnimation(nil)
-        trainLiveBlock.isHidden = true
-        lastTrainStepAt = nil
-        lastTrainReport = nil
-        trainProgressBlock.isHidden = true
-        setStatus(ok ? "Обучение завершено" : "Обучение прервано", ok: ok)
-        log(ok ? "=== Завершено ===" : "=== Прервано ===")
-        if ok {
-            // После успешного обучения — реконструкции (контрольная выборка или все).
-            let p = lastParams
-            // Реконструкции идут в фоне: держим «Стоп» активной, чтобы можно было
-            // прервать их (реальная отмена в runReconsOn через TrainingControl).
-            TrainingControl.shared.reset()
-            self.isReconstructing = true
-            self.trainButton.isEnabled = false
-            self.stopButton.isEnabled = true
-            // Прогресс реконструкций — отдельной строкой под кнопками.
-            self.reconsProgressBlock.isHidden = false
-            self.reconsProgressBar.doubleValue = 0
-            self.reconsPercentLabel.stringValue = "0%"
-            self.setStatus("Реконструкции…", ok: true)
-            self.log("=== Запуск реконструкций ===")
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    let recon = try generateReconstructions(p: p) { dn, total in
-                        DispatchQueue.main.async {
-                            self.setReconsProgress(Double(dn) / Double(max(total, 1)))
-                        }
-                    }
-                    DispatchQueue.main.async {
-                        self.isReconstructing = false
-                        self.trainButton.isEnabled = true
-                        self.stopButton.isEnabled = false
-                        self.reconsProgressBlock.isHidden = true
-                        // Реконструкции — в памяти (без записи на диск).
-                        self.reconMemory = recon
-                        // Галочка ✓ ставится ТОЛЬКО здесь: кадр реально прошёл
-                        // через модель. Раньше processedFrames никогда не
-                        // становился true, и бейдж не появлялся вовсе.
-                        let marked = markProcessedFrames(
-                            names: self.framesStore.map { $0.name },
-                            reconNames: Set(recon.keys),
-                            processed: &self.processedFrames)
-                        if marked > 0 {
-                            self.log("Отмечено обработанных кадров: \(marked)")
-                        }
-                        self.log("Реконструкции: \(recon.count) кадров готовы (в памяти)")
-                        self.renderCollagePage()
-                        self.setStatus(TrainingControl.shared.isCancelled ? "Реконструкции остановлены" : "Обучение завершено. Реконструкции готовы", ok: !TrainingControl.shared.isCancelled)
-                    }
-                } catch {
-                    DispatchQueue.main.async {
-                        self.isReconstructing = false
-                        self.trainButton.isEnabled = true
-                        self.stopButton.isEnabled = false
-                        self.reconsProgressBlock.isHidden = true
-                        self.log("Ошибка реконструкций: \(error.localizedDescription)")
-                    }
-                }
-            }
-        }
-    }
 
-    private func log(_ s: String) {
-        api.appendLog(s)
-        let t = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-        let line = "[\(t)] \(s)\n"
-        logView.string += line
-        // ограничение длины журнала (защита от разрастания)
-        let lines = logView.string.components(separatedBy: "\n")
-        if lines.count > 1500 {
-            logView.string = lines.suffix(1500).joined(separator: "\n") + "\n"
-        }
-        logView.scrollToEndOfDocument(nil)
-        // Дублируем в файл, чтобы логи переживали перезапуски.
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("YumeLayers", isDirectory: true)
-            .appendingPathComponent("train.log")
-        if let handle = try? FileHandle(forWritingTo: url) {
-            handle.seekToEndOfFile()
-            handle.write(Data(line.utf8))
-            try? handle.close()
-        } else {
-            try? line.write(to: url, atomically: true, encoding: .utf8)
-        }
-    }
 
     /// Строка из core-кода (yumeLog): уже с меткой времени и уже записана в
     /// train.log — здесь только показываем её в журнале и отдаём через API.
-    private func appendCoreLog(_ s: String) {
-        api.appendLog(s)
-        logView.string += s + "\n"
-        let lines = logView.string.components(separatedBy: "\n")
-        if lines.count > 1500 {
-            logView.string = lines.suffix(1500).joined(separator: "\n") + "\n"
-        }
-        logView.scrollToEndOfDocument(nil)
-    }
 }
 
 let app = NSApplication.shared
