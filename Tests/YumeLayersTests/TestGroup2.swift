@@ -416,7 +416,6 @@ func testCodeGuideLimits() {
         "Sources/YumeLayersUI/main.swift",
     ]
     let knownLargeFuncs: Set<String> = [
-        "Sources/YumeLayersCore/TrainConvVAE.swift:9",
     ]
 
     // Корень репозитория.
