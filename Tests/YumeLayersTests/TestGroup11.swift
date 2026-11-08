@@ -249,3 +249,46 @@ func testTrainWithL1() {
     expect(lastLoss < firstLoss,
            "обучение с L1: loss снижается (\(String(format: "%.4f", firstLoss))→\(String(format: "%.4f", lastLoss)))")
 }
+
+func testTrainOnPatchesFullFrame() {
+    section("Этап 1: обучение на патчах → инференс полного кадра")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let session = GpuSession(engine)
+    let W = 320, H = 256
+    var rngBig = SplitMix64(seed: 5)
+    let bigFrame = makeSyntheticScene(w: W, h: H, rng: &rngBig)
+    let cw = 128, ch = 96   // кратны 8 → валидны для VAE
+    let beta: Float = 0.01
+    let lr: Float = 0.004
+    let steps = 300
+    let vae = ConvVAEGPU(engine: engine)
+
+    for step in 1...steps {
+        var rng = SplitMix64(seed: UInt64(step))
+        guard let cr = randomCrop(rgb: bigFrame, w: W, h: H,
+                                  cropW: cw, cropH: ch, rng: &rng) else {
+            expect(false, "кроп создан"); return
+        }
+        let chw = hwcToChw(cr.crop)
+        let x = GPUTensor(engine: engine, data: chw, rows: 3)
+        session.begin()
+        let c = vae.forward(session, image: x, w: cw, h: ch, deterministic: false, seed: 7)
+        let dR = session.encodeL1Grad(recon: c.recon, target: x)
+        let (_, g) = vae.backward(session, c, target: x, beta: beta, dReconOverride: dR)
+        vae.applyAdam(session, grads: g, t: step, lr: lr)
+        _ = session.end()
+    }
+
+    // Инференс полного кадра (без переобучения) — сеть полностью свёрточная.
+    let bigCHW = hwcToChw(bigFrame)
+    let xBig = GPUTensor(engine: engine, data: bigCHW, rows: 3)
+    session.begin()
+    let cBig = vae.forward(session, image: xBig, w: W, h: H, deterministic: true)
+    _ = session.end()
+    let fullRecon = cBig.recon.toArray()
+    expectEqual(fullRecon.count, W * H * 3, "инференс полного кадра: размер w×h×3")
+    let psnrFull = psnr(reference: bigFrame, candidate: chwToHwc(fullRecon))
+    expect(psnrFull.isFinite && psnrFull > 0, "инференс полного кадра: PSNR конечен и >0 (\(psnrFull))")
+    print("      инференс полного кадра \(W)×\(H): PSNR = \(String(format: "%.2f", psnrFull)) дБ")
+}

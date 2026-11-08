@@ -69,6 +69,9 @@
 - Шаг 3 (L1): `l1grad_kernel` + `session.encodeL1Grad` (GPU ≈ CPU, |Δ|=0),
   переключатель `lossKind` (Params/API), `dReconOverride` в trainConvVAE;
   обучение с L1 снижает loss 0.31→0.026. Sobel edge-loss — далее.
+- Шаг 4б (механика): обучение на патчах (`randomCrop` 128×96 из 320×256) +
+  инференс полного кадра без переобучения (полностью свёрточная сеть).
+  Тест `testTrainOnPatchesFullFrame`. Реальное обучение к G2 — далее.
 
 ## Открыто
 - G2 (hold-out на реальных данных 854×480, baseline SD-VAE) — после Этапа 1.

@@ -117,6 +117,7 @@ func runAll() {
         ("RandomCrop", testRandomCrop),
         ("GPU_L1Grad", testGPU_L1Grad),
         ("TrainWithL1", testTrainWithL1),
+        ("TrainOnPatches", testTrainOnPatchesFullFrame),
         ("VRAMBudget", testVRAMBudget),
         ("ProcessedMarks", testProcessedMarks),
         ("Reproducibility", testReproducibility),
