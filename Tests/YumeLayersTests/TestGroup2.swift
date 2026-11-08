@@ -413,7 +413,6 @@ func testCodeGuideLimits() {
     let maxFuncBody = 120
     // Долг — легаси, который план рефакторинга разбивает (см. ROADMAP.md).
     let knownOversized: Set<String> = [
-        "Sources/YumeLayersCore/MetalKernelSources.swift",
         "Sources/YumeLayersUI/main.swift",
     ]
     let knownLargeFuncs: Set<String> = [

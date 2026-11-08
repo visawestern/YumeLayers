@@ -170,7 +170,7 @@ public final class MetalEngine {
         }
     }
 
-    static let shaderSource = MetalKernels.shaderSource
+    static let shaderSource = MetalKernels.part0 + "\n" + MetalKernels.part1
 
     let matmulPS: MTLComputePipelineState
     let matmulTiledPS: MTLComputePipelineState

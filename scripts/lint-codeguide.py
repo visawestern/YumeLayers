@@ -28,7 +28,6 @@ MAX_FUNC_BODY = 120  # строк тела функции (жесткий ант
 # Долг: легаси-файлы сверх лимита. Пока не отрефакторены — разрешены,
 # но учитываются как технический долг (см. docs/ROADMAP.md, Фаза 8).
 KNOWN_OVERSIZED = {
-    "Sources/YumeLayersCore/MetalKernelSources.swift": "данные MSL-шейдера (не логика)",
     "Sources/YumeLayersUI/main.swift": "весь UI-контроллер (долг)",
 }
 
