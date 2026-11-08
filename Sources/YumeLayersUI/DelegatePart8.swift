@@ -10,56 +10,114 @@ extension YumeAppDelegate {
         // ——— Центральная колонка: метрики, текущее видео, обрабатываемый кадр ———
         statusLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
 
-        let metricsCol = NSStackView(views: [epochCard, lossCard, psnrCard])
-        metricsCol.orientation = .vertical
-        metricsCol.spacing = 6
-        metricsCol.alignment = .leading
-        // Компактные метрики вертикально, справа от списка видео.
-        for c in [epochCard, lossCard, psnrCard] {
-            c.heightAnchor.constraint(equalToConstant: 50).isActive = true
-            c.widthAnchor.constraint(equalToConstant: 136).isActive = true
-        }
+        let metricsCol = buildMetricsCol()
 
         // Карточка-медиа: фон, рамка, изображение + пустое состояние.
         // Высота задаётся снаружи (в процентах от центральной колонки).
 
 
-        // Плеер для выбранного MP4: воспроизведение по центру, зациклено.
-        playerView.player = queuePlayer
-        playerView.controlsStyle = .minimal
-        playerView.videoGravity = .resizeAspect
-        playerView.wantsLayer = true
-        playerView.layer?.cornerRadius = 10
-        playerView.layer?.masksToBounds = true
-        // Плеер НЕ имеет права диктовать размеры: он всегда вписывается в карточку.
-        playerView.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        playerView.setContentHuggingPriority(.defaultLow, for: .vertical)
-        playerView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        playerView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-        let videoEmpty = simpleEmpty("film", "Выберите видеофайл MP4 слева")
-        videoEmptyState = videoEmpty
-        let videoCard = mediaCard(playerView, videoEmpty)
-        videoMediaCard = videoCard
-
-        // Плеер для ГОТОВОГО видео (результат интерполяции).
-        resultPlayerView.player = resultQueuePlayer
-        resultPlayerView.controlsStyle = .minimal
-        resultPlayerView.videoGravity = .resizeAspect
-        resultPlayerView.wantsLayer = true
-        resultPlayerView.layer?.cornerRadius = 10
-        resultPlayerView.layer?.masksToBounds = true
-        resultPlayerView.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        resultPlayerView.setContentHuggingPriority(.defaultLow, for: .vertical)
-        resultPlayerView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        resultPlayerView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-        let resultEmpty = simpleEmpty("checkmark.video", "Готовое видео появится здесь после интерполяции")
-        resultEmptyState = resultEmpty
-        let resultCard = mediaCard(resultPlayerView, resultEmpty)
-        resultMediaCard = resultCard
-        resultCard.isHidden = true
+        let (videoCard, resultCard) = buildVideoPlayers()
 
         // ——— Коллаж кадров: большая + 9 вокруг (клик ставит кадр в центр) ———
 
+        let (collageCard, collageHeader, collageVStack, collageHStack) = buildCollage()
+
+
+        let center = buildCenterColumn(videoCard: videoCard, resultCard: resultCard, collageCard: collageCard, collageHeader: collageHeader)
+
+        let (rightPanel, topSplit, scroll, leftTop) = buildRightPanel(metricsCol: metricsCol)
+
+        let root = buildMainContainer(left: left, center: center, rightPanel: rightPanel, topSplit: topSplit, scroll: scroll, leftTop: leftTop)
+        layoutViews["center"] = center
+        layoutViews["videoCard"] = videoCard
+        layoutViews["collageCard"] = collageCard
+        layoutViews["collageHeader"] = collageHeader
+        layoutViews["sourceSwitch"] = sourceSwitch
+        layoutViews["framesChip"] = framesChip
+        layoutViews["collageVStack"] = collageVStack
+        layoutViews["collageHStack"] = collageHStack
+        layoutViews["paginatorRow"] = paginatorRow
+        layoutViews["rightPanel"] = rightPanel
+        layoutViews["videoListScroll"] = videoListScroll
+        layoutViews["playerView"] = playerView
+        layoutViews["logScroll"] = scroll
+        layoutViews["logView"] = logView
+        layoutViews["metricsCol"] = metricsCol
+        layoutViews["epochCard"] = epochCard
+        layoutViews["lossCard"] = lossCard
+        layoutViews["psnrCard"] = psnrCard
+        layoutViews["extractProgress"] = extractProgressBlock
+        layoutViews["trainProgress"] = trainProgressBlock
+        layoutViews["trainLive"] = trainLiveBlock
+        layoutViews["reconsProgress"] = reconsProgressBlock
+        layoutViews["chart"] = chart
+        layoutViews["extractLimitCtl"] = extractLimitCtl
+        layoutViews["epochsCtl"] = epochsCtl
+        layoutViews["stepsCtl"] = stepsCtl
+        layoutViews["batchCtl"] = batchCtl
+        layoutViews["widthCtl"] = widthCtl
+        layoutViews["heightCtl"] = heightCtl
+        layoutViews["lrCtl"] = lrCtl
+        layoutViews["pauseCtl"] = pauseCtl
+        layoutViews["powerCtl"] = powerCtl
+        layoutViews["root"] = root
+
+        // Скрыть галочки и заполнить состояние коллажа при старте.
+        renderCollagePage()
+        for (i, g) in debugGrids.enumerated() {
+            layoutViews["grid\(i)"] = g
+        }
+
+        setStatus("Готово к обучению", ok: true)
+        return root
+    }
+
+
+    func buildPaginator() {
+        var dots: [NSButton] = []
+        for i in 0..<dotPoolSize {
+            let b = NSButton(title: "", target: self, action: #selector(pageDotClicked(_:)))
+            b.tag = i
+            b.isBordered = false
+            b.wantsLayer = true
+            b.layer?.cornerRadius = 14
+            b.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+            let wc = b.widthAnchor.constraint(equalToConstant: 28)
+            wc.isActive = true
+            b.heightAnchor.constraint(equalToConstant: 28).isActive = true
+            // Кружок не должен распирать строку: видимое число считается по
+            // ширине колонки, лишние кружки скрываются (см. fittedDotCount).
+            b.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            dotWidthConstraints.append(wc)
+            dots.append(b)
+        }
+        pageDots = dots
+        for b in [carouselFirst, carouselPrev, carouselNext, carouselLast] {
+            b.target = self
+            b.action = (b === carouselFirst) ? #selector(carouselPageFirst)
+                      : (b === carouselLast) ? #selector(carouselPageLast)
+                      : (b === carouselPrev) ? #selector(carouselPagePrev)
+                      : #selector(carouselPageNext)
+            b.bezelStyle = .rounded
+            b.controlSize = .small
+            b.contentTintColor = .secondaryLabelColor
+            b.widthAnchor.constraint(equalToConstant: 28).isActive = true
+            b.heightAnchor.constraint(equalToConstant: 32).isActive = true
+            b.isEnabled = false
+        }
+        paginatorRow.orientation = .horizontal
+        paginatorRow.spacing = 4
+        paginatorRow.alignment = .centerY
+        // Растягиваем пагинацию на всю ширину средней колонки:
+        // стрелки по краям (в начало/в конец + ◀/▶), кружочки равномерно между ними.
+        paginatorRow.distribution = .equalSpacing
+        for v in [carouselFirst, carouselPrev] + pageDots + [carouselNext, carouselLast] {
+            paginatorRow.addArrangedSubview(v)
+        }
+    }
+
+    /// Собирает коллаж кадров: центральная миниатюра + 9 вокруг (низ+справа).
+    private func buildCollage() -> (card: NSView, header: NSStackView, vStack: NSStackView, hStack: NSStackView) {
         collageBig.imageScaling = .scaleProportionallyDown
         collageBig.wantsLayer = true
         collageBig.layer?.cornerRadius = 10
@@ -84,6 +142,131 @@ extension YumeAppDelegate {
             collageBigBadge.heightAnchor.constraint(equalToConstant: 24),
         ])
 
+        let (vStack, hStack) = buildCollageThumbs()
+
+        let collageCard = NSView()
+        collageCard.wantsLayer = true
+        collageCard.layer?.cornerRadius = 10
+        collageCard.layer?.borderWidth = 0.5
+        collageCard.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.45).cgColor
+        collageCard.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        collageCard.addSubview(collageBig)
+        collageCard.addSubview(vStack)
+        collageCard.addSubview(hStack)
+
+        collageEmpty.font = NSFont.systemFont(ofSize: 13)
+        collageEmpty.textColor = .secondaryLabelColor
+        collageEmpty.alignment = .center
+        collageEmpty.translatesAutoresizingMaskIntoConstraints = false
+        collageCard.addSubview(collageEmpty)
+        NSLayoutConstraint.activate([
+            collageEmpty.centerXAnchor.constraint(equalTo: collageCard.centerXAnchor),
+            collageEmpty.centerYAnchor.constraint(equalTo: collageCard.centerYAnchor),
+        ])
+
+        // Пагинатор: ◀ [1] [2] ... ▶ — число кружочков динамическое,
+        // считается по фактической ширине средней колонки.
+        buildPaginator()
+
+        NSLayoutConstraint.activate([
+            // Большая — слева, упирается в нижний ряд; справа — столбец из 5.
+            collageBig.leadingAnchor.constraint(equalTo: collageCard.leadingAnchor, constant: 8),
+            collageBig.topAnchor.constraint(equalTo: collageCard.topAnchor, constant: 8),
+            collageBig.trailingAnchor.constraint(equalTo: vStack.leadingAnchor, constant: -6),
+            collageBig.bottomAnchor.constraint(equalTo: hStack.topAnchor, constant: -8),
+            // Правый столбец из 5 мелких — ровно по высоте большого кадра.
+            vStack.trailingAnchor.constraint(equalTo: collageCard.trailingAnchor, constant: -8),
+            vStack.topAnchor.constraint(equalTo: collageBig.topAnchor),
+            vStack.bottomAnchor.constraint(equalTo: collageBig.bottomAnchor),
+            vStack.widthAnchor.constraint(equalToConstant: 60),
+            // Нижний ряд из 5 кадров: высота следует из пропорций кадра (16:9),
+            // ширины делятся поровну — ряд ровно по ширине карточки.
+            // Ширина одной миниатюры = (ширина ряда − 4 зазора) / 5,
+            // её высота = ширина × (480/854).
+            hStack.leadingAnchor.constraint(equalTo: collageCard.leadingAnchor, constant: 10),
+            hStack.bottomAnchor.constraint(equalTo: collageCard.bottomAnchor, constant: -10),
+            hStack.heightAnchor.constraint(equalTo: hStack.widthAnchor,
+                                           multiplier: (480.0 / 854.0) / 5.0,
+                                           constant: -(4 * 2.0) * (480.0 / 854.0) / 5.0),
+            hStack.trailingAnchor.constraint(equalTo: vStack.leadingAnchor, constant: -6),
+        ])
+        // Нижние миниатюры по высоте равны нижнему ряду.
+        for i in 5..<10 {
+            collageThumbs[i].heightAnchor.constraint(equalTo: hStack.heightAnchor).isActive = true
+        }
+
+        let videoCaption = sectionHeader("Текущее видео")
+
+        // Шапка коллажа: заголовок + переключатель Оригинал/Реконструкция.
+        // По умолчанию — ОРИГИНАЛ (реконструкция только по явному выбору).
+        // Чип в конце строки показывает, сколько кадров сейчас в очереди.
+        let headerSpacer = NSView()
+        headerSpacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        headerSpacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        sourceSwitch.selectedSegment = 0
+        sourceSwitch.target = self
+        sourceSwitch.action = #selector(sourceSwitchChanged(_:))
+        sourceSwitch.font = NSFont.systemFont(ofSize: 11)
+        sourceSwitch.controlSize = .small
+        let collageHeader = NSStackView(views: [sectionHeader("Кадры"), sourceSwitch, headerSpacer, framesChip])
+        collageHeader.orientation = .horizontal
+        collageHeader.spacing = 12
+        collageHeader.alignment = .centerY
+        return (card: collageCard, header: collageHeader, vStack: vStack, hStack: hStack)
+    }
+
+    /// Собирает компактную колонку метрик (epoch/loss/PSNR).
+    private func buildMetricsCol() -> NSStackView {
+        let metricsCol = NSStackView(views: [epochCard, lossCard, psnrCard])
+        metricsCol.orientation = .vertical
+        metricsCol.spacing = 6
+        metricsCol.alignment = .leading
+        // Компактные метрики вертикально, справа от списка видео.
+        for c in [epochCard, lossCard, psnrCard] {
+            c.heightAnchor.constraint(equalToConstant: 50).isActive = true
+            c.widthAnchor.constraint(equalToConstant: 136).isActive = true
+        }
+        return metricsCol
+    }
+
+    /// Строит два плеера (текущее видео и результат) и их карточки-медиа.
+    private func buildVideoPlayers() -> (videoCard: NSView, resultCard: NSView) {
+        // Плеер для выбранного MP4: воспроизведение по центру, зациклено.
+        playerView.player = queuePlayer
+        playerView.controlsStyle = .minimal
+        playerView.videoGravity = .resizeAspect
+        playerView.wantsLayer = true
+        playerView.layer?.cornerRadius = 10
+        playerView.layer?.masksToBounds = true
+        playerView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        playerView.setContentHuggingPriority(.defaultLow, for: .vertical)
+        playerView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        playerView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        let videoEmpty = simpleEmpty("film", "Выберите видеофайл MP4 слева")
+        videoEmptyState = videoEmpty
+        let videoCard = mediaCard(playerView, videoEmpty)
+        videoMediaCard = videoCard
+
+        resultPlayerView.player = resultQueuePlayer
+        resultPlayerView.controlsStyle = .minimal
+        resultPlayerView.videoGravity = .resizeAspect
+        resultPlayerView.wantsLayer = true
+        resultPlayerView.layer?.cornerRadius = 10
+        resultPlayerView.layer?.masksToBounds = true
+        resultPlayerView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        resultPlayerView.setContentHuggingPriority(.defaultLow, for: .vertical)
+        resultPlayerView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        resultPlayerView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        let resultEmpty = simpleEmpty("checkmark.video", "Готовое видео появится здесь после интерполяции")
+        resultEmptyState = resultEmpty
+        let resultCard = mediaCard(resultPlayerView, resultEmpty)
+        resultMediaCard = resultCard
+        resultCard.isHidden = true
+        return (videoCard: videoCard, resultCard: resultCard)
+    }
+
+    /// Собирает 10 миниатюр и раскладывает их в столбец + ряд.
+    private func buildCollageThumbs() -> (vStack: NSStackView, hStack: NSStackView) {
         // L-раскладка: нижний ряд (5) + правый столбец (5) = 10 кадров вокруг большой.
         // Порядок чтения: нижний ряд слева → справа, затем столбец снизу → вверх.
         collageThumbs = []
@@ -134,116 +317,11 @@ extension YumeAppDelegate {
         for i in 0..<5 {
             allBtns[i].widthAnchor.constraint(equalToConstant: 60).isActive = true
         }
+        return (vStack: vStack, hStack: hStack)
+    }
 
-        let collageCard = NSView()
-        collageCard.wantsLayer = true
-        collageCard.layer?.cornerRadius = 10
-        collageCard.layer?.borderWidth = 0.5
-        collageCard.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.45).cgColor
-        collageCard.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        collageCard.addSubview(collageBig)
-        collageCard.addSubview(vStack)
-        collageCard.addSubview(hStack)
-
-        collageEmpty.font = NSFont.systemFont(ofSize: 13)
-        collageEmpty.textColor = .secondaryLabelColor
-        collageEmpty.alignment = .center
-        collageEmpty.translatesAutoresizingMaskIntoConstraints = false
-        collageCard.addSubview(collageEmpty)
-        NSLayoutConstraint.activate([
-            collageEmpty.centerXAnchor.constraint(equalTo: collageCard.centerXAnchor),
-            collageEmpty.centerYAnchor.constraint(equalTo: collageCard.centerYAnchor),
-        ])
-
-        // Пагинатор: ◀ [1] [2] ... ▶ — число кружочков динамическое,
-        // считается по фактической ширине средней колонки.
-        var dots: [NSButton] = []
-        for i in 0..<dotPoolSize {
-            let b = NSButton(title: "", target: self, action: #selector(pageDotClicked(_:)))
-            b.tag = i
-            b.isBordered = false
-            b.wantsLayer = true
-            b.layer?.cornerRadius = 14
-            b.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
-            let wc = b.widthAnchor.constraint(equalToConstant: 28)
-            wc.isActive = true
-            b.heightAnchor.constraint(equalToConstant: 28).isActive = true
-            // Кружок не должен распирать строку: видимое число считается по
-            // ширине колонки, лишние кружки скрываются (см. fittedDotCount).
-            b.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            dotWidthConstraints.append(wc)
-            dots.append(b)
-        }
-        pageDots = dots
-        for b in [carouselFirst, carouselPrev, carouselNext, carouselLast] {
-            b.target = self
-            b.action = (b === carouselFirst) ? #selector(carouselPageFirst)
-                      : (b === carouselLast) ? #selector(carouselPageLast)
-                      : (b === carouselPrev) ? #selector(carouselPagePrev)
-                      : #selector(carouselPageNext)
-            b.bezelStyle = .rounded
-            b.controlSize = .small
-            b.contentTintColor = .secondaryLabelColor
-            b.widthAnchor.constraint(equalToConstant: 28).isActive = true
-            b.heightAnchor.constraint(equalToConstant: 32).isActive = true
-            b.isEnabled = false
-        }
-        paginatorRow.orientation = .horizontal
-        paginatorRow.spacing = 4
-        paginatorRow.alignment = .centerY
-        // Растягиваем пагинацию на всю ширину средней колонки:
-        // стрелки по краям (в начало/в конец + ◀/▶), кружочки равномерно между ними.
-        paginatorRow.distribution = .equalSpacing
-        for v in [carouselFirst, carouselPrev] + pageDots + [carouselNext, carouselLast] {
-            paginatorRow.addArrangedSubview(v)
-        }
-
-        NSLayoutConstraint.activate([
-            // Большая — слева, упирается в нижний ряд; справа — столбец из 5.
-            collageBig.leadingAnchor.constraint(equalTo: collageCard.leadingAnchor, constant: 8),
-            collageBig.topAnchor.constraint(equalTo: collageCard.topAnchor, constant: 8),
-            collageBig.trailingAnchor.constraint(equalTo: vStack.leadingAnchor, constant: -6),
-            collageBig.bottomAnchor.constraint(equalTo: hStack.topAnchor, constant: -8),
-            // Правый столбец из 5 мелких — ровно по высоте большого кадра.
-            vStack.trailingAnchor.constraint(equalTo: collageCard.trailingAnchor, constant: -8),
-            vStack.topAnchor.constraint(equalTo: collageBig.topAnchor),
-            vStack.bottomAnchor.constraint(equalTo: collageBig.bottomAnchor),
-            vStack.widthAnchor.constraint(equalToConstant: 60),
-            // Нижний ряд из 5 кадров: высота следует из пропорций кадра (16:9),
-            // ширины делятся поровну — ряд ровно по ширине карточки.
-            // Ширина одной миниатюры = (ширина ряда − 4 зазора) / 5,
-            // её высота = ширина × (480/854).
-            hStack.leadingAnchor.constraint(equalTo: collageCard.leadingAnchor, constant: 10),
-            hStack.bottomAnchor.constraint(equalTo: collageCard.bottomAnchor, constant: -10),
-            hStack.heightAnchor.constraint(equalTo: hStack.widthAnchor,
-                                           multiplier: (480.0 / 854.0) / 5.0,
-                                           constant: -(4 * 2.0) * (480.0 / 854.0) / 5.0),
-            hStack.trailingAnchor.constraint(equalTo: vStack.leadingAnchor, constant: -6),
-        ])
-        // Нижние миниатюры по высоте равны нижнему ряду.
-        for i in 5..<10 {
-            allBtns[i].heightAnchor.constraint(equalTo: hStack.heightAnchor).isActive = true
-        }
-
-        let videoCaption = sectionHeader("Текущее видео")
-
-        // Шапка коллажа: заголовок + переключатель Оригинал/Реконструкция.
-        // По умолчанию — ОРИГИНАЛ (реконструкция только по явному выбору).
-        // Чип в конце строки показывает, сколько кадров сейчас в очереди.
-        let headerSpacer = NSView()
-        headerSpacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-        headerSpacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-        sourceSwitch.selectedSegment = 0
-        sourceSwitch.target = self
-        sourceSwitch.action = #selector(sourceSwitchChanged(_:))
-        sourceSwitch.font = NSFont.systemFont(ofSize: 11)
-        sourceSwitch.controlSize = .small
-        let collageHeader = NSStackView(views: [sectionHeader("Кадры"), sourceSwitch, headerSpacer, framesChip])
-        collageHeader.orientation = .horizontal
-        collageHeader.spacing = 12
-        collageHeader.alignment = .centerY
-
-
+    /// Собирает центральную колонку: вкладки медиа, плееры и коллаж.
+    private func buildCenterColumn(videoCard: NSView, resultCard: NSView, collageCard: NSView, collageHeader: NSStackView) -> NSStackView {
         // Медиа-зона: переключатель вкладок + две карточки поверх друг друга.
         mediaTabsControl.selectedSegment = 0
         mediaTabsControl.target = self
@@ -290,7 +368,11 @@ extension YumeAppDelegate {
         // Вертикальные пропорции: медиа 50%, коллаж 45% зоны.
         mediaZone.heightAnchor.constraint(equalTo: center.heightAnchor, multiplier: 0.43, constant: -38).isActive = true
         collageCard.heightAnchor.constraint(equalTo: center.heightAnchor, multiplier: 0.57, constant: -118).isActive = true
+        return center
+    }
 
+    /// Собирает правую колонку: статус, список видео, график и журнал.
+    private func buildRightPanel(metricsCol: NSStackView) -> (panel: NSStackView, topSplit: NSStackView, scroll: NSScrollView, leftTop: NSStackView) {
         // ——— Правая колонка: журнал происходящего ———
         chart.wantsLayer = true
         // График тянется на всю свободную высоту блока — без пустой полосы
@@ -385,7 +467,11 @@ extension YumeAppDelegate {
         topSplit.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         leftTop.setContentHuggingPriority(.defaultLow, for: .horizontal)
         leftTop.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return (panel: rightPanel, topSplit: topSplit, scroll: scroll, leftTop: leftTop)
+    }
 
+    /// Собирает скелет окна: 3 колонки с разделителями и корневой view.
+    private func buildMainContainer(left: NSStackView, center: NSStackView, rightPanel: NSStackView, topSplit: NSStackView, scroll: NSScrollView, leftTop: NSStackView) -> NSView {
         // ——— Разбиение на 3 вертикальные части с разделителями ———
         func fillHost(_ host: NSView, _ child: NSView) {
             host.addSubview(child)
@@ -484,47 +570,6 @@ extension YumeAppDelegate {
             chart.widthAnchor.constraint(equalTo: leftTop.widthAnchor),
             scroll.widthAnchor.constraint(equalTo: rightPanel.widthAnchor, constant: -48),
         ])
-        layoutViews["center"] = center
-        layoutViews["videoCard"] = videoCard
-        layoutViews["collageCard"] = collageCard
-        layoutViews["collageHeader"] = collageHeader
-        layoutViews["sourceSwitch"] = sourceSwitch
-        layoutViews["framesChip"] = framesChip
-        layoutViews["collageVStack"] = vStack
-        layoutViews["collageHStack"] = hStack
-        layoutViews["paginatorRow"] = paginatorRow
-        layoutViews["rightPanel"] = rightPanel
-        layoutViews["videoListScroll"] = videoListScroll
-        layoutViews["playerView"] = playerView
-        layoutViews["logScroll"] = scroll
-        layoutViews["logView"] = logView
-        layoutViews["metricsCol"] = metricsCol
-        layoutViews["epochCard"] = epochCard
-        layoutViews["lossCard"] = lossCard
-        layoutViews["psnrCard"] = psnrCard
-        layoutViews["extractProgress"] = extractProgressBlock
-        layoutViews["trainProgress"] = trainProgressBlock
-        layoutViews["trainLive"] = trainLiveBlock
-        layoutViews["reconsProgress"] = reconsProgressBlock
-        layoutViews["chart"] = chart
-        layoutViews["extractLimitCtl"] = extractLimitCtl
-        layoutViews["epochsCtl"] = epochsCtl
-        layoutViews["stepsCtl"] = stepsCtl
-        layoutViews["batchCtl"] = batchCtl
-        layoutViews["widthCtl"] = widthCtl
-        layoutViews["heightCtl"] = heightCtl
-        layoutViews["lrCtl"] = lrCtl
-        layoutViews["pauseCtl"] = pauseCtl
-        layoutViews["powerCtl"] = powerCtl
-        layoutViews["root"] = root
-
-        // Скрыть галочки и заполнить состояние коллажа при старте.
-        renderCollagePage()
-        for (i, g) in debugGrids.enumerated() {
-            layoutViews["grid\(i)"] = g
-        }
-
-        setStatus("Готово к обучению", ok: true)
         return root
     }
 
