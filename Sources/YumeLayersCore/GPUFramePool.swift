@@ -58,13 +58,6 @@ final class GPUFramePool {
         yumeLog("GPUFramePool: \(self.size) кадров в VRAM (\(self.size * w * h * 3 * 4 / (1024*1024)) МБ)")
     }
 
-    /// Честный resume: сдвинуть курсор на уже пройденные кадры.
-    func skip(_ count: Int) {
-        lock.lock()
-        cursorGlobal = max(0, count)
-        lock.unlock()
-    }
-
     /// Следующий кадр по порядку (циклически по всему набору).
     ///
     /// Вся операция — под замком: раньше `windowStart` читался после
