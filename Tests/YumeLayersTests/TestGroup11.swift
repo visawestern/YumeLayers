@@ -64,3 +64,32 @@ func testVaeLossKindSwitch() {
     expect(l1 != vaeLossGeneric(cache: c, target: img, beta: 0.5, kind: .mse),
            "generic .l1 отличается от .mse")
 }
+
+func testGPUGroupNorm() {
+    section("Этап 1: GPU-GroupNorm совпадает с CPU-эталоном")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let session = GpuSession(engine)
+    let C = 8, P = 16, G = 4
+    var rng = SplitMix64(seed: 77)
+    var data = [Float](repeating: 0, count: C * P)
+    for i in 0..<data.count { data[i] = Float.random(in: -2...2, using: &rng) }
+
+    let x = GPUTensor(engine: engine, data: data, rows: C)
+    session.begin()
+    let y = session.groupNorm(x, groups: G)
+    _ = session.end()
+    let got = y.toArray()
+    let expected = groupNormCPU(channels: C, groups: G, plane: P, xs: data)
+    expect(maxAbsDiff(got, expected) < 1e-3,
+           "GPU-GroupNorm ≈ CPU-эталон (max|Δ| = \(maxAbsDiff(got, expected)))")
+
+    // Статистика первой группы: среднее ≈ 0, σ ≈ 1.
+    let gSize = C / G
+    var gsum = 0.0
+    for c in 0..<gSize {
+        for p in 0..<P { gsum += Double(got[c * P + p]) }
+    }
+    let gmean = gsum / Double(gSize * P)
+    expect(abs(gmean) < 1e-3, "группа 0: среднее ≈ 0 (\(gmean))")
+}

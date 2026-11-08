@@ -90,3 +90,37 @@ public func vaeLossGeneric(cache: VAECache, target: [Float], beta: Float = 1.0,
     }
     return rec + Double(beta) * ConvVAEGPU.klMean(cache)
 }
+
+/// Эталон групповой нормализации на CPU (CHW: rows=каналы, cols=плоскость).
+/// Нормирует каждую группу каналов к N(0,1). Используется как источник истины
+/// для проверки GPU-ядра `groupnorm_kernel`.
+public func groupNormCPU(channels: Int, groups: Int, plane: Int, xs: [Float]) -> [Float] {
+    precondition(channels % groups == 0 && groups >= 1)
+    let gSize = channels / groups
+    let count = gSize * plane
+    var out = [Float](repeating: 0, count: xs.count)
+    for g in 0..<groups {
+        let c0 = g * gSize
+        var sum = 0.0
+        var sumSq = 0.0
+        for c in c0..<(c0 + gSize) {
+            let base = c * plane
+            for p in 0..<plane {
+                let v = Double(xs[base + p])
+                sum += v; sumSq += v * v
+            }
+        }
+        let mean = sum / Double(count)
+        var var_ = sumSq / Double(count) - mean * mean
+        if var_ < 1e-5 { var_ = 1e-5 }
+        let invStd = 1.0 / sqrt(var_)
+        for c in c0..<(c0 + gSize) {
+            let base = c * plane
+            for p in 0..<plane {
+                let idx = base + p
+                out[idx] = Float((Double(xs[idx]) - mean) * invStd)
+            }
+        }
+    }
+    return out
+}

@@ -117,6 +117,19 @@ extension GpuSession {
         return C
     }
 
+    // Групповая нормализация: N(0,1) по группам каналов (CHW-тензор).
+    func groupNorm(_ A: GPUTensor, groups: Int) -> GPUTensor {
+        precondition(A.rows % groups == 0 && groups >= 1, "groupNorm: rows % groups == 0")
+        let C = GPUTensor(engine: engine, rows: A.rows, cols: A.cols)
+        enc.setComputePipelineState(engine.groupNormPS)
+        setBuffers([A.buf, C.buf])
+        setUInt(UInt32(A.rows), index: 2)
+        setUInt(UInt32(A.cols), index: 3)
+        setUInt(UInt32(groups), index: 4)
+        dispatchGroups(1, 1, groups, 1)
+        return C
+    }
+
     // C = A + bias (1×cols), broadcast по строкам
     func addBias(_ A: GPUTensor, _ bias: GPUTensor) -> GPUTensor {
         let C = GPUTensor(engine: engine, rows: A.rows, cols: A.cols)

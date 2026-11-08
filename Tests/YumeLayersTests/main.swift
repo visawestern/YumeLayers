@@ -112,6 +112,7 @@ func runAll() {
         ("HoldoutByScene", testHoldoutByScene),
         ("L1SobelLoss", testL1AndSobelLoss),
         ("VaeLossKind", testVaeLossKindSwitch),
+        ("GPUGroupNorm", testGPUGroupNorm),
         ("VRAMBudget", testVRAMBudget),
         ("ProcessedMarks", testProcessedMarks),
         ("Reproducibility", testReproducibility),
