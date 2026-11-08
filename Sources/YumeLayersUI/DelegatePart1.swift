@@ -176,67 +176,9 @@ extension YumeAppDelegate {
             log("Обучение нельзя запустить во время извлечения кадров — дождитесь завершения")
             return
         }
-        var p = pIn
-        if maxFrames > 0 {
-            let limit = min(maxFrames, framesStore.count)
-            guard limit > 0 else {
-                log("Обучение: нет кадров для лимита \(maxFrames)")
-                return
-            }
-            p.memoryFrames = Array(framesStore.prefix(limit))
-            let names = Set(p.memoryFrames!.map { $0.name })
-            p.controlFrames = controlFramesStore.filter { names.contains($0.name) }
-            log("Обучение ограничено первыми \(limit) кадрами из \(framesStore.count)")
-        } else {
-            p.memoryFrames = framesStore.isEmpty ? nil : framesStore
-            // Контрольная выборка (1 кадр/сек) для реконструкций на итоговой модели.
-            p.controlFrames = controlFramesStore.isEmpty ? nil : controlFramesStore
-        }
+        guard let p = resolveTrainingFrames(pIn, maxFrames: maxFrames) else { return }
         lastParams = p
-        TrainingControl.shared.reset()
-        isTraining = true
-        api.setTrainingActive(true, totalEpochs: p.epochs)
-        trainButton.isEnabled = false
-        stopButton.isEnabled = true
-        // Прогресс — рядом с кнопкой «Обучить VAE»; реконструкции ещё не идут.
-        trainProgressBlock.isHidden = false
-        trainProgressBar.doubleValue = 0
-        trainPercentLabel.stringValue = "0%"
-        trainEtaLabel.stringValue = "…"
-        // Живой индикатор: сразу показываем, что цикл запущен, и ждём первый шаг.
-        trainLiveBlock.isHidden = false
-        trainStateLabel.stringValue = "Обучение идёт"
-        trainStateLabel.textColor = .labelColor
-        trainFrameLabel.stringValue = "Ожидание первого шага…"
-        lastTrainStepAt = Date()
-        lastTrainReport = nil
-        trainSpinner.startAnimation(nil)
-        startTrainHeartbeat()
-        reconsProgressBlock.isHidden = true
-        reconsProgressBar.doubleValue = 0
-        reconsPercentLabel.stringValue = "0%"
-        trainStartTime = Date()
-        chart.reset()
-        epochCard.setValue("0")
-        lossCard.setValue("0")
-        psnrCard.setValue("0")
-        videoEmptyState.isHidden = false
-        // Кадры оригинала НЕ сбрасываются при старте обучения.
-        lastEpoch = 0
-        setStatus("Обучение…", ok: true)
-        log("=== Запуск обучения ===")
-
-        log(String(format: "Кадр %d×%d, эпох %d, шагов %d, батч %d, lr %.5f, пауза %d мс",
-                   p.width, p.height, p.epochs, p.steps, p.batch, p.lr, p.pauseMs))
-        // Термо-регулятор держит температуру GPU, а не просто «увеличивает паузы
-        // между эпохами»: пауза применяется на КАЖДОМ шаге.
-        log(String(format: "Термо-регулятор: потолок нагрузки %d%%, рабочая %.0f °C, стоп-порог %.0f °C",
-                   p.gpuPowerPercent, defaultTargetTempC, defaultMaxTempC))
-        log(p.adaptiveThrottle
-            ? "Авто-пауза при перегреве: включена (снижает нагрузку при подходе к стоп-порогу)"
-            : "Авто-пауза при перегреве: выключена (нагрузка держится постоянной)")
-        log("API: http://127.0.0.1:17851 (только локальные запросы)")
-
+        configureTrainingUI(p)
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 try trainConvVAE(
@@ -467,6 +409,74 @@ extension YumeAppDelegate {
             logView.string = lines.suffix(1500).joined(separator: "\n") + "\n"
         }
         logView.scrollToEndOfDocument(nil)
+    }
+
+    /// Определяет обучающие кадры и контрольную выборку для запуска.
+    private func resolveTrainingFrames(_ pIn: Params, maxFrames: Int) -> Params? {
+        var p = pIn
+        if maxFrames > 0 {
+            let limit = min(maxFrames, framesStore.count)
+            guard limit > 0 else {
+                log("Обучение: нет кадров для лимита \(maxFrames)")
+                return nil
+            }
+            p.memoryFrames = Array(framesStore.prefix(limit))
+            let names = Set(p.memoryFrames!.map { $0.name })
+            p.controlFrames = controlFramesStore.filter { names.contains($0.name) }
+            log("Обучение ограничено первыми \(limit) кадрами из \(framesStore.count)")
+        } else {
+            p.memoryFrames = framesStore.isEmpty ? nil : framesStore
+            // Контрольная выборка (1 кадр/сек) для реконструкций на итоговой модели.
+            p.controlFrames = controlFramesStore.isEmpty ? nil : controlFramesStore
+        }
+        return p
+    }
+
+    /// Настраивает UI и логирует параметры старта обучения.
+    private func configureTrainingUI(_ p: Params) {
+        TrainingControl.shared.reset()
+        isTraining = true
+        api.setTrainingActive(true, totalEpochs: p.epochs)
+        trainButton.isEnabled = false
+        stopButton.isEnabled = true
+        // Прогресс — рядом с кнопкой «Обучить VAE»; реконструкции ещё не идут.
+        trainProgressBlock.isHidden = false
+        trainProgressBar.doubleValue = 0
+        trainPercentLabel.stringValue = "0%"
+        trainEtaLabel.stringValue = "…"
+        // Живой индикатор: сразу показываем, что цикл запущен, и ждём первый шаг.
+        trainLiveBlock.isHidden = false
+        trainStateLabel.stringValue = "Обучение идёт"
+        trainStateLabel.textColor = .labelColor
+        trainFrameLabel.stringValue = "Ожидание первого шага…"
+        lastTrainStepAt = Date()
+        lastTrainReport = nil
+        trainSpinner.startAnimation(nil)
+        startTrainHeartbeat()
+        reconsProgressBlock.isHidden = true
+        reconsProgressBar.doubleValue = 0
+        reconsPercentLabel.stringValue = "0%"
+        trainStartTime = Date()
+        chart.reset()
+        epochCard.setValue("0")
+        lossCard.setValue("0")
+        psnrCard.setValue("0")
+        videoEmptyState.isHidden = false
+        // Кадры оригинала НЕ сбрасываются при старте обучения.
+        lastEpoch = 0
+        setStatus("Обучение…", ok: true)
+        log("=== Запуск обучения ===")
+
+        log(String(format: "Кадр %d×%d, эпох %d, шагов %d, батч %d, lr %.5f, пауза %d мс",
+                   p.width, p.height, p.epochs, p.steps, p.batch, p.lr, p.pauseMs))
+        // Термо-регулятор держит температуру GPU, а не просто «увеличивает паузы
+        // между эпохами»: пауза применяется на КАЖДОМ шаге.
+        log(String(format: "Термо-регулятор: потолок нагрузки %d%%, рабочая %.0f °C, стоп-порог %.0f °C",
+                   p.gpuPowerPercent, defaultTargetTempC, defaultMaxTempC))
+        log(p.adaptiveThrottle
+            ? "Авто-пауза при перегреве: включена (снижает нагрузку при подходе к стоп-порогу)"
+            : "Авто-пауза при перегреве: выключена (нагрузка держится постоянной)")
+        log("API: http://127.0.0.1:17851 (только локальные запросы)")
     }
 
 }
