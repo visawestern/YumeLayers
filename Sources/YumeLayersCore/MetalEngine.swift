@@ -130,26 +130,37 @@ public final class MetalEngine {
         cmd.addCompletedHandler { _ in sem.signal() }
         cmd.commit()
         let start = Date()
-        while true {
-            if sem.wait(timeout: .now() + 0.005) == .success { break }
-            let elapsed = Date().timeIntervalSince(start)
-            let state = MetalEngine.bufferState(cmd.status)
-            switch gpuWaitOutcome(state: state, handlerSignaled: false,
-                                  elapsedSeconds: elapsed, deadlineSeconds: seconds) {
-            case .done:
-                // Обработчик потерялся, но буфер уже выполнен — это не зависание.
-                yumeLog("⚠️ обработчик завершения не доставлен (\(what)) — "
-                      + "статус буфера: \(state). Продолжаю по статусу.")
-                break
-            case .timedOut:
-                yumeLog("❌ GPU не ответила за \(Int(seconds)) с — \(what). "
-                      + "Статус буфера: \(state), ошибка: \(cmd.error?.localizedDescription ?? "нет"). "
-                      + "Аварийный выход, чтобы не перегрузить WindowServer.")
-                exit(70)
-            case .keepWaiting:
-                continue
+        // Драйвер иногда не доставляет обработчик завершения (см. Фазу 4).
+        // Даём ему короткий грейс; если обработчик не пришёл — уходим в
+        // плотный опрос статуса (0.5 мс), а не платим по 5 мс на каждую
+        // потерянную доставку. Это снимает основную деградацию длинных
+        // прогонов и не зависит от надёжности обработчиков.
+        var handled = sem.wait(timeout: .now() + 0.02) == .success
+        if !handled {
+            var logged = false
+            while true {
+                let elapsed = Date().timeIntervalSince(start)
+                let state = MetalEngine.bufferState(cmd.status)
+                switch gpuWaitOutcome(state: state, handlerSignaled: false,
+                                      elapsedSeconds: elapsed, deadlineSeconds: seconds) {
+                case .done:
+                    if !logged {
+                        yumeLog("⚠️ обработчик завершения не доставлен (\(what)) — "
+                              + "статус буфера: \(state). Продолжаю по статусу.")
+                        logged = true
+                    }
+                    handled = true
+                case .timedOut:
+                    yumeLog("❌ GPU не ответила за \(Int(seconds)) с — \(what). "
+                          + "Статус буфера: \(state), ошибка: \(cmd.error?.localizedDescription ?? "нет"). "
+                          + "Аварийный выход, чтобы не перегрузить WindowServer.")
+                    exit(70)
+                case .keepWaiting:
+                    Thread.sleep(forTimeInterval: 0.0005)
+                    continue
+                }
+                if handled { break }
             }
-            break
         }
         let wallMs = Date().timeIntervalSince(start) * 1000
         let reported = (cmd.gpuEndTime - cmd.gpuStartTime) * 1000
