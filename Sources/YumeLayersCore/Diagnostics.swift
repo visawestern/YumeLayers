@@ -189,6 +189,17 @@ public func profileConv(w: Int, h: Int) {
     profileConvKernels(engine, session, vae, cache, w: w, h: h)
 }
 
+/// Таблица времени forward/backward для разрешений Фазы 7 (96/128/192px).
+public func benchmarkResolutions() {
+    // Разрешения кратны 8 (требование шейдеров); высота подобрана к 16:9.
+    let table: [(Int, Int)] = [(80, 56), (96, 56), (128, 72), (192, 112)]
+    yumeLog("=== Производительность VAE (forward/backward) ===")
+    for (w, h) in table {
+        yumeLog(String(format: "— %d×%d —", w, h))
+        profileConv(w: w, h: h)
+    }
+}
+
 /// Изоляция тяжёлых kernels и служебных операций (хвост профилирования).
 private func profileConvKernels(_ engine: MetalEngine, _ session: GpuSession,
                                 _ vae: ConvVAEGPU, _ cache: VAECache,

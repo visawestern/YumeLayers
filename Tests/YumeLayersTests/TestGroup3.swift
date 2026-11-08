@@ -515,6 +515,14 @@ func testConvPrimitives() {
     }
 }
 
+/// Производительность VAE (Фаза 7): forward/backward на 96/128/192px.
+/// Логирует таблицу времени; smoke-проверка (не гейт по абсолютным цифрам).
+func testConvPerf() {
+    guard gHasMetal else { skip("нет GPU"); return }
+    section("Производительность VAE (96/128/192px)")
+    benchmarkResolutions()
+}
+
 // MARK: - 6. GPU: жизненный цикл буферов
 
 

@@ -92,6 +92,7 @@ func runAll() {
         ("OptimizerState", testOptimizerStateRoundTrip),
         ("CodeGuide", testCodeGuideLimits),
         ("GPUMse", testGPUMseMatchesCPU),
+        ("ConvPerf", testConvPerf),
         ("FinalCheckpoint", testFinalCheckpointPath),
         ("OptimizerState", testOptimizerStateRoundTrip),
         ("TrainingControl", testTrainingControlLifecycle),

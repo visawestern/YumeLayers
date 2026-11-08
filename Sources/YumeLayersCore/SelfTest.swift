@@ -23,5 +23,9 @@ public func runSelfTest() {
     selftestLiveStatusAndVram(expect)
     selftestPrepAndFrameIndex(expect)
     selftestLocalApi(expect)
+
+    // Таблица производительности (Фаза 7: 96/128/192px). Только логирует.
+    benchmarkResolutions()
+
     yumeLog(failures == 0 ? "SELFTEST PASS" : "SELFTEST FAIL: \(failures)")
 }
