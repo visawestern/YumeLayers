@@ -163,6 +163,8 @@ func runAll() {
         ("ConvVAEWidth", testConvVAEWidthScales),
         ("CheckpointModelWidth", testCheckpointModelWidth),
         ("CheckpointArchVersion", testCheckpointArchVersion),
+        ("ConvVAEv2Residual", testConvVAEv2Residual),
+        ("TrainV2Residual", testTrainV2Residual),
     ]
     if let filter = gFilter {
         print("Фильтр: \(filter)")

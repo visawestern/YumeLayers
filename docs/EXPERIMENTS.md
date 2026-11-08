@@ -74,6 +74,9 @@
   Тест `testTrainOnPatchesFullFrame`. Реальное обучение к G2 — далее.
 - Шаг 2c (подготовка): в чекпоинт добавлено поле `archVersion` (1=plain,
   2=GroupNorm/Residual), round-trip тест. Сетевая интеграция v2 — далее.
+- Шаг 2c (интеграция): residual-блоки между e2-e3 и d1-d2 в
+  `ConvVAEGPU(residual:)` — forward/backward/чекпоинт v2 (10 слоёв, 20 матриц);
+  обучение v2 снижает loss 0.30→0.018. GroupNorm — опция.
 - Этап 2 (механика): инференс полного кадра 854×480 через `reconstructPadded`
   (паддинг + обрезка). Тест `testFullFrame854Inference`.
 

@@ -107,6 +107,7 @@ struct EncoderOutput {
     let c3: ConvCache, p3: GPUTensor
     let mu: GPUTensor, logvar: GPUTensor, sigma: GPUTensor, eps: GPUTensor
     let z: GPUTensor
+    let resE: ResidualBlockGPU.Cache?
 }
 
 /// Результат декодирования: активации декодера и реконструкция.
@@ -115,6 +116,7 @@ struct DecoderOutput {
     let u2: GPUTensor, c5: ConvCache, p5: GPUTensor, a5: GPUTensor
     let u3: GPUTensor, c6: ConvCache, p6: GPUTensor
     let recon: GPUTensor
+    let resD: ResidualBlockGPU.Cache?
 }
 
 /// Кэш прямого прохода VAE.
@@ -133,6 +135,8 @@ public struct VAECache {
     let u3: GPUTensor, c6: ConvCache, p6: GPUTensor
     let recon: GPUTensor
     let w: Int, h: Int
+    let resE: ResidualBlockGPU.Cache?
+    let resD: ResidualBlockGPU.Cache?
 
     /// Число каналов латента (не 2·C).
     var latentChannels: Int { mu.rows }
@@ -214,6 +218,10 @@ public final class ConvVAEGPU {
     let d1: ConvLayerGPU
     let d2: ConvLayerGPU
     let d3: ConvLayerGPU
+    /// Архитектура v2: остаточные блоки между e2-e3 и d1-d2.
+    let residual: Bool
+    let resE: ResidualBlockGPU?
+    let resD: ResidualBlockGPU?
 
     /// - Parameter seed: seed инициализации весов. По умолчанию фиксирован,
     ///   чтобы обучение было воспроизводимым; тесты полагаются на это.
@@ -222,6 +230,7 @@ public final class ConvVAEGPU {
     init(engine: MetalEngine, channels: Int = 3,
          latentChannels: Int = ConvVAEGPU.latentC,
          width: Int = 1,
+         residual: Bool = false,
          seed: UInt64 = 0x5EED_1234_ABCD_0001) {
         self.channels = channels
         // C кратно 8: split2/merge2 и im2col работают блоками, а чекпоинт
@@ -248,9 +257,26 @@ public final class ConvVAEGPU {
         let outScale = 0.1 / sqrt(Float(f1 * 3 * 3))
         d3 = ConvLayerGPU(engine: engine, ic: f1, oc: channels,
                           k: 3, stride: 1, pad: 1, scale: outScale, rng: &rng)
+        self.residual = residual
+        if residual {
+            self.resE = ResidualBlockGPU(engine: engine, channels: f2, rng: &rng)
+            self.resD = ResidualBlockGPU(engine: engine, channels: f2, rng: &rng)
+        } else {
+            self.resE = nil
+            self.resD = nil
+        }
     }
 
-    var layers: [ConvLayerGPU] { [e1, e2, e3, d1, d2, d3] }
+    var layers: [ConvLayerGPU] {
+        var l: [ConvLayerGPU] = [e1, e2]
+        if let re = resE { l.append(re.c1); l.append(re.c2) }
+        l.append(e3)
+        l.append(d1)
+        if let rd = resD { l.append(rd.c1); l.append(rd.c2) }
+        l.append(d2)
+        l.append(d3)
+        return l
+    }
 
     /// Прямой проход.
     ///
@@ -272,7 +298,8 @@ public final class ConvVAEGPU {
                         u1: d.u1, c4: d.c4, p4: d.p4, a4: d.a4,
                         u2: d.u2, c5: d.c5, p5: d.p5, a5: d.a5,
                         u3: d.u3, c6: d.c6, p6: d.p6,
-                        recon: d.recon, w: w, h: h)
+                        recon: d.recon, w: w, h: h,
+                        resE: e.resE, resD: d.resD)
     }
 
     /// Кодирование кадра в латент (без декодирования).
@@ -292,7 +319,13 @@ public final class ConvVAEGPU {
         let (p1, c1) = e1.forward(s, image, ih: h, iw: w)
         let a1 = s.relu(p1)
         let (p2, c2) = e2.forward(s, a1, ih: h1, iw: w1)
-        let a2 = s.relu(p2)
+        var a2 = s.relu(p2)
+        var resECache: ResidualBlockGPU.Cache? = nil
+        if let rb = resE {
+            let (rbOut, rc) = rb.forward(s, a2, ih: h2, iw: w2)
+            resECache = rc
+            a2 = rbOut
+        }
         let (p3, c3) = e3.forward(s, a2, ih: h2, iw: w2)
 
         // Вариационный латент: mu, logvar → σ → z = mu + σ·ε
@@ -310,7 +343,8 @@ public final class ConvVAEGPU {
         return EncoderOutput(c1: c1, p1: p1, a1: a1,
                              c2: c2, p2: p2, a2: a2,
                              c3: c3, p3: p3,
-                             mu: mu, logvar: logvar, sigma: sigma, eps: eps, z: z)
+                             mu: mu, logvar: logvar, sigma: sigma, eps: eps, z: z,
+                             resE: resECache)
     }
 
     /// Декодирование латента в картинку (без кодирования).
@@ -325,7 +359,13 @@ public final class ConvVAEGPU {
 
         let u1 = s.upsample2x(z, h: h3, w: w3)
         let (p4, c4) = d1.forward(s, u1, ih: h2, iw: w2)
-        let a4 = s.relu(p4)
+        var a4 = s.relu(p4)
+        var resDCache: ResidualBlockGPU.Cache? = nil
+        if let rb = resD {
+            let (rbOut, rc) = rb.forward(s, a4, ih: h2, iw: w2)
+            resDCache = rc
+            a4 = rbOut
+        }
         let u2 = s.upsample2x(a4, h: h2, w: w2)
         let (p5, c5) = d2.forward(s, u2, ih: h1, iw: w1)
         let a5 = s.relu(p5)
@@ -335,7 +375,7 @@ public final class ConvVAEGPU {
         return DecoderOutput(u1: u1, c4: c4, p4: p4, a4: a4,
                              u2: u2, c5: c5, p5: p5, a5: a5,
                              u3: u3, c6: c6, p6: p6,
-                             recon: recon)
+                             recon: recon, resD: resDCache)
     }
 
     /// Возвращает (градиенты входов, градиенты слоёв в порядке layers).
@@ -358,7 +398,13 @@ public final class ConvVAEGPU {
         let dA5 = s.downsample2x(dx6, h: h / 2, w: w / 2)
         let dP5 = s.reluGrad(cache.a5, dA5)
         let (dx5, gW5, gb5) = d2.backward(s, cache.c5, dOut: dP5)
-        let dA4 = s.downsample2x(dx5, h: h / 4, w: w / 4)
+        var dA4 = s.downsample2x(dx5, h: h / 4, w: w / 4)
+        var resDGrads: [GPUTensor] = []
+        if let rb = resD, let rc = cache.resD {
+            let (dPrev, gr) = rb.backward(s, rc, dOut: dA4)
+            dA4 = dPrev
+            resDGrads = gr
+        }
         let dP4 = s.reluGrad(cache.a4, dA4)
         let (dx4, gW4, gb4) = d1.backward(s, cache.c4, dOut: dP4)
 
@@ -371,13 +417,24 @@ public final class ConvVAEGPU {
         let dP3 = s.merge2(dmu, dlogvar, c: cache.latentChannels, plane: cache.latentPlane)
 
         let (dx3, gW3, gb3) = e3.backward(s, cache.c3, dOut: dP3)
-        let dP2 = s.reluGrad(cache.a2, dx3)
+        var dBeforeResE = dx3
+        var resEGrads: [GPUTensor] = []
+        if let rb = resE, let rc = cache.resE {
+            let (dPrev, gr) = rb.backward(s, rc, dOut: dx3)
+            dBeforeResE = dPrev
+            resEGrads = gr
+        }
+        let dP2 = s.reluGrad(cache.a2, dBeforeResE)
         let (dx2, gW2, gb2) = e2.backward(s, cache.c2, dOut: dP2)
         let dP1 = s.reluGrad(cache.a1, dx2)
         let (dx1, gW1, gb1) = e1.backward(s, cache.c1, dOut: dP1)
 
-        return ([dx1, dx2, dx3, dx4, dx5, dx6],
-                [gW1, gb1, gW2, gb2, gW3, gb3, gW4, gb4, gW5, gb5, gW6, gb6])
+        var gAll: [GPUTensor] = [gW1, gb1, gW2, gb2]
+        gAll += resEGrads
+        gAll += [gW3, gb3, gW4, gb4]
+        gAll += resDGrads
+        gAll += [gW5, gb5, gW6, gb6]
+        return ([dx1, dx2, dx3, dx4, dx5, dx6], gAll)
     }
 
     /// Обучение на 8-канальном layered-таргете.

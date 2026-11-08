@@ -124,6 +124,82 @@ func testCheckpointArchVersion() {
     expectEqual(st2.archVersion, 1, "без метаданных archVersion = 1")
 }
 
+func testConvVAEv2Residual() {
+    section("Архитектура v2: residual-блоки (shape + чекпоинт)")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+
+    let v2 = ConvVAEGPU(engine: engine, residual: true)
+    let v1 = ConvVAEGPU(engine: engine)
+    expectEqual(v2.layers.count, 10, "v2: 10 слоёв (6 + 4 residual)")
+    expectEqual(v1.layers.count, 6, "v1: 6 слоёв")
+
+    let w = 32, h = 24
+    var rng = SplitMix64(seed: 3)
+    let img = makeSyntheticScene(w: w, h: h, rng: &rng)
+    let x = GPUTensor(engine: engine, data: hwcToChw(img), rows: 3)
+    let s = GpuSession(engine)
+    s.begin()
+    let c = v2.forward(s, image: x, w: w, h: h, deterministic: true)
+    _ = s.end()
+    expectEqual(c.recon.toArray().count, w * h * 3, "v2: recon размер w×h×3")
+
+    // Round-trip чекпоинта v2.
+    let tmp = NSTemporaryDirectory() + "yume-cp-v2-\(UUID().uuidString).safetensors"
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+    try? saveState(v2.matrices, to: tmp, epoch: 1, step: 1, totalSteps: 2,
+                   optimizer: CheckpointOptimizerState(step: 1, moments: v2.optimizerMoments()),
+                   modelWidth: 1, latentChannels: 16, archVersion: 2)
+    guard let st = try? loadStateWithMeta(path: tmp) else {
+        expect(false, "чекпоинт v2 прочитан"); return
+    }
+    expectEqual(st.archVersion, 2, "v2: archVersion=2")
+    expectEqual(st.mats.count, v2.layers.count * 2, "v2: число матриц (20)")
+
+    let v2b = ConvVAEGPU(engine: engine, residual: true)
+    do {
+        try v2b.load(from: st.mats)
+        expect(true, "v2: веса загружены")
+    } catch {
+        expect(false, "v2: веса загружены")
+    }
+}
+
+func testTrainV2Residual() {
+    section("v2: обучение с residual-блоками (loss снижается)")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let session = GpuSession(engine)
+    let w = 64, h = 40
+    let nFrames = 8
+    var frames = [[Float]]()
+    for f in 0..<nFrames {
+        var rng = SplitMix64(seed: UInt64(3000 + f))
+        frames.append(makeSyntheticScene(w: w, h: h, rng: &rng))
+    }
+    let beta: Float = 0.01
+    let lr: Float = 0.004
+    let vae = ConvVAEGPU(engine: engine, residual: true)
+    var firstLoss = Double.infinity
+    var lastLoss = Double.infinity
+    for step in 1...300 {
+        let img = frames[(step - 1) % nFrames]
+        let chw = hwcToChw(img)
+        let x = GPUTensor(engine: engine, data: chw, rows: 3)
+        session.begin()
+        let c = vae.forward(session, image: x, w: w, h: h, deterministic: false, seed: 7)
+        let dR = session.encodeL1Grad(recon: c.recon, target: x)
+        let (_, g) = vae.backward(session, c, target: x, beta: beta, dReconOverride: dR)
+        vae.applyAdam(session, grads: g, t: step, lr: lr)
+        _ = session.end()
+        if step == 1 { firstLoss = vaeLossGeneric(cache: c, target: chw, beta: beta, kind: .l1) }
+        if step == 300 { lastLoss = vaeLossGeneric(cache: c, target: chw, beta: beta, kind: .l1) }
+    }
+    expect(firstLoss.isFinite && lastLoss.isFinite, "v2: loss конечна")
+    expect(lastLoss < firstLoss,
+           "v2: loss снижается (\(String(format: "%.4f", firstLoss))→\(String(format: "%.4f", lastLoss)))")
+}
+
 // MARK: - Этап 0. Диагностика, ворота G1
 
 /// G1: overfit на 16 кадрах → цель PSNR ≥35 дБ.
