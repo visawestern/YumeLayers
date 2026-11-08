@@ -292,3 +292,22 @@ func testTrainOnPatchesFullFrame() {
     expect(psnrFull.isFinite && psnrFull > 0, "инференс полного кадра: PSNR конечен и >0 (\(psnrFull))")
     print("      инференс полного кадра \(W)×\(H): PSNR = \(String(format: "%.2f", psnrFull)) дБ")
 }
+
+func testFullFrame854Inference() {
+    section("Этап 2: инференс полного кадра 854×480 (с паддингом)")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let session = GpuSession(engine)
+    let W = 854, H = 480
+    var rng = SplitMix64(seed: 11)
+    let img = makeSyntheticScene(w: W, h: H, rng: &rng)
+    let vae = ConvVAEGPU(engine: engine)
+
+    guard let recon = reconstructPadded(engine, vae, session, rgb: img, w: W, h: H) else {
+        expect(false, "854×480: реконструкция получена"); return
+    }
+    expectEqual(recon.count, W * H * 3, "854×480: размер w×h×3")
+    let psnrV = psnr(reference: img, candidate: recon)
+    expect(psnrV.isFinite && psnrV > 0, "854×480: PSNR конечен (\(psnrV))")
+    print("      854×480: PSNR = \(String(format: "%.2f", psnrV)) дБ")
+}
