@@ -110,6 +110,8 @@ func runAll() {
         ("VAEConvergence", testVAEConvergence),
         ("OverfitGate16", testOverfitGate_16Frames),
         ("HoldoutByScene", testHoldoutByScene),
+        ("L1SobelLoss", testL1AndSobelLoss),
+        ("VaeLossKind", testVaeLossKindSwitch),
         ("VRAMBudget", testVRAMBudget),
         ("ProcessedMarks", testProcessedMarks),
         ("Reproducibility", testReproducibility),
