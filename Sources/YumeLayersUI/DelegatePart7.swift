@@ -135,13 +135,23 @@ extension YumeAppDelegate {
         trainButton.action = #selector(startTraining as () -> Void)
         trainButton.keyEquivalent = "\r"
         trainButton.title = "▶ Обучить VAE"
-        Design.applyPill(trainButton, fill: Design.violet, text: .white, radius: Design.pillFull)
+        // Надёжный рендер: bordered-кнопка, тонированная bezelColor (violet).
+        // Безрамный стиль с фоновым слоем (applyPill) не отрисовывался — кнопка
+        // становилась невидимой. bezelColor гарантированно рисует заполнение.
+        trainButton.bezelStyle = .rounded
+        trainButton.isBordered = true
+        trainButton.bezelColor = Design.violet
+        trainButton.contentTintColor = .white
+        trainButton.font = NSFont.systemFont(ofSize: 15, weight: .medium)
+        trainButton.controlSize = .large
 
         stopButton.target = self
         stopButton.action = #selector(stopTraining)
         stopButton.keyEquivalent = "\u{1b}"   // Esc
         stopButton.title = "■ Стоп"
-        Design.applyOutlinePill(stopButton, stroke: Design.ash, text: Design.obsidian)
+        stopButton.bezelStyle = .rounded
+        stopButton.isBordered = true
+        stopButton.controlSize = .regular
         stopButton.isEnabled = false
 
         let runButtons = NSStackView(views: [trainButton, stopButton])
