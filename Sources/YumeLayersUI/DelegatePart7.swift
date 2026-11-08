@@ -222,6 +222,9 @@ extension YumeAppDelegate {
         interpRunButton.action = #selector(runInterpolation)
         interpStopButton.target = self
         interpStopButton.action = #selector(stopInterpolation)
+        // При старте интерполяция не идёт — «Стоп» неактивна.
+        // Активность переключает updateInterpolateButtons() при старте/завершении.
+        interpStopButton.isEnabled = false
         interpResultLabel.font = NSFont.systemFont(ofSize: 11)
         interpResultLabel.textColor = .secondaryLabelColor
         interpResultLabel.widthAnchor.constraint(equalToConstant: 340).isActive = true
