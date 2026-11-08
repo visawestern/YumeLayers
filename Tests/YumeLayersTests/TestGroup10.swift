@@ -48,3 +48,24 @@ func testSceneMotion() {
     expect(c.staticFraction < 0.6, "шум: фон нестабилен (staticFraction<0.6)")
     expect(!c.sceneComplete, "шум: нет стабильного фона → сцена не закончена")
 }
+
+func testConvVAEWidthScales() {
+    section("Архитектура VAE: рычаг ширины каналов (width) — Фаза 1–2")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let base = ConvVAEGPU(engine: engine)
+    let wide = ConvVAEGPU(engine: engine, width: 2)
+    expectEqual(base.e1.oc, 16, "width=1 (дефолт): e1.oc = 16")
+    expectEqual(wide.e1.oc, 32, "width=2: e1.oc = 32 (16×2)")
+    expectEqual(wide.e2.oc, 64, "width=2: e2.oc = 64 (32×2)")
+    expectEqual(wide.d3.ic, 32, "width=2: d3.ic = f1 = 32")
+    let w = 128, h = 72
+    let img = makeNormalSynthetic(w: w, h: h)
+    let x = GPUTensor(engine: engine, data: img, rows: 3)
+    let s = GpuSession(engine)
+    s.begin()
+    let cache = wide.forward(s, image: x, w: w, h: h)
+    _ = s.end()
+    expectEqual(cache.recon.toArray().count, w * h * 3,
+                "width=2: recon имеет размер w×h×3")
+}

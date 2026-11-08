@@ -212,8 +212,11 @@ public final class ConvVAEGPU {
 
     /// - Parameter seed: seed инициализации весов. По умолчанию фиксирован,
     ///   чтобы обучение было воспроизводимым; тесты полагаются на это.
+    /// - Parameter width: кратность ширины свёрточных слоёв (1 — базовая
+    ///   архитектура; >1 — увеличенная ёмкость для ворот Фазы 1–2).
     init(engine: MetalEngine, channels: Int = 3,
          latentChannels: Int = ConvVAEGPU.latentC,
+         width: Int = 1,
          seed: UInt64 = 0x5EED_1234_ABCD_0001) {
         self.channels = channels
         // C кратно 8: split2/merge2 и im2col работают блоками, а чекпоинт
@@ -222,19 +225,22 @@ public final class ConvVAEGPU {
         precondition(latentChannels >= 1, "число каналов латента должно быть > 0")
         self.latentChannels = latentChannels
         let C = latentChannels
+        let W = max(width, 1)
+        let f1 = 16 * W
+        let f2 = 32 * W
         var rng = SplitMix64(seed: seed)
-        e1 = ConvLayerGPU(engine: engine, ic: channels, oc: 16,
+        e1 = ConvLayerGPU(engine: engine, ic: channels, oc: f1,
                           k: 3, stride: 2, pad: 1, rng: &rng)
-        e2 = ConvLayerGPU(engine: engine, ic: 16, oc: 32, k: 3, stride: 2, pad: 1, rng: &rng)
-        e3 = ConvLayerGPU(engine: engine, ic: 32, oc: 2 * C, k: 3, stride: 2, pad: 1, rng: &rng)
-        d1 = ConvLayerGPU(engine: engine, ic: C,  oc: 32, k: 3, stride: 1, pad: 1, rng: &rng)
-        d2 = ConvLayerGPU(engine: engine, ic: 32, oc: 16, k: 3, stride: 1, pad: 1, rng: &rng)
+        e2 = ConvLayerGPU(engine: engine, ic: f1, oc: f2, k: 3, stride: 2, pad: 1, rng: &rng)
+        e3 = ConvLayerGPU(engine: engine, ic: f2, oc: 2 * C, k: 3, stride: 2, pad: 1, rng: &rng)
+        d1 = ConvLayerGPU(engine: engine, ic: C,  oc: f2, k: 3, stride: 1, pad: 1, rng: &rng)
+        d2 = ConvLayerGPU(engine: engine, ic: f2, oc: f1, k: 3, stride: 1, pad: 1, rng: &rng)
         // Выходной слой — намеренно мелкий: p6 должен стартовать около нуля,
         // иначе сигмоида насыщается и градиент к декодеру исчезает.
-        // fanIn = ic·k·k = 16·9 и НЕ зависит от oc, так что масштаб один
-        // для 3- и 8-канальной модели.
-        let outScale = 0.1 / sqrt(Float(16 * 3 * 3))
-        d3 = ConvLayerGPU(engine: engine, ic: 16, oc: channels,
+        // fanIn = ic·k·k = f1·9 и НЕ зависит от oc, так что масштаб один
+        // и для 3-, и для 8-канальной модели.
+        let outScale = 0.1 / sqrt(Float(f1 * 3 * 3))
+        d3 = ConvLayerGPU(engine: engine, ic: f1, oc: channels,
                           k: 3, stride: 1, pad: 1, scale: outScale, rng: &rng)
     }
 
