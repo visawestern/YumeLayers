@@ -141,18 +141,7 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
     // Краевые входы public API: интерфейс зажимает значения, но функцию
     // вызывают и тесты/скрипты — вырождения ловим явно, а не крашем
     // диапазона «Range requires lowerBound ≤ upperBound».
-    guard p.epochs >= 0 else {
-        throw NSError(domain: "Yume", code: 12,
-                      userInfo: [NSLocalizedDescriptionKey: "epochs < 0 (\(p.epochs))"])
-    }
-    let realW = p.width, realH = p.height
-    let pw = ((realW + 7) / 8) * 8
-    let ph = ((realH + 7) / 8) * 8
-    guard pw >= 8, ph >= 8 else {
-        throw NSError(domain: "Yume", code: 12,
-                      userInfo: [NSLocalizedDescriptionKey:
-                        "кадр слишком мал: \(p.width)×\(p.height) — минимум 8×8"])
-    }
+        let (realW, realH, pw, ph) = try validatedTrainingShape(p)
 
     var source: DataSource
     var frameCache: FrameCache? = nil
@@ -287,39 +276,15 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
     // Пачка кадров за шаг: под активации отведено 30% рабочего набора GPU
     // (60% уже занял пул кадров, 10% — запас). Считаем не по размеру кадра,
     // а по полному объёму активаций одного образца.
-    let vramBudgetFrames = effectiveBatchSize(
-        requested: Int.max,
-        w: pw, h: ph,
-        budgetBytes: activationBudgetBytes(
-            workingSet: engine.device.recommendedMaxWorkingSetSize))
-    // Жёсткий потолок 16: большие пачки держат GPU занятым десятки секунд без
-    // отдачи — на MacBookPro16,1 это приводило к зависанию WindowServer
-    // (watchdog 409, thermal heavy). Для стабильности системы — не выше 16.
-    let maxSafeBatch = 16
-    let effBatch = min(max(p.batch, 1), vramBudgetFrames, maxSafeBatch)
-    if effBatch < max(p.batch, 1) {
-        yumeLog("Батч урезан \(p.batch) → \(effBatch) (потолок стабильности \(maxSafeBatch); по памяти влезает \(vramBudgetFrames), \(convVAEBytesPerSample(w: pw, h: ph) / 1_048_576) МБ на кадр)")
-    } else {
-        yumeLog("Батч: \(effBatch) кадров за шаг (потолок стабильности \(maxSafeBatch); по памяти влезает \(vramBudgetFrames), \(convVAEBytesPerSample(w: pw, h: ph) / 1_048_576) МБ на кадр)")
-    }
-    // Тензоры под пачку — создаются один раз и живут весь прогон.
-    let inputPool = (0..<effBatch).map { _ in GPUTensor(engine: engine, rows: 3, cols: pw * ph) }
-    // Результат MSE тоже переиспользуется: иначе на каждый шаг создавался
-    // новый 4-байтовый shared-буфер (тот же churn драйвера, что и в санации).
-    let mseOutBufs = (0..<effBatch).map { _ in
-        engine.device.makeBuffer(length: 4, options: .storageModeShared)!
-    }
+        let batchCfg = computeEffectiveBatch(engine: engine, p: p, pw: pw, ph: ph)
+        let effBatch = batchCfg.effBatch
+        let inputPool = batchCfg.inputPool
+        let mseOutBufs = batchCfg.mseOutBufs
 
     // «Полный проход» по набору: при пачке >1 число оптимизаторских шагов
     // автоматически сокращается (кадры за шаг = effBatch). Пользовательский
     // steps (когда он задан явно) не трогаем.
-    var epochSteps = max(1, p.steps)
-    if let mem = p.memoryFrames, !mem.isEmpty, p.steps == mem.count, effBatch > 1 {
-        epochSteps = max(1, Int((Double(mem.count) / Double(effBatch)).rounded(.up)))
-        // ceil обычно даёт шагов чуть больше, чем mem.count/effBatch —
-        // пишем честно, а не «= mem.count».
-        yumeLog("Шагов за эпоху (авто под пачку): \(epochSteps) шагов × \(effBatch) кадров (набор \(mem.count), последний шаг неполный)")
-    }
+        var epochSteps = computeEpochSteps(p: p, effBatch: effBatch)
 
     // Эпохи НИКОГДА не пропускаются: полный прогон с эпохи 0 по всем
     // p.epochs, независимо от resume (resume грузит только веса).
@@ -598,3 +563,4 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
     if TrainingControl.shared.isCancelled { throw CancellationError() }
     yumeLog("Готово. Чекпоинт: \(p.convPath)")
 }
+
