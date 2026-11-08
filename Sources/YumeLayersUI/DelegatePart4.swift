@@ -208,6 +208,7 @@ extension YumeAppDelegate {
             DispatchQueue.main.async { self?.appendCoreLog(line) }
         }
         configureTrainCallbacks()
+        configureSetParamCallback()
         configureMiscCallbacks()
         configureTestFramesCallback()
         configureViewProviders()
