@@ -58,7 +58,8 @@ public final class TrainingControl {
 
     private func enforceStop(token: Int, graceSeconds: Double) {
         lock.lock()
-        let stuck = _running && runToken == token
+        let stuck = watchdogShouldFire(running: _running,
+                                       currentToken: runToken, scheduledToken: token)
         lock.unlock()
         guard stuck else { return }
         yumeLog("❌ Обучение не ответило на остановку за \(Int(graceSeconds)) с: "
@@ -71,4 +72,16 @@ public final class TrainingControl {
         lock.lock(); defer { lock.unlock() }
         _cancelled = false
     }
+}
+
+/// Правило срабатывания watchdog-остановки — вынесено как чистая функция,
+/// потому что это самая рискованная ветка: она решает, убивать ли процесс.
+/// Watchdog обязан fire только когда прогон В ТОМ ЖЕ поколении (`scheduledToken`)
+/// и всё ещё идёт (`running`). Если началась новая попытка обучения (`runToken`
+/// вырос в `beginRun`/`endRun`) — старый watchdog обязан промолчать, иначе он
+/// убьёт живой новый прогон. Если прогон уже завершился — убивать нечего.
+public func watchdogShouldFire(running: Bool,
+                               currentToken: Int,
+                               scheduledToken: Int) -> Bool {
+    running && currentToken == scheduledToken
 }

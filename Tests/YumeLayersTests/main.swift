@@ -100,6 +100,7 @@ func coreTestRegistry() -> [(String, () -> Void)] {
         ("FinalCheckpoint", testFinalCheckpointPath),
         ("OptimizerState", testOptimizerStateRoundTrip),
         ("TrainingControl", testTrainingControlLifecycle),
+        ("TrainingWatchdogFireRule", testTrainingWatchdogFireRule),
         ("ParamAPI", testParamAPI),
         ("Checkpoints", testCheckpoints),
         ("Backups", testBackups),

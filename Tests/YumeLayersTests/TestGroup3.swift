@@ -83,6 +83,28 @@ func testTrainingControlLifecycle() {
     expect(!tc.isCancelled, "reset: отмена снята")
 }
 
+func testTrainingWatchdogFireRule() {
+    section("TrainingControl: правило срабатывания watchdog-остановки (чистая функция)")
+
+    // Watchdog обязан убить процесс ТОЛЬКО если прогон всё ещё в том же
+    // поколении и не ответил. Любое другое состояние — не убиваем.
+    // running=true, тот же token → застрял → fire.
+    expect(watchdogShouldFire(running: true, currentToken: 5, scheduledToken: 5),
+           "застрял в том же поколении — fire")
+
+    // Новый прогон начался (token вырос) — старый watchdog НЕ должен убивать.
+    expect(!watchdogShouldFire(running: true, currentToken: 6, scheduledToken: 5),
+           "новое поколение — старый watchdog молчит")
+
+    // Прогон завершился (running=false) — убивать нечего.
+    expect(!watchdogShouldFire(running: false, currentToken: 5, scheduledToken: 5),
+           "прогон завершён — не fire")
+
+    // Завершился и сменил поколение — тем более не fire.
+    expect(!watchdogShouldFire(running: false, currentToken: 7, scheduledToken: 5),
+           "завершён + новое поколение — не fire")
+}
+
 
 func testHTTP() {
     section("HTTP: парсинг запросов")
