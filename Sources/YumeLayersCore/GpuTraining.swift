@@ -40,12 +40,14 @@ public final class GpuSession {
         let buffer: MTLCommandBuffer
         let pool: BufferPool
         let staged: [MTLBuffer]
+        let engine: MetalEngine
         private let sem = DispatchSemaphore(value: 0)
 
-        init(_ buffer: MTLCommandBuffer, pool: BufferPool, staged: [MTLBuffer]) {
+        init(_ buffer: MTLCommandBuffer, pool: BufferPool, staged: [MTLBuffer], engine: MetalEngine) {
             self.buffer = buffer
             self.pool = pool
             self.staged = staged
+            self.engine = engine
         }
 
         /// Обработчик завершения только сигналит: время GPU считается в
@@ -77,8 +79,15 @@ public final class GpuSession {
                                       elapsedSeconds: elapsed,
                                       deadlineSeconds: GpuSession.gpuDeadlineSeconds) {
                 case .done:
-                    yumeLog("⚠️ обработчик завершения не доставлен — статус буфера: "
-                          + "\(state). Продолжаю по статусу.")
+                    // Штатный обход потерянного обработчика (статус completed)
+                    // логируем дозированно — иначе длинные прогоны тонут в
+                    // тысячах ложных «⚠️». Ошибка (.failed) — всегда.
+                    if engine.noteHandlerMiss(state: state) {
+                        let real = gpuHandlerMissIsRealProblem(state: state)
+                        yumeLog("\(real ? "⚠️" : "ℹ️") обработчик завершения не доставлен "
+                              + "\(real ? "— НАСТОЯЩАЯ ОШИБКА" : "(штатный обход)") — статус буфера: "
+                              + "\(state). Продолжаю по статусу.")
+                    }
                     break
                 case .timedOut:
                     yumeLog("❌ GPU не ответила за \(Int(GpuSession.gpuDeadlineSeconds)) с — "
@@ -116,7 +125,7 @@ public final class GpuSession {
         let committed = cmd!
         let myStaged = staged
         staged.removeAll()
-        let step = CommittedStep(committed, pool: pool, staged: myStaged)
+        let step = CommittedStep(committed, pool: pool, staged: myStaged, engine: engine)
         committed.addCompletedHandler { [weak step] _ in
             step?.signal()   // время GPU считается в wait() — там есть стенная граница
         }

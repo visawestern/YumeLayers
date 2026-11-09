@@ -15,6 +15,21 @@ public final class MetalEngine {
     /// Сколько раз реально выделен новый приватный буфер (через makeBuffer).
     /// Растёт только при промахе пула; с переиспользованием почти не растёт.
     public private(set) var totalBufferAllocations = 0
+    /// Сколько раз штатно обошли недоставленный обработчик завершения
+    /// (буфер completed). Для дозированного логирования (см. `gpuShouldLogHandlerMiss`).
+    private var handlerMissCount = 0
+
+    /// Регистрирует штатный обход недоставленного обработчика и решает,
+    /// печатать ли это событие. Единый счётчик на процесс: `MetalEngine`
+    /// и `GpuSession` делят его, чтобы троттлинг считал все обходы, а не
+    /// по одному на класс. Возвращает true, если надо залогировать.
+    func noteHandlerMiss(state: GpuBufferState) -> Bool {
+        if gpuHandlerMissIsRealProblem(state: state) {
+            return true   // ошибка драйвера — печатаем всегда, без счётчика
+        }
+        handlerMissCount += 1
+        return gpuShouldLogHandlerMiss(state: state, count: handlerMissCount)
+    }
     private let bufferPoolLock = NSLock()
     /// Свободные буферы по размеру (байты → стек), готовые к выдаче.
     private var pooledBuffers: [Int: [MTLBuffer]] = [:]
@@ -144,12 +159,17 @@ public final class MetalEngine {
                 switch gpuWaitOutcome(state: state, handlerSignaled: false,
                                       elapsedSeconds: elapsed, deadlineSeconds: seconds) {
                 case .done:
-                    if !logged {
-                        yumeLog("⚠️ обработчик завершения не доставлен (\(what)) — "
+                    handled = true
+                    // Штатный обход потерянного обработчика (буфер completed)
+                    // затапливает лог на длинных прогонах. Реальная проблема —
+                    // только .failed; штатные обходы логируем дозированно.
+                    if !logged && noteHandlerMiss(state: state) {
+                        let real = gpuHandlerMissIsRealProblem(state: state)
+                        yumeLog("\(real ? "⚠️" : "ℹ️") обработчик завершения не доставлен "
+                              + "\(real ? "— НАСТОЯЩАЯ ОШИБКА" : "(штатный обход)") (\(what)) — "
                               + "статус буфера: \(state). Продолжаю по статусу.")
                         logged = true
                     }
-                    handled = true
                 case .timedOut:
                     yumeLog("❌ GPU не ответила за \(Int(seconds)) с — \(what). "
                           + "Статус буфера: \(state), ошибка: \(cmd.error?.localizedDescription ?? "нет"). "

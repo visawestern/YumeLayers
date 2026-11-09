@@ -82,6 +82,7 @@ func coreTestRegistry() -> [(String, () -> Void)] {
         ("TensorStagingPool", testTensorStagingPool),
         ("GradSanitize", testGradSanitizeBatched),
         ("GpuWaitPolicy", testGpuWaitPolicy),
+        ("GpuHandlerMissPolicy", testGpuHandlerMissPolicy),
         ("ReconOutput", testReconOutput),
         ("InterpolationPlan", testInterpolationPlan),
         ("InterpolationPlanProperties", testInterpolationPlanProperties),
@@ -210,6 +211,7 @@ func featureTestRegistry() -> [(String, () -> Void)] {
         ("RealVideoDatasetAvailable", testRealVideoDatasetAvailable),
         ("RealVideoFramesExtracted", testRealVideoFramesExtracted),
         ("OverfitRealVideo16Frames", testOverfitRealVideo16Frames),
+        ("HoldoutRealVideoScenes", testHoldoutRealVideoScenes),
     ]
 }
 

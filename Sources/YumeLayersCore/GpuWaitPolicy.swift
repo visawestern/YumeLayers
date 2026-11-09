@@ -86,6 +86,36 @@ public func boundedGpuMs(reportedMs: Double,
     return reported
 }
 
+/// Реальная ли это проблема или штатный обход потерянного обработчика.
+///
+/// На AMD Radeon Pro 5500M драйвер регулярно НЕ доставляет
+/// `addCompletedHandler`, хотя буфер давно выполнен (`status == .completed`).
+/// Это штатный путь: мы выходим по статусу и продолжаем — предупреждать об
+/// этом на КАЖДОМ буфере нельзя, иначе лог тонет в тысячах ложных «⚠️» и
+/// настоящая ошибка становится невидимой. Подлинная проблема — только когда
+/// буфер завершился СО СТАТУСОМ ОШИБКИ (`.failed`): тогда данные нечитаемы.
+public func gpuHandlerMissIsRealProblem(state: GpuBufferState) -> Bool {
+    state == .failed
+}
+
+/// Печатать ли это конкретное «обработчик не доставлен» событие.
+///
+/// Штатные обходы (`.completed`) логируются дозированно: первые `logFirst`
+/// штук (видно, что драйвер вообще теряет обработчики) и далее каждое
+/// `logEvery`-е (видно нарастание). Реальная ошибка (`.failed`) печатается
+/// всегда. `count` — порядковый номер штатного обхода в этом процессе
+/// (начиная с 1). Возвращает false для «молча» пропущенных рядовых обходов.
+public func gpuShouldLogHandlerMiss(state: GpuBufferState,
+                                    count: Int,
+                                    logFirst: Int = 3,
+                                    logEvery: Int = 500) -> Bool {
+    if gpuHandlerMissIsRealProblem(state: state) { return true }
+    guard count >= 1 else { return false }
+    if count <= logFirst { return true }
+    let every = max(logEvery, 1)
+    return count % every == 0
+}
+
 /// Пауза регулятора, нарезанная на короткие срезы.
 ///
 /// Регулятор может добавить до 2 с паузы после шага. Если спать одним куском,

@@ -187,10 +187,10 @@ func testOverfitRealVideo16Frames() {
         }
     }
     expect(frames.count == 16, "загружено 16 кадров из реального видео")
-    let vae = ConvVAEGPU(engine: engine, latentChannels: 64, width: 4, residual: true, groupNorm: true)
+    let vae = ConvVAEGPU(engine: engine, latentChannels: 96, width: 6, residual: true, groupNorm: true)
     let beta: Float = 0.0
-    let lr: Float = 0.003
-    let steps = 2000
+    let lr: Float = 0.0025
+    let steps = 5000
     for step in 1...steps {
         let img = frames[(step - 1) % frames.count]
         let x = GPUTensor(engine: engine, data: hwcToChw(img), rows: 3)
@@ -214,5 +214,70 @@ func testOverfitRealVideo16Frames() {
     // На реальном видео с текущей ёмкостью overfit ограничен. Фиксируем текущий порог ≥18 дБ и планируем улучшение.
     expect(meanPSNR >= 18.0, String(format: "G1 overfit реальное видео ≥18 дБ (получено %.2f)", meanPSNR))
 }
+
+func testHoldoutRealVideoScenes() {
+    section("G2: hold-out по сценам из реального видео 8446058105548.mp4")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let session = GpuSession(engine)
+    let w = 128, h = 72
+    let frameBytes = w * h * 3
+    func loadFrames(from path: String) -> [[Float]] {
+        guard let data = FileManager.default.contents(atPath: path) else { return [] }
+        let count = data.count / frameBytes
+        var frames = [[Float]]()
+        frames.reserveCapacity(count)
+        data.withUnsafeBytes { rawPtr in
+            let bytes = rawPtr.bindMemory(to: UInt8.self)
+            for i in 0..<count {
+                var img = [Float](repeating: 0, count: w * h * 3)
+                let base = i * frameBytes
+                for j in 0..<(w*h*3) {
+                    img[j] = Float(bytes[base + j]) / 255.0
+                }
+                frames.append(img)
+            }
+        }
+        return frames
+    }
+    let trainPath = "/tmp/yume_holdout/train.raw"
+    let holdoutPath = "/tmp/yume_holdout/holdout.raw"
+    let trainFrames = loadFrames(from: trainPath)
+    let holdoutFrames = loadFrames(from: holdoutPath)
+    expect(trainFrames.count >= 32, "train кадры загружены")
+    expect(holdoutFrames.count >= 32, "holdout кадры загружены")
+    let vae = ConvVAEGPU(engine: engine, latentChannels: 32, width: 2, residual: true, groupNorm: true)
+    let beta: Float = 0.01
+    let lr: Float = 0.004
+    let steps = 800
+    for step in 1...steps {
+        let img = trainFrames[(step - 1) % trainFrames.count]
+        let x = GPUTensor(engine: engine, data: hwcToChw(img), rows: 3)
+        session.begin()
+        let c = vae.forward(session, image: x, w: w, h: h, deterministic: true)
+        let (_, g) = vae.backward(session, c, target: x, beta: beta)
+        vae.applyAdam(session, grads: g, t: step, lr: lr)
+        _ = session.end()
+    }
+    func meanPSNR(_ frames: [[Float]]) -> Float {
+        var sum: Float = 0
+        for img in frames {
+            let x = GPUTensor(engine: engine, data: hwcToChw(img), rows: 3)
+            session.begin()
+            let c = vae.forward(session, image: x, w: w, h: h, deterministic: true)
+            _ = session.end()
+            sum += psnr(reference: img, candidate: chwToHwc(c.recon.toArray()))
+        }
+        return sum / Float(frames.count)
+    }
+    let trainPSNR = meanPSNR(trainFrames)
+    let holdoutPSNR = meanPSNR(holdoutFrames)
+    let gap = trainPSNR - holdoutPSNR
+    print(String(format: "      holdout real video: train PSNR=%.2f дБ, holdout PSNR=%.2f дБ, gap=%.2f дБ", trainPSNR, holdoutPSNR, gap))
+    // Для реального видео требуем разрыв <10 дБ как индикатор обобщения
+    expect(gap < 10.0, String(format: "holdout разрыв <10 дБ (получено %.2f)", gap))
+    expect(trainPSNR > 15.0, String(format: "train PSNR >15 дБ (получено %.2f)", trainPSNR))
+}
+
 
 
