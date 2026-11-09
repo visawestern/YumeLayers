@@ -247,6 +247,8 @@ final class ApiServer {
             self.route__api_save_recons(conn: conn, body: body, pathWithQuery: pathWithQuery); return
         case ("GET", "/api/test-frames"), ("POST", "/api/test-frames"):
             self.route__api_test_frames(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/compose"), ("POST", "/api/compose"):
+            self.route__api_compose(conn: conn, body: body, pathWithQuery: pathWithQuery); return
         default:
             send(status: 404, body: "{\"error\":\"not found\"}", to: conn)
         }
@@ -255,6 +257,31 @@ final class ApiServer {
 
     private func route__api_status(conn: NWConnection, body: String, pathWithQuery: String) {
             send(status: 200, body: statusJSON(), to: conn)
+    }
+
+    /// POST /api/compose — чистая композиция слоёв (Фаза 5):
+    /// {"w":..,"h":..,"background":[...],"objects":[...],"mask":[...],"light":[...]}
+    /// → {"composite":[...]} (3·w·h float32, [0…1]).
+    private func route__api_compose(conn: NWConnection, body: String, pathWithQuery: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let w = json["w"] as? Int, w > 0,
+              let h = json["h"] as? Int, h > 0,
+              let bg = json["background"] as? [Float],
+              let ob = json["objects"] as? [Float],
+              let mask = json["mask"] as? [Float],
+              let light = json["light"] as? [Float] else {
+            send(status: 400, body: "{\"error\":\"bad request\"}", to: conn)
+            return
+        }
+        let composite = composeLayers(w: w, h: h, background: bg, objects: ob,
+                                      mask: mask, light: light)
+        guard let out = try? JSONSerialization.data(withJSONObject: ["composite": composite]),
+              let text = String(data: out, encoding: .utf8) else {
+            send(status: 500, body: "{\"error\":\"serialize\"}", to: conn)
+            return
+        }
+        send(status: 200, body: text, to: conn)
     }
 
     private func route__api_interpolation(conn: NWConnection, body: String, pathWithQuery: String) {

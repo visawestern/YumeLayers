@@ -188,3 +188,32 @@ public func continuationFromSeed(lastZ: [Float], schedule: DiffusionSchedule,
                             schedule: schedule, noise: noise)
     return ddpmSampleChain(xT: xT.xT, schedule: schedule, predEps: predEps)
 }
+
+/// Декод плоского массива латента (C×plane) в кадр [0,1] (sigmoid).
+/// nil при несовпадении формы. Чтения — после end().
+public func decodeLatentArray(engine: MetalEngine, vae: ConvVAEGPU,
+                              z: [Float], w: Int, h: Int) -> [Float]? {
+    let C = vae.latentChannels
+    let plane = (w / 8) * (h / 8)
+    guard z.count == C * plane else { return nil }
+    let session = GpuSession(engine)
+    session.begin()
+    let zT = GPUTensor(engine: engine, data: z, rows: C)
+    let d = vae.decode(session, z: zT, w: w, h: h)
+    _ = session.end()
+    return d.recon.toArray()
+}
+
+/// Предиктор шума денойзера для CPU-цепочки: каждая итерация — один GPU-форвард.
+/// (net, session) захватываются; сессия используется последовательно.
+func makeDenoiserPredictor(session: GpuSession, net: DenoiserMLPGPU,
+                           dimEmb: Int) -> (Int, [Float]) -> [Float] {
+    { t, x in
+        session.begin()
+        let xT = GPUTensor(engine: session.engine, data: x, rows: 1)
+        let emb = timeEmbedding(t: t, dim: dimEmb)
+        let pred = net.forward(session, xT: xT, emb: emb)
+        _ = session.end()
+        return pred.toArray()
+    }
+}

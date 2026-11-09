@@ -67,6 +67,8 @@
 - [x] Интеграция с реальными латентами VAE: `encodeWindowLatents` (окно кадров → латенты за одну сессию; чтения после end()); обучение денойзера на латентах 4-кадрового окна 32×24: loss 0.3558→0.0000 (`testDenoiserOnVAELatents`).
 - [x] Чекпоинт диффузии в safetensors: `saveDiffusionCheckpoint`/`loadDiffusionCheckpoint` (`DiffusionCheckpoint.swift`; формат как у ядра + метаданные dimIn/dimEmb/hidden/timesteps/betaStart/betaEnd/archVersion=4). Round-trip матриц и метаданных, отклонение повреждённых файлов (`TestGroup18.swift`).
 - [x] Сид-продолжение генерации: `noiseFromSeed` + `continuationFromSeed` (зашумление последнего латента по seed → DDIM-цепочка). Детерминизм по seed, конечность, отличимость разных seed (`testContinuationSeed`).
+- [x] Полный синтетический цикл диффузии: кадры → `encodeWindowLatents` → докрутка денойзера → `continuationFromSeed` с GPU-предиктором (`makeDenoiserPredictor`) → `decodeLatentArray` → кадр [0,1] невырожденный (`testSyntheticDiffusionCycle`).
+- [x] API-композитор слоёв (Фаза 5): `POST /api/compose` (w/h/background/objects/mask/light → composite float[]; живая curl-проверка 4×4 → 12 значений). Композиция `composeLayers` уже покрыта `testLayerComposition`.
 - [ ] Обучить диффузию в латентном пространстве VAE (по результатам Фазы 1), на окнах из N подряд идущих кадров. — Математика и датасет окон готовы (`LatentDiffusion.swift`: расписание DDPM, прямое зашумление, батчи ссылок); остаётся GPU-денойзинг-обучение на качественных латентах (после ворот Фазы 1).
 - [ ] Cид-продолжение видео с последнего кадра.
 - [ ] Интерполяция A→B перевести на диффузионные промежуточные кадры (вместо гладкого смешения).
@@ -131,20 +133,25 @@
 - [x] **Юнит** (чистые функции, CPU, без Metal/UI) — обязательны для всей новой логики:
   `testInterpolationPlan`, `testL1AndSobelLoss`, `testSobelEdgeGradCPU`,
   `testSceneMotion`, `testDutySleep`, `testLayerRanges`, `testMathAndGuards`,
-  `testPureLogic`, `testMotionClipPlanner`, `testParamContract` и др.
+  `testPureLogic`, `testMotionClipPlanner`, `testParamContract`, `testDiffusionSchedule`,
+  `testForwardDiffuse`, `testDDIMDenoiseStep`, `testFeatureStats`, `testFrechetDistanceDiagonal` и др.
 - [x] **GPU/интеграционные** (Metal-ядро ↔ CPU-эталон; save/load; аннотатор ↔ сборка):
   `testGPUMseMatchesCPU`, `testGPUGroupNorm`, `testGPU_L1Grad`,
   `testGPU_SobelEdgeGrad`, `testResidualBlockGradients`, `testLayeredLossGPU`,
   `testCheckpointRoundTrip`, `testCheckpointArchVersion`, `testConvVAEv2Residual`,
-  `testCheckpointV3Arch`, `testMotionClipManifest`.
+  `testCheckpointV3Arch`, `testMotionClipManifest`, `testGPUForwardDiffuse`,
+  `testDenoiserNumericGrads`, `testDenoiserOnVAELatents`, `testFIDOnVAELatents`,
+  `testSyntheticDiffusionCycle`, `testDiffusionCheckpointRoundTrip`.
 - [x] **API/контракт** (маршруты, статус-коды, JSON-форматы `curl`-проверки):
   `testParamAPI` (применение /api/set, неизвестные ключи), `testParamContract`
-  (`paramStringValue`/`paramBoolValue`: int/float/bool/строки/мусор).
+  (`paramStringValue`/`paramBoolValue`: int/float/bool/строки/мусор), живой `/api/compose`
+  (curl: 4×4 → 12 значений, фон 0.5 → 0.5).
 - [x] **E2E** (MP4 → кадры → обучение → интерполяция → MP4, полный цикл):
   `testInterpolateVideo` (A→B→MP4), `testInterpolationThreeSecondsVideo`
-  (3 с × 24 fps = 72 кадра), `testLayerPipeline`, `testOverfitGate_16Frames`.
+  (3 с × 24 fps = 72 кадра), `testLayerPipeline`, `testOverfitGate_16Frames`,
+  `testSyntheticDiffusionCycle` (кадры → латенты → шум → денисинг → декод → кадр).
 - [x] **Регрессия** (полный прогон сюиты зелёный на каждой итерации):
-  2446 проверок PASS (2026-11-09).
+  2587 проверок PASS (2026-11-09).
 - [x] **Производительность** (время/итерацию на 96/128/192px — `testConvPerf`).
 - [x] **Стресс/длительный** (часы без зависания — защита от клина GPU):
   `testGPUFramePoolLongRunNoHang`; `testHTTPParserFuzz` (300 случайных входов);

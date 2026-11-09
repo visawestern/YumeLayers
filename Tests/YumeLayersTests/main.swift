@@ -145,6 +145,7 @@ func coreTestRegistry() -> [(String, () -> Void)] {
         ("FeatureStats", testFeatureStats),
         ("FrechetDistanceDiagonal", testFrechetDistanceDiagonal),
         ("FIDOnVAELatents", testFIDOnVAELatents),
+        ("SyntheticDiffusionCycle", testSyntheticDiffusionCycle),
     ]
 }
 
