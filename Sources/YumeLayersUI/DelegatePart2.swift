@@ -338,6 +338,7 @@ extension YumeAppDelegate {
             if skippedBlackTotal > 0 {
                 log("Пропущено чёрных кадров в начале видео: \(skippedBlackTotal)")
             }
+            saveClipManifest()
             autoTuneParams(frames: framesStore.count)
             // Остаёмся на первой странице: в коллаже первые 10 кадров,
             // остальные доступны через пагинацию.
@@ -356,12 +357,30 @@ extension YumeAppDelegate {
     }
 
     func enqueueExtractedFrame(name: String, jpeg: Data, source: String,
-                                       isControl: Bool) {
+                                        isControl: Bool) {
         pendingExtractLock.lock()
         pendingExtractFrames.append(PendingExtractFrame(name: name, jpeg: jpeg,
                                                         source: source,
                                                         isControl: isControl))
         pendingExtractLock.unlock()
+    }
+
+    /// Фаза 3: сохранить манифест клипов движения (окна по источникам с
+    /// порядком внутри клипа). Вызывается после успешного извлечения.
+    func saveClipManifest() {
+        guard !framesStore.isEmpty else { return }
+        let refs = extractedFrameRefs(from: framesStore.map(\.source))
+        let clips = motionClips(from: refs, window: 16, stride: 8)
+        do {
+            let data = try motionClipManifestJSON(clips: clips)
+            let url = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("YumeLayers", isDirectory: true)
+                .appendingPathComponent("clips.json")
+            try data.write(to: url)
+            log("Фаза 3: манифест клипов сохранён (\(clips.count) окон) → \(url.path)")
+        } catch {
+            log("⚠️ не удалось сохранить манифест клипов: \(error.localizedDescription)")
+        }
     }
 
     func storeExtractProgress(_ p: Double, done: Int) {

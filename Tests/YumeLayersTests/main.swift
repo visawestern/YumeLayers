@@ -122,6 +122,7 @@ func runAll() {
         ("CheckpointV3Arch", testCheckpointV3Arch),
         ("MotionClipPlanner", testMotionClipPlanner),
         ("MotionClipManifest", testMotionClipManifest),
+        ("ExtractedFrameRefs", testExtractedFrameRefs),
         ("HTTPParserFuzz", testHTTPParserFuzz),
         ("ParamContract", testParamContract),
         ("V3GroupNormNoRes", testV3GroupNormNoResGrads),

@@ -33,6 +33,17 @@ public struct MotionClip: Equatable, Sendable {
     }
 }
 
+/// Превращает последовательность источников в порядке извлечения в ссылки
+/// с относительными индексами внутри каждого источника (строгий порядок).
+public func extractedFrameRefs(from sources: [String]) -> [ExtractedFrameRef] {
+    var counters: [String: Int] = [:]
+    return sources.map { s in
+        let i = counters[s, default: 0]
+        counters[s] = i + 1
+        return ExtractedFrameRef(source: s, index: i)
+    }
+}
+
 /// Разбивает последовательность извлечённых кадров на окна-клипы:
 /// - окна никогда не пересекают границу источника;
 /// - внутри серии одного источника окна идут с шагом `stride`

@@ -104,6 +104,34 @@ func testHTTPParserFuzz() {
            "фаззинг: >65536 байт отклоняется")
 }
 
+func testExtractedFrameRefs() {
+    section("Фаза 3: ссылки кадров из последовательности источников")
+    expectEqual(extractedFrameRefs(from: []), [], "пусто → пусто")
+
+    let single = extractedFrameRefs(from: ["v.mp4", "v.mp4", "v.mp4"])
+    expectEqual(single, [
+        ExtractedFrameRef(source: "v.mp4", index: 0),
+        ExtractedFrameRef(source: "v.mp4", index: 1),
+        ExtractedFrameRef(source: "v.mp4", index: 2),
+    ], "один источник: индексы 0,1,2")
+
+    let mixed = extractedFrameRefs(from: ["a.mp4", "b.mp4", "a.mp4", "b.mp4"])
+    expectEqual(mixed, [
+        ExtractedFrameRef(source: "a.mp4", index: 0),
+        ExtractedFrameRef(source: "b.mp4", index: 0),
+        ExtractedFrameRef(source: "a.mp4", index: 1),
+        ExtractedFrameRef(source: "b.mp4", index: 1),
+    ], "перемежающиеся источники: счётчик на источник")
+
+    // Сквозной путь: источники → ссылки → клипы.
+    let refs = extractedFrameRefs(from: ["a.mp4", "a.mp4", "a.mp4", "a.mp4",
+                                         "b.mp4", "b.mp4", "b.mp4"])
+    let clips = motionClips(from: refs, window: 3, stride: 1)
+    expectEqual(clips.count, 3, "a: 2 окна (0..2,1..3), b: 1 окно (0..2)")
+    expect(clips.allSatisfy { $0.source == "a.mp4" || $0.source == "b.mp4" },
+           "клипы размечены источниками")
+}
+
 func testParamContract() {
     section("API: контракт приведения параметров (JSON → поле/переключатель)")
     expectEqual(paramStringValue(NSNumber(value: 5)), "5", "int → строка без точки")
