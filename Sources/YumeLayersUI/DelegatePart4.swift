@@ -267,6 +267,11 @@ extension YumeAppDelegate {
                             self.requestedEdgeWeight = f
                             applied.append(key)
                         } else { unknown.append(key) }
+                    case "residual":
+                        if let b = paramBoolValue(value) {
+                            self.requestedResidual = b
+                            applied.append(key)
+                        } else { unknown.append(key) }
                     case "pauseMs":
                         if let s = paramStringValue(value) { self.pauseCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
                     case "gpuPowerPercent":

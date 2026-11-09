@@ -155,6 +155,8 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
     var requestedLossKind = "mse"
     /// Вес Sobel edge-loss для следующего обучения (0 — выключен).
     var requestedEdgeWeight: Float = 0
+    /// Архитектура v2 (residual) для следующего обучения.
+    var requestedResidual = false
 
     // ——— Генерация A→B: интерполяция между двумя опорными картинками ———
     let interpAButton = NSButton(title: "Выбрать…", target: nil, action: nil)

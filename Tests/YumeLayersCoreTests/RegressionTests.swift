@@ -47,8 +47,10 @@ final class RegressionTests: XCTestCase {
         let png = try XCTUnwrap(encodePNG(width: 2, height: 2, rgb: Array(repeating: 0.5, count: 12)))
         let frames = (0..<5).map { MemoryFrame(name: "\($0)", jpeg: png) }
         let cache = try XCTUnwrap(FrameCache(frames: frames, w: 2, h: 2, budgetBytes: 48))
+        // FrameCache pads to multiple of 8: 2x2 -> 8x8, 8*8*3 = 192
+        let paddedSize = ((2 + 7) / 8 * 8) * ((2 + 7) / 8 * 8) * 3
         for index in [0, 1, 2, 3, 4, 0, 4, 1, 0] {
-            XCTAssertEqual(cache.floatRow(at: index)?.count, 12)
+            XCTAssertEqual(cache.floatRow(at: index)?.count, paddedSize)
         }
     }
     func testBufferPoolNeverLoansSameBufferTwice() throws {

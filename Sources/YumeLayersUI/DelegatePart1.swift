@@ -148,6 +148,7 @@ extension YumeAppDelegate {
         p.latentChannels = max(1, requestedLatentChannels)
         p.lossKind = requestedLossKind
         p.edgeWeight = requestedEdgeWeight
+        p.residual = requestedResidual
         p.convPath = (convPathCtl.stringValue as NSString).expandingTildeInPath
 
         guard p.lr.isFinite, p.lr > 0, p.lr <= 1,

@@ -161,6 +161,8 @@ public struct Params {
     public var lossKind: String = "mse"
     /// Вес Sobel edge-loss (0 — выключен; >0 — штраф за «мыло»).
     public var edgeWeight: Float = 0
+    /// Архитектура v2 (остаточные блоки), по умолчанию выключена.
+    public var residual: Bool = false
     public var outPrefix: String
 }
 
