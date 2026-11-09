@@ -291,6 +291,44 @@ func testInterpolationPlan() {
     expectClose(plan.times.last ?? -1, 1, 1e-9, "план: последний момент — 1")
 }
 
+func testInterpolationPlanProperties() {
+    section("Property-based: interpolationFrameCount и interpolationTimes")
+    var rng = SplitMix64(seed: 42)
+    for _ in 0..<200 {
+        let seconds = Double.random(in: -10...10, using: &rng)
+        let fps = Int.random(in: 0...120, using: &rng)
+        let count = interpolationFrameCount(seconds: seconds, fps: fps)
+        expect(count >= 2,
+               "кадров >=2 даже для крайних секунд/fps")
+
+        let times = interpolationTimes(frameCount: count)
+        expectEqual(times.count, count,
+                    "times.count == frameCount")
+        // границы и монотонность
+        if count > 0 {
+            expectClose(times.first ?? -1, 0, 1e-9,
+                        "times[0] == 0")
+            expectClose(times.last ?? -2, 1, 1e-9,
+                        "times[-1] == 1")
+            var mono = true
+            for i in 1..<times.count {
+                if times[i] < times[i-1] { mono = false; break }
+            }
+            expect(mono, "times монотонно возрастают")
+        }
+    }
+    for _ in 0..<100 {
+        let n = Int.random(in: 2...500, using: &rng)
+        let t = interpolationTimes(frameCount: n)
+        let mids = t.map { smoothstep($0) }
+        var mono2 = true
+        for i in 1..<mids.count {
+            if mids[i] < mids[i-1] { mono2 = false; break }
+        }
+        expect(mono2, "smoothstep сохраняет монотонность")
+    }
+}
+
 /// Полный сквозной путь: две картинки → латент → промежуточные кадры → mp4.
 
 func testInterpolateVideo() {

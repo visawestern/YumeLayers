@@ -83,6 +83,7 @@ func runAll() {
         ("GpuWaitPolicy", testGpuWaitPolicy),
         ("ReconOutput", testReconOutput),
         ("InterpolationPlan", testInterpolationPlan),
+        ("InterpolationPlanProperties", testInterpolationPlanProperties),
         ("InterpolateVideo", testInterpolateVideo),
         ("InterpolationThreeSecondsVideo", testInterpolationThreeSecondsVideo),
         ("VideoWriter", testVideoWriterOrientation),
