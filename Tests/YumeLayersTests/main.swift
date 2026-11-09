@@ -206,6 +206,7 @@ func featureTestRegistry() -> [(String, () -> Void)] {
         ("ConvVAEv2Residual", testConvVAEv2Residual),
         ("TrainV2Residual", testTrainV2Residual),
         ("MultiSceneGeneralizationCriteria", testMultiSceneGeneralizationCriteria),
+        ("G2RealDataRequirements", testG2RealDataRequirements),
     ]
 }
 

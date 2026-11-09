@@ -181,6 +181,7 @@
 - [x] API расширен: `/api/frames`, `/api/params`, `/api/frame?index=N` — доступ к кадрам и параметрам; провайдеры подключены в UI.
 - [x] Удалены висящие ссылки на несуществующие тесты `TrainV3GroupNorm`, `CheckpointV3Arch`, `V3GroupNormNoResGrads` — сборка проходит.
 - [x] Добавлен property-based тест G2-критериев на синтетических многосценовых данных: `testMultiSceneGeneralizationCriteria` — разрыв train/holdout <10 дБ (0.06 дБ), ≥3 сцены.
+- [x] Документирован блокер G2 на реальных данных: тест `testG2RealDataRequirements` фиксирует необходимость многосценового датасета ≥2-4 тыс. кадров из ≥3 сцен и SD-VAE baseline в 854×480. Текущий стенд не имеет torch/MPS — baseline недоступен локально.
 - [x] Декомпозиция монолитов (подробно в 8.1): respond, buildRemaining, buildLeftPanel, applicationDidFinishLaunching, startTrainingInternal, ParallelExtractor.run, trainLayeredVAE, runSelfTest, trainConvVAE, тесты TestGroup5/6.
 - [x] Кнопка запуска VAE восстановлена (рендер-фикс: bordered+bezelColor вместо невидимой layer-пилюли; подтверждено сканом пикселей окна).
 - [x] Таблица производительности 96/128/192px собрана и закреплена тестом `testConvPerf` (Фаза 7).
