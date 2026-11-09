@@ -349,6 +349,11 @@ extension TrainContext {
     }
 
     /// Полный прогон по эпохам.
+    ///
+    /// Отмена проверяется и на границе эпох, и ПЕРЕД КАЖДЫМ шагом: «Стоп»,
+    /// нажатый внутри длинной эпохи, прерывает обучение на ближайшем шаге,
+    /// а не после досчитывания всей эпохи (порядок проверок = модель
+    /// `runEpochLoop`, зафиксированная тестом `testPerStepCancellationModel`).
     mutating func runEpochs() throws {
         for ep in 0..<p.epochs {
             if TrainingControl.shared.isCancelled {
@@ -356,8 +361,16 @@ extension TrainContext {
                 break
             }
             var es = EpochState()
+            var stopped = false
             for stepIdx in 0..<epochSteps {
+                if TrainingControl.shared.isCancelled { stopped = true; break }
                 try runStep(ep: ep, stepIdx: stepIdx, state: &es)
+            }
+            // Прерванную эпоху не отчитываем и не чекпоинтим: незавершённая
+            // эпоха не должна записываться как выполненная (совпадает с моделью).
+            if stopped {
+                yumeLog("Остановлено пользователем на шаге \(es.stepsDone)/\(epochSteps) эпохи \(ep)")
+                break
             }
 
             try emitEpochReport(ep: ep, lossSum: es.lossSum, psnrSum: es.psnrSum,

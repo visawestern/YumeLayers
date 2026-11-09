@@ -83,6 +83,8 @@ func coreTestRegistry() -> [(String, () -> Void)] {
         ("GradSanitize", testGradSanitizeBatched),
         ("GpuWaitPolicy", testGpuWaitPolicy),
         ("GpuHandlerMissPolicy", testGpuHandlerMissPolicy),
+        ("PerStepCancellationModel", testPerStepCancellationModel),
+        ("TrainConvVAEPromptCancel", testTrainConvVAEPromptCancel),
         ("ReconOutput", testReconOutput),
         ("InterpolationPlan", testInterpolationPlan),
         ("InterpolationPlanProperties", testInterpolationPlanProperties),

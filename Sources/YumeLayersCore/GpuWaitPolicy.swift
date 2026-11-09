@@ -116,6 +116,27 @@ public func gpuShouldLogHandlerMiss(state: GpuBufferState,
     return count % every == 0
 }
 
+/// Модель цикла «эпохи × шаги» с проверкой отмены на КАЖДОМ шаге (а не только
+/// на границе эпох). Чистая функция: `isCancelled(epoch, step)` говорит, отменён
+/// ли прогон на данном шаге. Возвращает, сколько эпох/шагов реально выполнено и
+/// остановлен ли по пользователю. Используется и как эталон поведения, и как
+/// проверяемая специфика того же кода в `runEpochs`.
+public func runEpochLoop(epochs: Int, stepsPerEpoch: Int,
+                         isCancelled: (_ epoch: Int, _ step: Int) -> Bool)
+    -> (epochsDone: Int, stepsDone: Int, stoppedByUser: Bool) {
+    var epochsDone = 0
+    var totalSteps = 0
+    for ep in 0..<max(epochs, 0) {
+        if isCancelled(ep, 0) { return (epochsDone, totalSteps, true) }
+        for step in 0..<max(stepsPerEpoch, 0) {
+            if isCancelled(ep, step) { return (epochsDone, totalSteps, true) }
+            totalSteps += 1
+        }
+        epochsDone += 1
+    }
+    return (epochsDone, totalSteps, false)
+}
+
 /// Пауза регулятора, нарезанная на короткие срезы.
 ///
 /// Регулятор может добавить до 2 с паузы после шага. Если спать одним куском,
