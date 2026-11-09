@@ -170,3 +170,21 @@ public func encodeWindowLatents(vae: ConvVAEGPU, session: GpuSession,
     _ = session.end()
     return zTensors.map { $0.toArray() }
 }
+
+/// Детерминированный «шум» из seed (SplitMix64: Float.random в [-1, 1]).
+public func noiseFromSeed(seed: UInt64, count: Int) -> [Float] {
+    var rng = SplitMix64(seed: seed)
+    return (0..<count).map { _ in Float.random(in: -1...1, using: &rng) }
+}
+
+/// Сид-продолжение: из латента последнего кадра z_last генерирует следующий
+/// латент z' через DDIM-цепочку (зашумление по seed → денисинг).
+/// Один и тот же seed → детерминированный результат.
+public func continuationFromSeed(lastZ: [Float], schedule: DiffusionSchedule,
+                                 predEps: (Int, [Float]) -> [Float],
+                                 seed: UInt64) -> [Float] {
+    let noise = noiseFromSeed(seed: seed, count: lastZ.count)
+    let xT = forwardDiffuse(x0: lastZ, t: schedule.timesteps - 1,
+                            schedule: schedule, noise: noise)
+    return ddpmSampleChain(xT: xT.xT, schedule: schedule, predEps: predEps)
+}

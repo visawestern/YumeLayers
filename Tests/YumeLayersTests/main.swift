@@ -139,6 +139,9 @@ func coreTestRegistry() -> [(String, () -> Void)] {
         ("DDIMDenoiseStep", testDDIMDenoiseStep),
         ("DDIMChainPerfectPredictor", testDDIMChainPerfectPredictor),
         ("DenoiserOnVAELatents", testDenoiserOnVAELatents),
+        ("DiffusionCheckpointRoundTrip", testDiffusionCheckpointRoundTrip),
+        ("DiffusionCheckpointRejectsBad", testDiffusionCheckpointRejectsBad),
+        ("ContinuationSeed", testContinuationSeed),
     ]
 }
 
