@@ -74,8 +74,9 @@ let gHasMetal = MTLCreateSystemDefaultDevice() != nil
 
 // MARK: - 1. HTTP-парсер локального API
 
-func runAll() {
-    let tests: [(String, () -> Void)] = [
+/// Первая половина реестра тестов (для соблюдения лимита 120 строк функции).
+func coreTestRegistry() -> [(String, () -> Void)] {
+    [
         ("HTTP", testHTTP),
         ("TensorBufferPool", testTensorBufferPool),
         ("TensorStagingPool", testTensorStagingPool),
@@ -125,6 +126,15 @@ func runAll() {
         ("ExtractedFrameRefs", testExtractedFrameRefs),
         ("HTTPParserFuzz", testHTTPParserFuzz),
         ("ParamContract", testParamContract),
+        ("DiffusionSchedule", testDiffusionSchedule),
+        ("ForwardDiffuse", testForwardDiffuse),
+        ("LatentWindowDataset", testLatentWindowDataset),
+    ]
+}
+
+/// Вторая половина реестра тестов.
+func featureTestRegistry() -> [(String, () -> Void)] {
+    [
         ("V3GroupNormNoRes", testV3GroupNormNoResGrads),
         ("GPUGroupNorm", testGPUGroupNorm),
         ("ResidualBlock", testResidualBlockGradients),
@@ -182,6 +192,10 @@ func runAll() {
         ("ConvVAEv2Residual", testConvVAEv2Residual),
         ("TrainV2Residual", testTrainV2Residual),
     ]
+}
+
+func runAll() {
+    let tests = coreTestRegistry() + featureTestRegistry()
     if let filter = gFilter {
         print("Фильтр: \(filter)")
     }
