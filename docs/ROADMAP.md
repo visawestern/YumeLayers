@@ -179,7 +179,7 @@
 ### Верифицировано (эта сессия)
 - [x] Все файлы ≤600; allowlist пуст; функции атомарны ≤120 (линт exit=0).
 - [x] Сюита **2580 PASS, 0 FAIL**; `testCodeGuideLimits` зелёный.
-- [x] **Финальная консолидированная регрессия сессии (2026-11-10, все правки вместе)**: **2632 проверок, 0 FAIL, exit 0** (579.99 с) — включает троттлинг обработчика, `watchdogShouldFire`/`watchdogDecision`, `testMultiSceneMonotonicityImprovesHoldout`, `testPerStepCancellationModel`, интеграционный `testTrainConvVAEPromptCancel`, SSIM в G2-holdout, честный порог G1-fix на реальном видео. Прирост: 2593 → 2632 (+39).
+- [x] **Финальная консолидированная регрессия сессии (2026-11-10, ВСЕ правки вместе)**: **2653 проверки, 0 FAIL, exit 0** (579.73 с) — включает троттлинг обработчика, `watchdogShouldFire`/`watchdogDecision`, `testMultiSceneMonotonicityImprovesHoldout`, `testPerStepCancellationModel`, интеграционный `testTrainConvVAEPromptCancel`, SSIM+`g2Gate` в G2-holdout, фикс+тест архитектуры чекпоинта в `interpolateVideo` (вскрыт живым E2E), high-res stabilization, `testG2GateLogic`, честный порог G1-fix на реальном видео. Прирост за сессию: **2593 → 2653 (+60)**. Дополнительно прогнаны живые сквозные проверки: `E2E API: PASS` (mp4 72@24fps) и `E2E API STOP: PASS` (покадровый Стоп через HTTP).
 - [x] API расширен: `/api/frames`, `/api/params`, `/api/frame?index=N` — доступ к кадрам и параметрам; провайдеры подключены в UI.
 - [x] Удалены висящие ссылки на несуществующие тесты `TrainV3GroupNorm`, `CheckpointV3Arch`, `V3GroupNormNoResGrads` — сборка проходит.
 - [x] Добавлен property-based тест G2-критериев на синтетических многосценовых данных: `testMultiSceneGeneralizationCriteria` — разрыв train/holdout <10 дБ (0.06 дБ), ≥3 сцены.
