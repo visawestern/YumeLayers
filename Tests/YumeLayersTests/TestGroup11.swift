@@ -41,6 +41,44 @@ func testL1AndSobelLoss() {
     expect(edgeBlurred > 0.01, "edge-loss: размытое vs резкое → >0 (\(edgeBlurred))")
 }
 
+func testSobelEdgeGradCPU() {
+    section("Этап 1: Sobel edge-grad CPU — численная проверка")
+    let w = 16, h = 12
+    var rng = SplitMix64(seed: 1234)
+    var recon = [Float](repeating: 0, count: w * h * 3)
+    var target = [Float](repeating: 0, count: w * h * 3)
+    for i in 0..<recon.count {
+        recon[i] = Float.random(in: 0...1, using: &rng)
+        target[i] = Float.random(in: 0...1, using: &rng)
+    }
+    let grad = sobelEdgeGradCPU(recon: recon, target: target, w: w, h: h)
+    expectEqual(grad.count, w * h * 3, "градиент: размер w×h×3")
+
+    func loss(_ r: [Float]) -> Double {
+        sobelEdgeLoss(recon: r, target: target, w: w, h: h)
+    }
+    let eps: Float = 1e-3
+    // Проверяем центральный пиксель + угловой + на краю окна Собеля.
+    for idx in [Int(w * 7 + 8) * 3, (w * h - 1) * 3 + 2, 5 * 3 + 1] {
+        let analytic = Double(grad[idx])
+        let orig = recon[idx]
+        recon[idx] = orig + eps
+        let lp = loss(recon)
+        recon[idx] = orig - eps
+        let lm = loss(recon)
+        recon[idx] = orig
+        let numeric = (lp - lm) / (2 * Double(eps))
+        let denom = max(1e-9, abs(analytic) + abs(numeric))
+        let rel = abs(analytic - numeric) / denom
+        expect(rel < 0.02,
+               String(format: "пиксель %d: аналит %.4e числ %.4e (отн %.1f%%)",
+                      idx, analytic, numeric, rel * 100))
+    }
+
+    let selfGrad = sobelEdgeGradCPU(recon: target, target: target, w: w, h: h)
+    expect(selfGrad.allSatisfy { $0 == 0 }, "recon == target → нулевой градиент")
+}
+
 func testVaeLossKindSwitch() {
     section("Этап 1: vaeLossGeneric переключатель mse/l1")
     guard gHasMetal else { skip("Metal недоступен"); return }
@@ -215,6 +253,31 @@ func testGPU_L1Grad() {
            "GPU-L1grad ≈ CPU (max|Δ| = \(maxAbsDiff(got, expected)))")
 }
 
+func testGPU_SobelEdgeGrad() {
+    section("Этап 1: GPU-Sobel edge-grad ≈ CPU-эталон")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let session = GpuSession(engine)
+    let w = 32, h = 24
+    var rng = SplitMix64(seed: 31)
+    var recon = [Float](repeating: 0, count: w * h * 3)
+    var target = [Float](repeating: 0, count: w * h * 3)
+    for i in 0..<recon.count {
+        recon[i] = Float.random(in: 0...1, using: &rng)
+        target[i] = Float.random(in: 0...1, using: &rng)
+    }
+    let x = GPUTensor(engine: engine, data: hwcToChw(recon), rows: 3)
+    let y = GPUTensor(engine: engine, data: hwcToChw(target), rows: 3)
+    session.begin()
+    let g = session.encodeSobelEdgeGrad(recon: x, target: y, w: w, h: h)
+    _ = session.end()
+    let got = chwToHwc(g.toArray())
+    let expected = sobelEdgeGradCPU(recon: recon, target: target, w: w, h: h)
+    let diff = maxAbsDiff(got, expected)
+    expect(diff < 1e-4,
+           "GPU-Sobelgrad ≈ CPU (max|Δ| = \(diff))")
+}
+
 func testTrainWithL1() {
     section("Этап 1: обучение с L1-градиентом (dReconOverride)")
     guard gHasMetal else { skip("Metal недоступен"); return }
@@ -248,6 +311,45 @@ func testTrainWithL1() {
     expect(firstLoss.isFinite && lastLoss.isFinite, "обучение с L1: loss конечна")
     expect(lastLoss < firstLoss,
            "обучение с L1: loss снижается (\(String(format: "%.4f", firstLoss))→\(String(format: "%.4f", lastLoss)))")
+}
+
+func testTrainWithEdge() {
+    section("Этап 1: обучение с Sobel edge-loss (dReconOverride = MSE + λ·edge)")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let session = GpuSession(engine)
+    let w = 64, h = 40
+    let nFrames = 8
+    var frames = [[Float]]()
+    for f in 0..<nFrames {
+        var rng = SplitMix64(seed: UInt64(3000 + f))
+        frames.append(makeSyntheticScene(w: w, h: h, rng: &rng))
+    }
+    let beta: Float = 0.01
+    let lr: Float = 0.004
+    let edgeWeight: Float = 0.5
+    let vae = ConvVAEGPU(engine: engine)
+    var firstLoss = Double.infinity
+    var lastLoss = Double.infinity
+    for step in 1...400 {
+        let img = frames[(step - 1) % nFrames]
+        let chw = hwcToChw(img)
+        let x = GPUTensor(engine: engine, data: chw, rows: 3)
+        session.begin()
+        let c = vae.forward(session, image: x, w: w, h: h, deterministic: false, seed: 7)
+        let edgeGrad = session.encodeSobelEdgeGrad(recon: c.recon, target: x,
+                                                   w: w, h: h)
+        let dR = session.add(session.smul(2.0 / Float(x.n), session.sub(c.recon, x)),
+                             session.smul(edgeWeight, edgeGrad))
+        let (_, g) = vae.backward(session, c, target: x, beta: beta, dReconOverride: dR)
+        vae.applyAdam(session, grads: g, t: step, lr: lr)
+        _ = session.end()
+        if step == 1 { firstLoss = vaeLossGeneric(cache: c, target: chw, beta: beta, kind: .mse) }
+        if step == 400 { lastLoss = vaeLossGeneric(cache: c, target: chw, beta: beta, kind: .mse) }
+    }
+    expect(firstLoss.isFinite && lastLoss.isFinite, "обучение с edge: loss конечна")
+    expect(lastLoss < firstLoss,
+           "обучение с edge: loss снижается (\(String(format: "%.4f", firstLoss))→\(String(format: "%.4f", lastLoss)))")
 }
 
 func testTrainOnPatchesFullFrame() {

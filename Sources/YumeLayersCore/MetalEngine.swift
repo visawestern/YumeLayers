@@ -183,6 +183,7 @@ public final class MetalEngine {
 
     static let shaderSource = MetalKernels.part0 + "\n" + MetalKernels.part1
         + "\n" + MetalKernels.groupNormSource
+        + "\n" + MetalKernels.sobelEdgeSource
 
     let matmulPS: MTLComputePipelineState
     let matmulTiledPS: MTLComputePipelineState
@@ -225,6 +226,8 @@ public final class MetalEngine {
     let msePS: MTLComputePipelineState
     let groupNormPS: MTLComputePipelineState
     let l1GradPS: MTLComputePipelineState
+    let sobelEdgeMapPS: MTLComputePipelineState
+    let sobelEdgeGradPS: MTLComputePipelineState
 
     // Вариационный путь
     let fmaPS: MTLComputePipelineState
@@ -333,6 +336,8 @@ public final class MetalEngine {
             self.msePS = try ps("mse_reduce_kernel")
             self.groupNormPS = try ps("groupnorm_kernel")
             self.l1GradPS = try ps("l1grad_kernel")
+            self.sobelEdgeMapPS = try ps("sobel_edge_map_kernel")
+            self.sobelEdgeGradPS = try ps("sobel_edge_grad_kernel")
             self.fmaPS = try ps("fma_kernel")
             self.expPS = try ps("exp_kernel")
             self.addConstPS = try ps("addconst_kernel")

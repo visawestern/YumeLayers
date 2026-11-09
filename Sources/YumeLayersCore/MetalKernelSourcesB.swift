@@ -463,6 +463,94 @@ extension MetalKernels {
 
     }
 
+    // Sobel edge-loss: градиент по реконструкции (Этап 1, шаг 3).
+    // L₁ = (1/N)·Σ_q (|∇R|_q − |∇T|_q)², |∇| — магнитуда Собеля яркости.
+    // Входы CHW: rows = 3 канала, cols = w·h.
+    static let sobelEdgeSource = """
+    kernel void sobel_edge_map_kernel(
+        device const float* recon [[buffer(0)]],
+        device const float* target [[buffer(1)]],
+        device float* eR [[buffer(2)]],
+        device float* eT [[buffer(3)]],
+        device float* gxR [[buffer(4)]],
+        device float* gyR [[buffer(5)]],
+        device float* invMag [[buffer(6)]],
+        constant int& w [[buffer(7)]],
+        constant int& h [[buffer(8)]],
+        uint gid [[thread_position_in_grid]]) {
+        int n = w * h;
+        if ((int)gid >= n) return;
+        int y = (int)gid / w;
+        int x = (int)gid % w;
+        if (y < 1 || y >= h - 1 || x < 1 || x >= w - 1) {
+            eR[gid] = 0.0f; eT[gid] = 0.0f;
+            gxR[gid] = 0.0f; gyR[gid] = 0.0f; invMag[gid] = 0.0f;
+            return;
+        }
+        float gx[9] = {-1.0f, 0.0f, 1.0f, -2.0f, 0.0f, 2.0f, -1.0f, 0.0f, 1.0f};
+        float gy[9] = {-1.0f, -2.0f, -1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 2.0f, 1.0f};
+        float sxR = 0.0f, syR = 0.0f, sxT = 0.0f, syT = 0.0f;
+        int k = 0;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                // CHW: канал c лежит в плоскости c·n. Индекс пикселя в
+                // плоскости — (y+dy)·w+(x+dx).
+                int li = (y + dy) * w + (x + dx);
+                float lR = 0.2126f * recon[li] + 0.7152f * recon[n + li] + 0.0722f * recon[2 * n + li];
+                float lT = 0.2126f * target[li] + 0.7152f * target[n + li] + 0.0722f * target[2 * n + li];
+                sxR += gx[k] * lR; syR += gy[k] * lR;
+                sxT += gx[k] * lT; syT += gy[k] * lT;
+                ++k;
+            }
+        }
+        float mR = sqrt(sxR * sxR + syR * syR);
+        float mT = sqrt(sxT * sxT + syT * syT);
+        eR[gid] = mR; eT[gid] = mT;
+        gxR[gid] = sxR; gyR[gid] = syR;
+        invMag[gid] = (mR > 1e-6f) ? (1.0f / mR) : 0.0f;
+    }
+
+    kernel void sobel_edge_grad_kernel(
+        device const float* eR [[buffer(0)]],
+        device const float* eT [[buffer(1)]],
+        device const float* gxR [[buffer(2)]],
+        device const float* gyR [[buffer(3)]],
+        device const float* invMag [[buffer(4)]],
+        device float* out [[buffer(5)]],
+        constant int& w [[buffer(6)]],
+        constant int& h [[buffer(7)]],
+        constant float& scale [[buffer(8)]],
+        uint gid [[thread_position_in_grid]]) {
+        int n = w * h;
+        if ((int)gid >= n) return;
+        int p = (int)gid;
+        int py = p / w;
+        int px = p % w;
+        float gx[9] = {-1.0f, 0.0f, 1.0f, -2.0f, 0.0f, 2.0f, -1.0f, 0.0f, 1.0f};
+        float gy[9] = {-1.0f, -2.0f, -1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 2.0f, 1.0f};
+        float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                int qy = py + dy, qx = px + dx;
+                if (qy < 1 || qy >= h - 1 || qx < 1 || qx >= w - 1) continue;
+                int q = qy * w + qx;
+                float diff = eR[q] - eT[q];
+                if (diff == 0.0f) continue;
+                float dX = diff * invMag[q] * scale * gxR[q];
+                float dY = diff * invMag[q] * scale * gyR[q];
+                int k = (1 - dy) * 3 + (1 - dx);
+                float contrib = dX * gx[k] + dY * gy[k];
+                acc0 += contrib * 0.2126f;
+                acc1 += contrib * 0.7152f;
+                acc2 += contrib * 0.0722f;
+            }
+        }
+        out[p] = acc0;
+        out[n + p] = acc1;
+        out[2 * n + p] = acc2;
+    }
+    """
+
     // Групповая нормализация (Этап 1). Один поток на группу каналов:
     // считает среднее/дисперсию по группе (группа × пространство) и
     // нормирует к N(0,1). Вход — CHW-тензор: rows = каналы, cols = плоскость.

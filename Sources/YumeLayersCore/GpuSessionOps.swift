@@ -48,16 +48,16 @@ extension GpuSession {
         min(1024, max(1, engine.device.maxThreadsPerThreadgroup.width))
     }
 
-    private func setBuffers(_ buf: [MTLBuffer?]) {
+    func setBuffers(_ buf: [MTLBuffer?]) {
         for (i, b) in buf.enumerated() {
             if let b = b { enc.setBuffer(b, offset: 0, index: i) }
         }
     }
-    private func setUInt(_ v: UInt32, index: Int) {
+    func setUInt(_ v: UInt32, index: Int) {
         var x = v
         enc.setBytes(&x, length: 4, index: index)
     }
-    private func dispatch(_ threadsW: Int, _ threadsH: Int, _ groupsW: Int, _ groupsH: Int) {
+    func dispatch(_ threadsW: Int, _ threadsH: Int, _ groupsW: Int, _ groupsH: Int) {
         let tg = MTLSize(width: threadsW, height: threadsH, depth: 1)
         let threads = MTLSize(width: groupsW, height: groupsH, depth: 1)
         enc.dispatchThreads(threads, threadsPerThreadgroup: tg)

@@ -170,13 +170,27 @@ extension TrainContext {
             let noiseSeed = trainingNoiseSeed(step: t, batchIndex: b)
             let batchCache = vae.forward(session, image: img, w: pw, h: ph,
                                          deterministic: false, seed: noiseSeed)
-            var l1dRecon: GPUTensor? = nil
+            var dRecon: GPUTensor? = nil
             if p.lossKind == "l1" {
-                l1dRecon = session.encodeL1Grad(recon: batchCache.recon, target: img)
+                dRecon = session.encodeL1Grad(recon: batchCache.recon, target: img)
+            }
+            if p.edgeWeight > 0 {
+                let edgeGrad = session.encodeSobelEdgeGrad(recon: batchCache.recon,
+                                                           target: img, w: pw, h: ph)
+                let edgeTerm = session.smul(p.edgeWeight, edgeGrad)
+                if let base = dRecon {
+                    dRecon = session.add(base, edgeTerm)
+                } else {
+                    // dReconOverride заменяет дефолтный MSE-градиент; чтобы
+                    // edge-loss был ДОПОЛНЕНИЕМ к MSE, включаем оба слагаемых.
+                    dRecon = session.add(
+                        session.smul(2.0 / Float(img.n), session.sub(batchCache.recon, img)),
+                        edgeTerm)
+                }
             }
             let (_, grads) = vae.backward(session, batchCache, target: img,
                                           beta: rgbKLBeta,
-                                          dReconOverride: l1dRecon)
+                                          dReconOverride: dRecon)
             recons.append(batchCache.recon)
             mseBufs.append(session.encodeMSE(recon: batchCache.recon, target: img,
                                              into: mseOutBufs[b]))

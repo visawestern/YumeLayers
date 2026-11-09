@@ -137,3 +137,66 @@ public func l1GradCPU(recon: [Float], target: [Float]) -> [Float] {
     }
     return out
 }
+
+/// CPU-эталон градиента Sobel edge-loss по реконструкции (для проверки
+/// `encodeSobelEdgeGrad`). L₁ = (1/(w·h))·Σ_q (|∇R|_q − |∇T|_q)²,
+/// где |∇| — магнитуда Собеля яркости. Возвращает dL₁/drecon (HWC).
+public func sobelEdgeGradCPU(recon: [Float], target: [Float], w: Int, h: Int) -> [Float] {
+    precondition(recon.count >= w * h * 3 && target.count >= w * h * 3,
+                 "sobelEdgeGradCPU: мал вход")
+    func luma(_ img: [Float], _ i: Int) -> Double {
+        0.2126 * Double(img[i]) + 0.7152 * Double(img[i + 1]) + 0.0722 * Double(img[i + 2])
+    }
+    let gx: [Double] = [-1, 0, 1, -2, 0, 2, -1, 0, 1]
+    let gy: [Double] = [-1, -2, -1, 0, 0, 0, 1, 2, 1]
+    var eR = [Double](repeating: 0, count: w * h)
+    var eT = [Double](repeating: 0, count: w * h)
+    var gxR = [Double](repeating: 0, count: w * h)
+    var gyR = [Double](repeating: 0, count: w * h)
+    for y in 1..<(h - 1) {
+        for x in 1..<(w - 1) {
+            let base = y * w + x
+            var sxR = 0.0, syR = 0.0
+            var sxT = 0.0, syT = 0.0
+            var k = 0
+            for dy in -1...1 {
+                for dx in -1...1 {
+                    let li = ((y + dy) * w + (x + dx)) * 3
+                    let lR = luma(recon, li)
+                    let lT = luma(target, li)
+                    sxR += gx[k] * lR; syR += gy[k] * lR
+                    sxT += gx[k] * lT; syT += gy[k] * lT
+                    k += 1
+                }
+            }
+            let mR = sqrt(sxR * sxR + syR * syR)
+            let mT = sqrt(sxT * sxT + syT * syT)
+            eR[base] = mR; eT[base] = mT
+            gxR[base] = sxR; gyR[base] = syR
+        }
+    }
+    var out = [Float](repeating: 0, count: w * h * 3)
+    let scale = 2.0 / Double(w * h)
+    for y in 1..<(h - 1) {
+        for x in 1..<(w - 1) {
+            let q = y * w + x
+            let diff = eR[q] - eT[q]
+            guard diff != 0 else { continue }
+            let mag = eR[q]
+            let invMag = mag > 1e-6 ? 1.0 / mag : 0.0
+            let dX = diff * invMag * scale * gxR[q]
+            let dY = diff * invMag * scale * gyR[q]
+            for dy in -1...1 {
+                for dx in -1...1 {
+                    let p = (y + dy) * w + (x + dx)
+                    let k = (dy + 1) * 3 + (dx + 1)
+                    let contrib = dX * gx[k] + dY * gy[k]
+                    out[p * 3] += Float(contrib * 0.2126)
+                    out[p * 3 + 1] += Float(contrib * 0.7152)
+                    out[p * 3 + 2] += Float(contrib * 0.0722)
+                }
+            }
+        }
+    }
+    return out
+}

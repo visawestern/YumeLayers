@@ -68,7 +68,14 @@
   128–256px; тест проверяет размер/границы/детерминизм/валидацию.
 - Шаг 3 (L1): `l1grad_kernel` + `session.encodeL1Grad` (GPU ≈ CPU, |Δ|=0),
   переключатель `lossKind` (Params/API), `dReconOverride` в trainConvVAE;
-  обучение с L1 снижает loss 0.31→0.026. Sobel edge-loss — далее.
+  обучение с L1 снижает loss 0.31→0.026.
+- Шаг 3 (Sobel edge-loss): `sobelEdgeGradCPU` (эталон, численная проверка
+  конечными разностями — отн. ошибка ≈0%), ядра `sobel_edge_map_kernel` +
+  `sobel_edge_grad_kernel`, `session.encodeSobelEdgeGrad` (GPU ≈ CPU,
+  max|Δ|=1.1e-8); интеграция в trainConvVAE: `edgeWeight > 0` добавляет
+  λ·∇L_edge к MSE/L1-градиенту (`dReconOverride`). Обучение с edgeWeight=0.5:
+  loss 0.1067→0.0069 (тесты `testSobelEdgeGradCPU`, `testGPU_SobelEdgeGrad`,
+  `testTrainWithEdge`).
 - Шаг 4б (механика): обучение на патчах (`randomCrop` 128×96 из 320×256) +
   инференс полного кадра без переобучения (полностью свёрточная сеть).
   Тест `testTrainOnPatchesFullFrame`. Реальное обучение к G2 — далее.
