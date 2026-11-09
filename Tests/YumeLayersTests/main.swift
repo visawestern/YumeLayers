@@ -136,6 +136,9 @@ func coreTestRegistry() -> [(String, () -> Void)] {
         ("DenoiserMLPShape", testDenoiserMLPShape),
         ("DenoiserNumericGrads", testDenoiserNumericGrads),
         ("DenoiserTrainOverfit", testDenoiserTrainOverfit),
+        ("DDIMDenoiseStep", testDDIMDenoiseStep),
+        ("DDIMChainPerfectPredictor", testDDIMChainPerfectPredictor),
+        ("DenoiserOnVAELatents", testDenoiserOnVAELatents),
     ]
 }
 

@@ -110,3 +110,63 @@ func subsampleWindows(_ clips: [MotionClip], maxWindows: Int,
     }
     return chosen
 }
+
+/// Один шаг обратного сэмплирования (DDIM, каноническая форма):
+///   x̂0 = (x_t − √(1−ᾱ_t)·εθ)/√ᾱ_t
+///   x_{t-1} = √ᾱ_{t-1}·x̂0 + √(1−ᾱ_{t-1} − σ_t²)·εθ + σ_t·z,
+/// где σ_t = η·√((1−ᾱ_{t-1})/(1−ᾱ_t))·√(1−ᾱ_t/ᾱ_{t-1}); η=0 — детерминизм.
+public func ddpmDenoiseStep(xT: [Float], t: Int, schedule: DiffusionSchedule,
+                            predEps: [Float], eta: Double = 0,
+                            z: [Float]? = nil) -> [Float] {
+    precondition(xT.count == predEps.count, "размеры совпадают")
+    precondition(t >= 0 && t < schedule.timesteps, "t вне [0, timesteps)")
+    let abar = schedule.alphaBars[t]
+    let abarPrev = t > 0 ? schedule.alphaBars[t - 1] : 1.0
+    let sqrtAbar = sqrt(max(abar, 0))
+    let sqrtOneAbar = sqrt(max(1 - abar, 0))
+    let sqrtAbarPrev = sqrt(max(abarPrev, 0))
+    let sigma = eta * sqrt(max((1 - abarPrev) / max(1 - abar, 1e-12), 0))
+        * sqrt(max(1 - abar / max(abarPrev, 1e-12), 0))
+    let sqrtOneAbarPrevMinusSigma = sqrt(max(1 - abarPrev - sigma * sigma, 0))
+    var out = [Float](repeating: 0, count: xT.count)
+    let zz = z ?? [Float](repeating: 0, count: xT.count)
+    for i in 0..<xT.count {
+        let x0hat = (Double(xT[i]) - sqrtOneAbar * Double(predEps[i])) / sqrtAbar
+        let base = sqrtAbarPrev * x0hat + sqrtOneAbarPrevMinusSigma * Double(predEps[i])
+        out[i] = Float(base + sigma * Double(zz[i]))
+    }
+    return out
+}
+
+/// Полная цепочка денисинга: x_T → x_0 (η=0 — детерминированный DDIM).
+public func ddpmSampleChain(xT: [Float], schedule: DiffusionSchedule,
+                            predEps: (Int, [Float]) -> [Float],
+                            eta: Double = 0) -> [Float] {
+    var x = xT
+    var t = schedule.timesteps - 1
+    while t >= 0 {
+        let eps = predEps(t, x)
+        x = ddpmDenoiseStep(xT: x, t: t, schedule: schedule,
+                            predEps: eps, eta: eta)
+        t -= 1
+    }
+    return x
+}
+
+/// Кодирует окно кадров в латенты VAE и возвращает плоские массивы.
+/// Чтения GPU→CPU выполняются ТОЛЬКО после `session.end()`.
+public func encodeWindowLatents(vae: ConvVAEGPU, session: GpuSession,
+                                frames: [GPUTensor], w: Int, h: Int,
+                                deterministic: Bool = true,
+                                seed: UInt32 = 0) -> [[Float]] {
+    guard !frames.isEmpty else { return [] }
+    session.begin()
+    var zTensors: [GPUTensor] = []
+    for f in frames {
+        let e = vae.encode(session, image: f, w: w, h: h,
+                           deterministic: deterministic, seed: seed)
+        zTensors.append(e.z)
+    }
+    _ = session.end()
+    return zTensors.map { $0.toArray() }
+}
