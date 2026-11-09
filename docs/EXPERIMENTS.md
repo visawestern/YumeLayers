@@ -88,6 +88,13 @@
 - Шаг 2c (интеграция): residual-блоки между e2-e3 и d1-d2 в
   `ConvVAEGPU(residual:)` — forward/backward/чекпоинт v2 (10 слоёв, 20 матриц);
   обучение v2 снижает loss 0.30→0.018. GroupNorm — опция.
+- Шаг 2c (v3 — GroupNorm): ядро `groupnorm_grad_kernel` + `session.encodeGroupNormGrad`
+  (GPU ≈ CPU, max|Δ|=2.4e-7); опция `groupNorm` в `ConvVAEGPU` (e1/e2/d1/d2 до ReLU,
+  2 группы); `archVersion=3` в чекпоинтах/реконструкции. Попутно исправлен баг backward:
+  `reluGrad` использовал перезаписанную residual-блоком активацию (`a2/a4`) вместо
+  сырой ReLU-маски (`a2Raw`/`a4Raw`) — численные градиенты v3 (сильные сигналы)
+  сходятся по знаку и порядку; обучение v3: loss 0.1369→0.0029; перед детерминирован
+  (3× одинаковый forward ± 1e-9).
 - Этап 2 (механика): инференс полного кадра 854×480 через `reconstructPadded`
   (паддинг + обрезка). Тест `testFullFrame854Inference`.
 

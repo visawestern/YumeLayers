@@ -92,7 +92,9 @@ private func runReconsOn(engine: MetalEngine, items: [(name: String, jpeg: Data)
         // Модель той же архитектуры (ширина + латент), что и обученная:
         // иначе формы слоёв не совпадают и загрузка падает.
         vae = ConvVAEGPU(engine: engine, latentChannels: st.latentChannels,
-                          width: st.modelWidth)
+                          width: st.modelWidth,
+                          residual: st.archVersion >= 2,
+                          groupNorm: st.archVersion >= 3)
         try vae.load(from: st.mats)
     } else {
         return [:]

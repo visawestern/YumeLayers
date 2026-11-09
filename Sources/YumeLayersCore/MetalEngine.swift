@@ -225,6 +225,7 @@ public final class MetalEngine {
     let addInPlacePS: MTLComputePipelineState
     let msePS: MTLComputePipelineState
     let groupNormPS: MTLComputePipelineState
+    let groupNormGradPS: MTLComputePipelineState
     let l1GradPS: MTLComputePipelineState
     let sobelEdgeMapPS: MTLComputePipelineState
     let sobelEdgeGradPS: MTLComputePipelineState
@@ -335,6 +336,7 @@ public final class MetalEngine {
             self.addInPlacePS = try ps("addinplace_kernel")
             self.msePS = try ps("mse_reduce_kernel")
             self.groupNormPS = try ps("groupnorm_kernel")
+            self.groupNormGradPS = try ps("groupnorm_grad_kernel")
             self.l1GradPS = try ps("l1grad_kernel")
             self.sobelEdgeMapPS = try ps("sobel_edge_map_kernel")
             self.sobelEdgeGradPS = try ps("sobel_edge_grad_kernel")

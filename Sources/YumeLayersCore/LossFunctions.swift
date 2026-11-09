@@ -125,6 +125,56 @@ public func groupNormCPU(channels: Int, groups: Int, plane: Int, xs: [Float]) ->
     return out
 }
 
+/// CPU-эталон градиента групповой нормализации (без аффинных параметров).
+/// y = (x − μ_g)/σ_g, σ_g = sqrt(var_g + ε). Формула градиента:
+///   dx_i = (1/σ)·(dy_i − mean(dy) − ((x_i − μ)/σ²)·mean(dy·(x − μ))),
+/// где mean берётся по группе (gSize·plane элементов).
+public func groupNormGradCPU(channels: Int, groups: Int, plane: Int,
+                             xs: [Float], dys: [Float]) -> [Float] {
+    precondition(channels % groups == 0 && groups >= 1)
+    let gSize = channels / groups
+    let n = gSize * plane
+    var out = [Float](repeating: 0, count: xs.count)
+    for g in 0..<groups {
+        let c0 = g * gSize
+        var sum = 0.0
+        var sumSq = 0.0
+        for c in c0..<(c0 + gSize) {
+            let base = c * plane
+            for p in 0..<plane {
+                let v = Double(xs[base + p])
+                sum += v; sumSq += v * v
+            }
+        }
+        let mean = sum / Double(n)
+        var var_ = sumSq / Double(n) - mean * mean
+        if var_ < 1e-5 { var_ = 1e-5 }
+        let invStd = 1.0 / sqrt(var_)
+        var sumDy = 0.0
+        var sumDyXm = 0.0
+        for c in c0..<(c0 + gSize) {
+            let base = c * plane
+            for p in 0..<plane {
+                let idx = base + p
+                let dy = Double(dys[idx])
+                sumDy += dy
+                sumDyXm += dy * (Double(xs[idx]) - mean)
+            }
+        }
+        let meanDy = sumDy / Double(n)
+        let meanDyXm = sumDyXm / Double(n)
+        for c in c0..<(c0 + gSize) {
+            let base = c * plane
+            for p in 0..<plane {
+                let idx = base + p
+                let xm = Double(xs[idx]) - mean
+                out[idx] = Float(invStd * (Double(dys[idx]) - meanDy - xm * meanDyXm / var_))
+            }
+        }
+    }
+    return out
+}
+
 /// CPU-эталон L1-градиента реконструкции (для проверки `encodeL1Grad`).
 public func l1GradCPU(recon: [Float], target: [Float]) -> [Float] {
     let n = min(recon.count, target.count)

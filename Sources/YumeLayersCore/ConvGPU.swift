@@ -104,6 +104,8 @@ public struct ConvCache {
 struct EncoderOutput {
     let c1: ConvCache, p1: GPUTensor, a1: GPUTensor
     let c2: ConvCache, p2: GPUTensor, a2: GPUTensor
+    /// ReLU-выход e2 ДО residual-блока (маска для reluGrad).
+    let a2Raw: GPUTensor
     let c3: ConvCache, p3: GPUTensor
     let mu: GPUTensor, logvar: GPUTensor, sigma: GPUTensor, eps: GPUTensor
     let z: GPUTensor
@@ -113,6 +115,8 @@ struct EncoderOutput {
 /// Результат декодирования: активации декодера и реконструкция.
 struct DecoderOutput {
     let u1: GPUTensor, c4: ConvCache, p4: GPUTensor, a4: GPUTensor
+    /// ReLU-выход d1 ДО residual-блока (маска для reluGrad).
+    let a4Raw: GPUTensor
     let u2: GPUTensor, c5: ConvCache, p5: GPUTensor, a5: GPUTensor
     let u3: GPUTensor, c6: ConvCache, p6: GPUTensor
     let recon: GPUTensor
@@ -127,10 +131,12 @@ public struct VAECache {
     let image: GPUTensor
     let c1: ConvCache, p1: GPUTensor, a1: GPUTensor
     let c2: ConvCache, p2: GPUTensor, a2: GPUTensor
+    let a2Raw: GPUTensor
     let c3: ConvCache, p3: GPUTensor
     let mu: GPUTensor, logvar: GPUTensor, sigma: GPUTensor, eps: GPUTensor
     let z: GPUTensor
     let u1: GPUTensor, c4: ConvCache, p4: GPUTensor, a4: GPUTensor
+    let a4Raw: GPUTensor
     let u2: GPUTensor, c5: ConvCache, p5: GPUTensor, a5: GPUTensor
     let u3: GPUTensor, c6: ConvCache, p6: GPUTensor
     let recon: GPUTensor
@@ -222,6 +228,9 @@ public final class ConvVAEGPU {
     let residual: Bool
     let resE: ResidualBlockGPU?
     let resD: ResidualBlockGPU?
+    /// Архитектура v3: групповая нормализация (2 группы) после свёрток
+    /// e1/e2/d1/d2 (до ReLU). Без аффинных параметров.
+    let groupNorm: Bool
 
     /// - Parameter seed: seed инициализации весов. По умолчанию фиксирован,
     ///   чтобы обучение было воспроизводимым; тесты полагаются на это.
@@ -231,6 +240,7 @@ public final class ConvVAEGPU {
          latentChannels: Int = ConvVAEGPU.latentC,
          width: Int = 1,
          residual: Bool = false,
+         groupNorm: Bool = false,
          seed: UInt64 = 0x5EED_1234_ABCD_0001) {
         self.channels = channels
         // C кратно 8: split2/merge2 и im2col работают блоками, а чекпоинт
@@ -265,6 +275,9 @@ public final class ConvVAEGPU {
             self.resE = nil
             self.resD = nil
         }
+        self.groupNorm = groupNorm
+        precondition(!groupNorm || (f1 % 2 == 0 && f2 % 2 == 0),
+                     "groupNorm: каналы делятся на 2 группы")
     }
 
     var layers: [ConvLayerGPU] {
@@ -293,9 +306,11 @@ public final class ConvVAEGPU {
         return VAECache(image: image,
                         c1: e.c1, p1: e.p1, a1: e.a1,
                         c2: e.c2, p2: e.p2, a2: e.a2,
+                        a2Raw: e.a2Raw,
                         c3: e.c3, p3: e.p3,
                         mu: e.mu, logvar: e.logvar, sigma: e.sigma, eps: e.eps, z: e.z,
                         u1: d.u1, c4: d.c4, p4: d.p4, a4: d.a4,
+                        a4Raw: d.a4Raw,
                         u2: d.u2, c5: d.c5, p5: d.p5, a5: d.a5,
                         u3: d.u3, c6: d.c6, p6: d.p6,
                         recon: d.recon, w: w, h: h,
@@ -317,9 +332,11 @@ public final class ConvVAEGPU {
         let plane = h3 * w3
 
         let (p1, c1) = e1.forward(s, image, ih: h, iw: w)
-        let a1 = s.relu(p1)
+        let n1 = groupNorm ? s.groupNorm(p1, groups: 2) : p1
+        let a1 = s.relu(n1)
         let (p2, c2) = e2.forward(s, a1, ih: h1, iw: w1)
-        var a2 = s.relu(p2)
+        let a2Relu = s.relu(groupNorm ? s.groupNorm(p2, groups: 2) : p2)
+        var a2 = a2Relu
         var resECache: ResidualBlockGPU.Cache? = nil
         if let rb = resE {
             let (rbOut, rc) = rb.forward(s, a2, ih: h2, iw: w2)
@@ -342,6 +359,7 @@ public final class ConvVAEGPU {
         let z = s.fma(mu, sigma, eps)
         return EncoderOutput(c1: c1, p1: p1, a1: a1,
                              c2: c2, p2: p2, a2: a2,
+                             a2Raw: a2Relu,
                              c3: c3, p3: p3,
                              mu: mu, logvar: logvar, sigma: sigma, eps: eps, z: z,
                              resE: resECache)
@@ -359,7 +377,8 @@ public final class ConvVAEGPU {
 
         let u1 = s.upsample2x(z, h: h3, w: w3)
         let (p4, c4) = d1.forward(s, u1, ih: h2, iw: w2)
-        var a4 = s.relu(p4)
+        let a4Relu = s.relu(groupNorm ? s.groupNorm(p4, groups: 2) : p4)
+        var a4 = a4Relu
         var resDCache: ResidualBlockGPU.Cache? = nil
         if let rb = resD {
             let (rbOut, rc) = rb.forward(s, a4, ih: h2, iw: w2)
@@ -368,11 +387,12 @@ public final class ConvVAEGPU {
         }
         let u2 = s.upsample2x(a4, h: h2, w: w2)
         let (p5, c5) = d2.forward(s, u2, ih: h1, iw: w1)
-        let a5 = s.relu(p5)
+        let a5 = s.relu(groupNorm ? s.groupNorm(p5, groups: 2) : p5)
         let u3 = s.upsample2x(a5, h: h1, w: w1)
         let (p6, c6) = d3.forward(s, u3, ih: h, iw: w)
         let recon = s.sigmoid(p6)
         return DecoderOutput(u1: u1, c4: c4, p4: p4, a4: a4,
+                             a4Raw: a4Relu,
                              u2: u2, c5: c5, p5: p5, a5: a5,
                              u3: u3, c6: c6, p6: p6,
                              recon: recon, resD: resDCache)
@@ -396,7 +416,8 @@ public final class ConvVAEGPU {
 
         let (dx6, gW6, gb6) = d3.backward(s, cache.c6, dOut: dP6)
         let dA5 = s.downsample2x(dx6, h: h / 2, w: w / 2)
-        let dP5 = s.reluGrad(cache.a5, dA5)
+        var dP5 = s.reluGrad(cache.a5, dA5)
+        if groupNorm { dP5 = s.encodeGroupNormGrad(cache.p5, dP5, groups: 2) }
         let (dx5, gW5, gb5) = d2.backward(s, cache.c5, dOut: dP5)
         var dA4 = s.downsample2x(dx5, h: h / 4, w: w / 4)
         var resDGrads: [GPUTensor] = []
@@ -405,7 +426,8 @@ public final class ConvVAEGPU {
             dA4 = dPrev
             resDGrads = gr
         }
-        let dP4 = s.reluGrad(cache.a4, dA4)
+        var dP4 = s.reluGrad(cache.a4Raw, dA4)
+        if groupNorm { dP4 = s.encodeGroupNormGrad(cache.p4, dP4, groups: 2) }
         let (dx4, gW4, gb4) = d1.backward(s, cache.c4, dOut: dP4)
 
         // ---- Вариационный узел ----
@@ -424,9 +446,11 @@ public final class ConvVAEGPU {
             dBeforeResE = dPrev
             resEGrads = gr
         }
-        let dP2 = s.reluGrad(cache.a2, dBeforeResE)
+        var dP2 = s.reluGrad(cache.a2Raw, dBeforeResE)
+        if groupNorm { dP2 = s.encodeGroupNormGrad(cache.p2, dP2, groups: 2) }
         let (dx2, gW2, gb2) = e2.backward(s, cache.c2, dOut: dP2)
-        let dP1 = s.reluGrad(cache.a1, dx2)
+        var dP1 = s.reluGrad(cache.a1, dx2)
+        if groupNorm { dP1 = s.encodeGroupNormGrad(cache.p1, dP1, groups: 2) }
         let (dx1, gW1, gb1) = e1.backward(s, cache.c1, dOut: dP1)
 
         var gAll: [GPUTensor] = [gW1, gb1, gW2, gb2]

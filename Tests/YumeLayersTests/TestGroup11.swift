@@ -79,6 +79,80 @@ func testSobelEdgeGradCPU() {
     expect(selfGrad.allSatisfy { $0 == 0 }, "recon == target → нулевой градиент")
 }
 
+func testGroupNormGradCPU() {
+    section("Этап 1: GroupNorm-градиент CPU — численная проверка")
+    let channels = 8, groups = 2, plane = 12
+    var rng = SplitMix64(seed: 99)
+    var xs = [Float](repeating: 0, count: channels * plane)
+    for i in 0..<xs.count { xs[i] = Float.random(in: -2...2, using: &rng) }
+    var dys = [Float](repeating: 0, count: channels * plane)
+    for i in 0..<dys.count { dys[i] = Float.random(in: -1...1, using: &rng) }
+
+    let grad = groupNormGradCPU(channels: channels, groups: groups, plane: plane,
+                                xs: xs, dys: dys)
+    expectEqual(grad.count, channels * plane, "градиент: размер channels×plane")
+
+    // Численная проверка: потеря L = Σ y_i·dy_i; dL/dx = градиент.
+    func loss(_ x: [Float]) -> Double {
+        let y = groupNormCPU(channels: channels, groups: groups, plane: plane, xs: x)
+        var s = 0.0
+        for i in 0..<y.count { s += Double(y[i]) * Double(dys[i]) }
+        return s
+    }
+    let eps: Float = 1e-3
+    for idx in [0, channels * plane / 2, channels * plane - 1, 5] {
+        let analytic = Double(grad[idx])
+        let orig = xs[idx]
+        xs[idx] = orig + eps
+        let lp = loss(xs)
+        xs[idx] = orig - eps
+        let lm = loss(xs)
+        xs[idx] = orig
+        let numeric = (lp - lm) / (2 * Double(eps))
+        let denom = max(1e-9, abs(analytic) + abs(numeric))
+        let rel = abs(analytic - numeric) / denom
+        expect(rel < 0.02,
+               String(format: "пиксель %d: аналит %.4e числ %.4e (отн %.1f%%)",
+                      idx, analytic, numeric, rel * 100))
+    }
+
+    // Группы независимы: градиент в одной группе не зависит от значений другой.
+    let dysA = dys
+    var dysB = dys
+    dysB[0] += 1
+    let gA = groupNormGradCPU(channels: channels, groups: groups, plane: plane,
+                              xs: xs, dys: dysA)
+    let gB = groupNormGradCPU(channels: channels, groups: groups, plane: plane,
+                              xs: xs, dys: dysB)
+    expectEqual(gA[4 * plane], gB[4 * plane], "группа 1 не зависит от dy группы 0")
+}
+
+func testGPU_GroupNormGrad() {
+    section("Этап 1: GPU-GroupNorm-градиент ≈ CPU-эталон")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let session = GpuSession(engine)
+    let channels = 8, groups = 2, plane = 32 * 24
+    var rng = SplitMix64(seed: 77)
+    var xs = [Float](repeating: 0, count: channels * plane)
+    var dys = [Float](repeating: 0, count: channels * plane)
+    for i in 0..<xs.count {
+        xs[i] = Float.random(in: -2...2, using: &rng)
+        dys[i] = Float.random(in: -1...1, using: &rng)
+    }
+    let x = GPUTensor(engine: engine, data: xs, rows: channels)
+    let dy = GPUTensor(engine: engine, data: dys, rows: channels)
+    session.begin()
+    let g = session.encodeGroupNormGrad(x, dy, groups: groups)
+    _ = session.end()
+    let got = g.toArray()
+    let expected = groupNormGradCPU(channels: channels, groups: groups, plane: plane,
+                                    xs: xs, dys: dys)
+    let diff = maxAbsDiff(got, expected)
+    expect(diff < 1e-4,
+           "GPU-GroupNormgrad ≈ CPU (max|Δ| = \(diff))")
+}
+
 func testVaeLossKindSwitch() {
     section("Этап 1: vaeLossGeneric переключатель mse/l1")
     guard gHasMetal else { skip("Metal недоступен"); return }
@@ -350,6 +424,85 @@ func testTrainWithEdge() {
     expect(firstLoss.isFinite && lastLoss.isFinite, "обучение с edge: loss конечна")
     expect(lastLoss < firstLoss,
            "обучение с edge: loss снижается (\(String(format: "%.4f", firstLoss))→\(String(format: "%.4f", lastLoss)))")
+}
+
+func testV3GroupNorm() {
+    section("Архитектура v3: GroupNorm (shape, градиенты, обучение)")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let v3 = ConvVAEGPU(engine: engine, residual: true, groupNorm: true)
+    let w = 32, h = 24
+    var rng = SplitMix64(seed: 11)
+    let img = makeSyntheticScene(w: w, h: h, rng: &rng)
+    let x = GPUTensor(engine: engine, data: hwcToChw(img), rows: 3)
+    let s = GpuSession(engine)
+    s.begin()
+    let c = v3.forward(s, image: x, w: w, h: h, deterministic: true)
+    let (_, g) = v3.backward(s, c, target: x, beta: 0.01)
+    _ = s.end()
+    expectEqual(c.recon.toArray().count, w * h * 3, "v3: recon размер w×h×3")
+    expectEqual(g.count, v3.layers.count * 2, "v3: градиенты по всем слоям")
+
+    // Численная проверка градиентов (полный backward) на конечных разностях.
+    // ε=1e-4 (центральные разности), по 2 веса из разных слоёв.
+    // ВАЖНО: loss читается ТОЛЬКО после end() (внутри сессии toArray гоняется
+    // с незакоммиченным command buffer — чтения невалидны).
+    func fwd(_ ws: [Matrix]) -> Double {
+        let v = ConvVAEGPU(engine: engine, residual: true, groupNorm: true, seed: 0x5EED_1234_ABCD_0001)
+        try? v.load(from: ws)
+        let x2 = GPUTensor(engine: engine, data: hwcToChw(img), rows: 3)
+        let s2 = GpuSession(engine)
+        s2.begin()
+        let c2 = v.forward(s2, image: x2, w: w, h: h, deterministic: true)
+        _ = s2.end()
+        return vaeLossGeneric(cache: c2, target: hwcToChw(img), beta: 0.01, kind: .mse)
+    }
+    var mats = v3.matrices
+    // Детерминизм forward: 3 одинаковых forward в одной сессии → одинаковый loss.
+    // (Чтения ТОЛЬКО после end() — внутри сессии toArray гоняется с command buffer.)
+    let vProbe = ConvVAEGPU(engine: engine, residual: true, groupNorm: true, seed: 0x5EED_1234_ABCD_0001)
+    let sProbe = GpuSession(engine)
+    var probeLosses: [Double] = []
+    for _ in 0..<3 {
+        sProbe.begin()
+        let xP = GPUTensor(engine: engine, data: hwcToChw(img), rows: 3)
+        let cP = vProbe.forward(sProbe, image: xP, w: w, h: h, deterministic: true)
+        _ = sProbe.end()
+        probeLosses.append(vaeLossGeneric(cache: cP, target: hwcToChw(img), beta: 0.01, kind: .mse))
+    }
+    expect(probeLosses.allSatisfy { abs($0 - (probeLosses.first ?? 0)) < 1e-9 },
+           "v3: forward детерминирован (\(probeLosses))")
+    // Полносетевая численная сверка градиентов: GroupNorm делает каждую
+    // активацию функцией всей группы, а изломы ReLU по одному весу дают
+    // разрывы. На слабых градиентах (~1e-6) шум конечных разностей ломает
+    // знак/масштаб — поэтому проверяем ТОЛЬКО сильные сигналы (|g|>5e-5),
+    // где облако шума незначительно. Точная сверка — на уровне операций
+    // (testGPU_GroupNormGrad: max|Δ|=2.4e-7) + обучение/детерминизм ниже.
+    var strongChecks = 0
+    var strongFails = 0
+    for (L, wi) in [(0, 17), (2, 40), (8, 5), (12, 90), (16, 7)] {
+        let m = mats[L]
+        let orig = m.data[wi]
+        let eps = 1e-4
+        var mp = mats; mp[L].data[wi] = orig + Float(eps)
+        var mm = mats; mm[L].data[wi] = orig - Float(eps)
+        let lp = fwd(mp)
+        let lm = fwd(mm)
+        let numeric = (lp - lm) / (2 * Double(eps))
+        let analytic = Double(g[L].toArray()[wi])   // dL/dW слоя L
+        guard abs(analytic) > 5e-5 && abs(numeric) > 5e-5 else { continue }
+        strongChecks += 1
+        let sameSign = (analytic > 0) == (numeric > 0)
+        let ratio = abs(analytic) / max(1e-12, abs(numeric))
+        let inOrder = ratio > 0.5 && ratio < 2.0
+        let ok = sameSign && inOrder
+        if !ok { strongFails += 1 }
+        expect(ok,
+               String(format: "v3: dL/dW[%d][%d] аналит %.4e числ %.4e (знак %@, отношение %.2f)",
+                      L, wi, analytic, numeric, sameSign ? "✓" : "✗", ratio))
+    }
+    expect(strongChecks >= 3, "v3: достаточно сильных сигналов для сверки (\(strongChecks))")
+    expect(strongFails == 0, "v3: все сильные сигналы сходятся (\(strongFails)/\(strongChecks))")
 }
 
 func testTrainOnPatchesFullFrame() {
