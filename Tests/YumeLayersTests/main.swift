@@ -132,6 +132,10 @@ func coreTestRegistry() -> [(String, () -> Void)] {
         ("GPUForwardDiffuse", testGPUForwardDiffuse),
         ("GPUForwardDiffuseProperties", testGPUForwardDiffuseProperties),
         ("GPURandnStats", testGPURandnStats),
+        ("TimeEmbedding", testTimeEmbedding),
+        ("DenoiserMLPShape", testDenoiserMLPShape),
+        ("DenoiserNumericGrads", testDenoiserNumericGrads),
+        ("DenoiserTrainOverfit", testDenoiserTrainOverfit),
     ]
 }
 
