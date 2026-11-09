@@ -163,6 +163,8 @@ public struct Params {
     public var edgeWeight: Float = 0
     /// Архитектура v2 (остаточные блоки), по умолчанию выключена.
     public var residual: Bool = false
+    /// Архитектура v3 (групповая нормализация), по умолчанию выключена.
+    public var groupNorm: Bool = false
     public var outPrefix: String
 }
 

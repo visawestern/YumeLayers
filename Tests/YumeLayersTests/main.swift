@@ -119,6 +119,7 @@ func runAll() {
         ("GPU_GroupNormGrad", testGPU_GroupNormGrad),
         ("V3GroupNorm", testV3GroupNorm),
         ("TrainV3GroupNorm", testTrainV3GroupNorm),
+        ("CheckpointV3Arch", testCheckpointV3Arch),
         ("V3GroupNormNoRes", testV3GroupNormNoResGrads),
         ("GPUGroupNorm", testGPUGroupNorm),
         ("ResidualBlock", testResidualBlockGradients),

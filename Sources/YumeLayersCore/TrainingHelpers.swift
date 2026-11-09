@@ -7,6 +7,11 @@
 // параметрами.
 import Foundation
 
+/// Версия архитектуры для чекпоинта: 1=plain, 2=residual, 3=groupNorm(+residual).
+func archVersionOf(_ vae: ConvVAEGPU) -> Int {
+    vae.groupNorm ? 3 : (vae.residual ? 2 : 1)
+}
+
 /// Сохранение промежуточного чекпоинта (каждые 500 шагов).
 ///
 /// Сохраняется и состояние оптимизатора: без него продолжение обучения
@@ -21,7 +26,7 @@ func saveIntermediateCheckpoint(vae: ConvVAEGPU, convPath: String,
                       dataFingerprint: fingerprint, optimizer: opt,
                       modelWidth: vae.width,
                       latentChannels: vae.latentChannels,
-                      archVersion: 1)
+                      archVersion: archVersionOf(vae))
         yumeLog("Промежуточный чекпоинт: эпоха \(epoch), шаг \(stepIdx)/\(epochSteps) — сохранён")
     } catch {
         yumeLog("⚠️ ошибка промежуточного чекпоинта: \(error.localizedDescription)")
@@ -36,19 +41,20 @@ func saveEpochCheckpoints(vae: ConvVAEGPU, convPath: String,
                           fingerprint: String, stableRun: Bool) throws {
     guard stableRun else { return }
     let opt = CheckpointOptimizerState(step: step, moments: vae.optimizerMoments())
+    let av = archVersionOf(vae)
     try saveState(vae.matrices, to: convPath,
                   epoch: nextEpoch, step: 0, totalSteps: epochSteps,
                   dataFingerprint: fingerprint, optimizer: opt,
                   modelWidth: vae.width,
                   latentChannels: vae.latentChannels,
-                  archVersion: 1)
+                  archVersion: av)
     let finalPath = finalCheckpointPath(for: convPath)
     try saveState(vae.matrices, to: finalPath,
                   epoch: nextEpoch, step: 0, totalSteps: epochSteps,
                   dataFingerprint: fingerprint, optimizer: opt,
                   modelWidth: vae.width,
                   latentChannels: vae.latentChannels,
-                  archVersion: 1)
+                  archVersion: av)
 }
 
 /// Трассировка градиентов и кэша первого шага эпохи 0 (локализация NaN).

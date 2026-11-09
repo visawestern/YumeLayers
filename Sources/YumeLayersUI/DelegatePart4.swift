@@ -272,6 +272,11 @@ extension YumeAppDelegate {
                             self.requestedResidual = b
                             applied.append(key)
                         } else { unknown.append(key) }
+                    case "groupNorm":
+                        if let b = paramBoolValue(value) {
+                            self.requestedGroupNorm = b
+                            applied.append(key)
+                        } else { unknown.append(key) }
                     case "pauseMs":
                         if let s = paramStringValue(value) { self.pauseCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
                     case "gpuPowerPercent":

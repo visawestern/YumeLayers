@@ -409,7 +409,8 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
     let vae = ConvVAEGPU(engine: engine,
                           latentChannels: max(p.latentChannels, 1),
                           width: max(p.modelWidth, 1),
-                          residual: p.residual)
+                          residual: p.residual,
+                          groupNorm: p.groupNorm)
     let currentFingerprint: String
     if let mem = p.memoryFrames, !mem.isEmpty {
         currentFingerprint = dataFingerprint(frames: mem)

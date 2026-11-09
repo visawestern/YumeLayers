@@ -56,6 +56,43 @@ func testV3GroupNormNoResGrads() {
     expect(strongFailsN == 0, "v3(no-res): все сильные сигналы сходятся (\(strongFailsN)/\(strongChecksN))")
 }
 
+func testCheckpointV3Arch() {
+    section("Чекпоинт хранит archVersion=3 (GroupNorm) и восстанавливается")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let w = 32, h = 24
+    var rng = SplitMix64(seed: 13)
+    let img = makeSyntheticScene(w: w, h: h, rng: &rng)
+    let v3 = ConvVAEGPU(engine: engine, residual: true, groupNorm: true)
+    let tmp = NSTemporaryDirectory() + "yume-cp-v3-\(UUID().uuidString).safetensors"
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+    try? saveState(v3.matrices, to: tmp, epoch: 1, step: 1, totalSteps: 2,
+                   optimizer: CheckpointOptimizerState(step: 1, moments: v3.optimizerMoments()),
+                   modelWidth: v3.width, latentChannels: v3.latentChannels,
+                   archVersion: archVersionOf(v3))
+    guard let st = try? loadStateWithMeta(path: tmp) else {
+        expect(false, "чекпоинт v3 прочитан"); return
+    }
+    expectEqual(st.archVersion, 3, "archVersion=3 сохранён и прочитан")
+    expectEqual(st.mats.count, v3.layers.count * 2, "число матриц v3 (20)")
+
+    let rebuilt = ConvVAEGPU(engine: engine, latentChannels: st.latentChannels,
+                             width: st.modelWidth,
+                             residual: st.archVersion >= 2,
+                             groupNorm: st.archVersion >= 3)
+    do {
+        try rebuilt.load(from: st.mats)
+        let s = GpuSession(engine)
+        s.begin()
+        let x = GPUTensor(engine: engine, data: hwcToChw(img), rows: 3)
+        let c = rebuilt.forward(s, image: x, w: w, h: h, deterministic: true)
+        _ = s.end()
+        expectEqual(c.recon.toArray().count, w * h * 3, "v3: реконструкция после загрузки")
+    } catch {
+        expect(false, "v3: веса загружены: \(error)")
+    }
+}
+
 func testTrainV3GroupNorm() {
     section("Архитектура v3: обучение с GroupNorm (loss снижается)")
     guard gHasMetal else { skip("Metal недоступен"); return }

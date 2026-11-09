@@ -149,6 +149,7 @@ extension YumeAppDelegate {
         p.lossKind = requestedLossKind
         p.edgeWeight = requestedEdgeWeight
         p.residual = requestedResidual
+        p.groupNorm = requestedGroupNorm
         p.convPath = (convPathCtl.stringValue as NSString).expandingTildeInPath
 
         guard p.lr.isFinite, p.lr > 0, p.lr <= 1,

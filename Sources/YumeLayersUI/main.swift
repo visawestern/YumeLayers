@@ -157,6 +157,8 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
     var requestedEdgeWeight: Float = 0
     /// Архитектура v2 (residual) для следующего обучения.
     var requestedResidual = false
+    /// Архитектура v3 (групповая нормализация) для следующего обучения.
+    var requestedGroupNorm = false
 
     // ——— Генерация A→B: интерполяция между двумя опорными картинками ———
     let interpAButton = NSButton(title: "Выбрать…", target: nil, action: nil)
