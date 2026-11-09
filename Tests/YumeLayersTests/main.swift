@@ -84,6 +84,7 @@ func runAll() {
         ("ReconOutput", testReconOutput),
         ("InterpolationPlan", testInterpolationPlan),
         ("InterpolateVideo", testInterpolateVideo),
+        ("InterpolationThreeSecondsVideo", testInterpolationThreeSecondsVideo),
         ("VideoWriter", testVideoWriterOrientation),
         ("LoadImageOrientation", testLoadImageOrientation),
         ("CheckpointRoundTrip", testCheckpointRoundTrip),

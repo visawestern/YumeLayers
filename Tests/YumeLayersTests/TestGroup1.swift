@@ -409,6 +409,83 @@ func testInterpolateVideo() {
     expectThrows("нет чекпоинта — ошибка") { try interpolateVideo(badCkpt) }
 }
 
+/// Регрессия жалобы пользователя («в созданном видео число кадров ≈ число
+/// секунд, а не 24 fps»): 3 с × 24 fps = ровно 72 кадра, длительность MP4
+/// ≈ 3.0 с. Синтетические опорные картинки (без зависимости от файлов
+/// пользователя); реальные ассеты — docs/TEST_VIDEO_ASSETS.md.
+
+func testInterpolationThreeSecondsVideo() {
+    section("InterpolateVideo: 3 с × 24 fps = 72 кадра")
+
+    guard gHasMetal else { skip("Metal недоступен"); return }
+
+    let tmp = NSTemporaryDirectory() + "yume-interp3-\(UUID().uuidString)"
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+    try? FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+
+    let w = 16, h = 8
+    var a = [Float](repeating: 0, count: w * h * 3)
+    var b = [Float](repeating: 0, count: w * h * 3)
+    for y in 0..<h {
+        for x in 0..<w {
+            let i = (y * w + x) * 3
+            a[i] = Float(x) / Float(w)
+            a[i + 1] = Float(y) / Float(h)
+            a[i + 2] = 0.25
+            b[i] = 1 - Float(x) / Float(w)
+            b[i + 1] = 0.75
+            b[i + 2] = 0.5
+        }
+    }
+    let pathA = tmp + "/a.png", pathB = tmp + "/b.png"
+    guard let pngA = encodePNG(width: w, height: h, rgb: a),
+          let pngB = encodePNG(width: w, height: h, rgb: b) else {
+        expect(false, "опорные картинки созданы"); return
+    }
+    try? pngA.write(to: URL(fileURLWithPath: pathA))
+    try? pngB.write(to: URL(fileURLWithPath: pathB))
+
+    let engine = MetalEngine.shared
+    let vae = ConvVAEGPU(engine: engine)
+    let ckpt = tmp + "/conv.safetensors"
+    do {
+        try saveState(vae.matrices, to: ckpt)
+    } catch {
+        expect(false, "чекпоинт сохранён: \(error)"); return
+    }
+
+    let out = tmp + "/out3s.mp4"
+    let req = InterpolationRequest(imageAPath: pathA,
+                                   imageBPath: pathB,
+                                   seconds: 3,
+                                   fps: 24,
+                                   outputPath: out,
+                                   modelWidth: w,
+                                   modelHeight: h,
+                                   checkpointPath: ckpt)
+    do {
+        let res = try interpolateVideo(req)
+        expectEqual(res.frameCount, 72, "3 с × 24 fps = 72 кадра")
+        expectEqual(res.fps, 24, "видео: 24 fps")
+        expectClose(res.seconds, 3, 1e-9, "видео: 3 секунды")
+        expect(FileManager.default.fileExists(atPath: out), "mp4-файл создан")
+
+        let asset = AVURLAsset(url: URL(fileURLWithPath: out))
+        let duration = try loadAssetDuration(asset)
+        expectClose(CMTimeGetSeconds(duration), 3.0, 0.25,
+                    "длительность mp4 ≈ 3 с (не 3 кадра)")
+        let tracks = try loadVideoTracks(of: asset)
+        expectEqual(tracks.count, 1, "в mp4 одна видеодорожка")
+        if let firstTrack = tracks.first,
+           let expectedFrames = try? loadNominalFrameRate(of: firstTrack) {
+            expectClose(Double(expectedFrames), 24, 0.5,
+                        "дорожка: номинально 24 fps")
+        }
+    } catch {
+        expect(false, "интерполяция 3 с выполнена: \(error)")
+    }
+}
+
 /// Ориентация картинки при записи в видео: верхний левый пиксель кадра
 /// должен попасть в верхний левый угол буфера (а не вниз).
 
