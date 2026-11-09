@@ -71,7 +71,79 @@ func testMultiSceneGeneralizationCriteria() {
     // Критерий 1) количество сцен
     expect(true, "G2 синтетика: обучение на ≥3 сценах выполнено")
     
-    // Критерий 4) монотонность проверяется property-based в отдельном тесте
+    // Критерий 4) монотонность: реализован отдельным property-based тестом
+    // `testMultiSceneMonotonicityImprovesHoldout` (см. TestGroup12.swift).
+}
+
+/// Property-based: добавление ещё одной сцены в обучение НЕ ухудшает
+/// качество на независимом hold-out (рост разнообразия ≥ не-падение метрики).
+/// Мелкий бюджет: короткая тренировка, малая модель; цель — воспроизводимость
+/// монотонности, а не уровень PSNR.
+func testMultiSceneMonotonicityImprovesHoldout() {
+    section("G2: монотонность (property-based) — больше сцен в обучении ⇒ hold-out не хуже")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+
+    // Детерминированный синтетический генератор сцен (см. существующий
+    // `makeSyntheticScene(w:h:rng:)` из TestGroup12).
+    let engine = MetalEngine.shared
+    let session = GpuSession(engine)
+    let w = 128, h = 72
+
+    func scene(seedBase: UInt64, count: Int) -> [[Float]] {
+        (0..<count).map { i in
+            var rng = SplitMix64(seed: seedBase + UInt64(i))
+            return makeSyntheticScene(w: w, h: h, rng: &rng)
+        }
+    }
+    let s1 = scene(seedBase: 0x9001, count: 8)   // сцена 1 (всегда в тренировке)
+    let s2 = scene(seedBase: 0x9002, count: 8)   // сцена 2 (добавляется)
+    let s3 = scene(seedBase: 0x9003, count: 8)   // сцена 3 (добавляется)
+    let holdout = scene(seedBase: 0x9099, count: 8) // hold-out — никогда в тренировке
+
+    /// Тренирует компактный VAE на кадрах и возвращает средний PSNR на holdout.
+    func trainAndEval(_ frames: [[Float]], steps: Int) -> Float {
+        let vae = ConvVAEGPU(engine: engine, latentChannels: 16, width: 1,
+                             residual: false, groupNorm: false)
+        let beta: Float = 0.01
+        let lr: Float = 0.004
+        for step in 1...steps {
+            let img = frames[(step - 1) % frames.count]
+            let x = GPUTensor(engine: engine, data: hwcToChw(img), rows: 3)
+            session.begin()
+            let c = vae.forward(session, image: x, w: w, h: h, deterministic: true)
+            let (_, g) = vae.backward(session, c, target: x, beta: beta)
+            vae.applyAdam(session, grads: g, t: step, lr: lr)
+            _ = session.end()
+        }
+        var sum: Float = 0
+        for img in holdout {
+            let x = GPUTensor(engine: engine, data: hwcToChw(img), rows: 3)
+            session.begin()
+            let c = vae.forward(session, image: x, w: w, h: h, deterministic: true)
+            _ = session.end()
+            sum += psnr(reference: img, candidate: chwToHwc(c.recon.toArray()))
+        }
+        return sum / Float(holdout.count)
+    }
+
+    // Честный бюджет: одинаковое число шагов НА КАДР, иначе добавление сцен
+    // просто сокращает шаги-на-сцену и метрика падает по конструктивной причине,
+    // а не из-за свойств модели. stepsPerFrame фиксируется, totalSteps растёт
+    // линейно с числом кадров → сравниваем эффект разнообразия данных при
+    // равном усмотрении на кадр.
+    let stepsPerFrame = 45
+    let p1 = trainAndEval(s1, steps: stepsPerFrame * s1.count)
+    let p2 = trainAndEval(s1 + s2, steps: stepsPerFrame * (s1 + s2).count)
+    let p3 = trainAndEval(s1 + s2 + s3, steps: stepsPerFrame * (s1 + s2 + s3).count)
+    print(String(format: "      holdout PSNR (равный бюджет/кадр): 1-сцена=%.2f · 2-сцены=%.2f · 3-сцены=%.2f дБ", p1, p2, p3))
+
+    // Свойство монотонности: рост разнообразия обучения (при равном бюджете
+    // на кадр) НЕ должен ухудшать обобщение на независимом hold-out.
+    // Небольшой допуск 1.0 дБ — на шум стохастической оптимизации короткого
+    // обучения; реальная деградация архитектуры упадёт здесь же.
+    let tol: Float = 1.0
+    expect(p2 >= p1 - tol, String(format: "монотонность: 2-сцены ≥ 1-сцена − %.1f дБ (%.2f vs %.2f)", tol, p2, p1))
+    expect(p3 >= p2 - tol, String(format: "монотонность: 3-сцены ≥ 2-сцены − %.1f дБ (%.2f vs %.2f)", tol, p3, p2))
 }
 
 func testG2RealDataRequirements() {
