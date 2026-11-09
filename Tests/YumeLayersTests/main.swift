@@ -142,6 +142,9 @@ func coreTestRegistry() -> [(String, () -> Void)] {
         ("DiffusionCheckpointRoundTrip", testDiffusionCheckpointRoundTrip),
         ("DiffusionCheckpointRejectsBad", testDiffusionCheckpointRejectsBad),
         ("ContinuationSeed", testContinuationSeed),
+        ("FeatureStats", testFeatureStats),
+        ("FrechetDistanceDiagonal", testFrechetDistanceDiagonal),
+        ("FIDOnVAELatents", testFIDOnVAELatents),
     ]
 }
 

@@ -104,8 +104,8 @@
 ## Фаза 7. Контроль качества и метрики
 
 - [x] Замеры времени на 96/128/192px (таблица в сюите, `testConvPerf`): 80×56 fw 2.2/bw 4.4 · 128×72 fw 2.6/bw 4.4 · 192×112 fw 4.5/bw 7.1 мс.
-- [ ] FID (приближённо) или человеческая оценка 20 сэмплов.
-- [ ] Экспорт весов в safetensors для чтения сторонними инструментами.
+- [x] Приближённый FID (диагональная ковариация): `featureStats` (mean/diagVar, отклонение некорректных входов) + `frechetDistanceDiagonal` (тождество, сдвиг среднего, разница дисперсий, симметричность) + интеграция на реальных латентах VAE (FID(A,A)=0, FID(A,B)=0.669). Файл `ImageQualityMetrics.swift`, тесты `TestGroup19.swift`. Полный FID с инцепцией недоступен (нет torch) — аппроксимация задокументирована.
+- [x] Экспорт весов в safetensors: VAE (`saveState`/`loadStateWithMeta` — round-trip в сюите) и денойзер (`saveDiffusionCheckpoint`/`loadDiffusionCheckpoint`).
 
 ---
 
