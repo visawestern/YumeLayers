@@ -177,7 +177,8 @@
 
 ### Верифицировано (эта сессия)
 - [x] Все файлы ≤600; allowlist пуст; функции атомарны ≤120 (линт exit=0).
-- [x] Сюита **897 PASS**; `testCodeGuideLimits` зелёный.
+- [x] Сюита **2587 PASS, 0 FAIL**; `testCodeGuideLimits` зелёный.
+- [x] API расширен: `/api/frames`, `/api/params`, `/api/frame?index=N` — доступ к кадрам и параметрам; провайдеры подключены в UI.
 - [x] Декомпозиция монолитов (подробно в 8.1): respond, buildRemaining, buildLeftPanel, applicationDidFinishLaunching, startTrainingInternal, ParallelExtractor.run, trainLayeredVAE, runSelfTest, trainConvVAE, тесты TestGroup5/6.
 - [x] Кнопка запуска VAE восстановлена (рендер-фикс: bordered+bezelColor вместо невидимой layer-пилюли; подтверждено сканом пикселей окна).
 - [x] Таблица производительности 96/128/192px собрана и закреплена тестом `testConvPerf` (Фаза 7).
