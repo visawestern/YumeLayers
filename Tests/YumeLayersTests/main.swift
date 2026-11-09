@@ -88,6 +88,7 @@ func coreTestRegistry() -> [(String, () -> Void)] {
         ("WatchdogRestartVsExitPolicy", testWatchdogRestartVsExitPolicy),
         ("StabilizeHighResWorkingArea", testStabilizeHighResWorkingArea),
         ("InterpolationUsesCheckpointArch", testInterpolationUsesCheckpointArch),
+        ("G2GateLogic", testG2GateLogic),
         ("ReconOutput", testReconOutput),
         ("InterpolationPlan", testInterpolationPlan),
         ("InterpolationPlanProperties", testInterpolationPlanProperties),

@@ -271,3 +271,39 @@ func testInterpolationUsesCheckpointArch() {
     expect(FileManager.default.fileExists(atPath: req.outputPath),
            "создан выходной mp4: \(req.outputPath)")
 }
+
+/// G2-гейт как ИСПОЛНЯЕМЫЙ код, а не только текст в плане. Адвокат дьявола:
+/// раньше формальная ворота PSNR≥30/SSIM≥0.90 vs SD-VAE была лишь задокументирована;
+/// сама логика приёмки не существовала как тестируемая функция. Здесь она появляется
+/// и покрывается детерминированно (вход — числа, не GPU). Блокировано лишь ЗНАЧЕНИЕ
+/// baseline (нет torch) — функция честно возвращает `.awaitingBaseline`, пока его нет.
+func testG2GateLogic() {
+    section("G2: гейт-логика приёмки (пол + сравнение с SD-VAE baseline) — чистая функция")
+
+    // Ни пол не взят, ни baseline нет сравнения → failBelowFloor.
+    let low = g2Gate(ourPSNR: 22, ourSSIM: 0.70, baselinePSNR: nil, baselineSSIM: nil,
+                     minPSNR: 30, minSSIM: 0.90)
+    expectEqual(low, .failBelowFloor, "PSNR 22/SSIM 0.70 → ниже пола")
+
+    // Пол взят, но baseline ещё не загружен → awaitingBaseline (НЕ pass: формальная
+    // G2 требует и «не хуже baseline», что без baseline непроверяемо).
+    let okFloorNoBaseline = g2Gate(ourPSNR: 30, ourSSIM: 0.90, baselinePSNR: nil, baselineSSIM: nil,
+                                   minPSNR: 30, minSSIM: 0.90)
+    expectEqual(okFloorNoBaseline, .awaitingBaseline, "пол взят, baseline нет → awaitingBaseline")
+
+    // Пол взят и не хуже baseline (PSNR выше, SSIM не ниже) → pass.
+    let pass = g2Gate(ourPSNR: 31, ourSSIM: 0.92, baselinePSNR: 30.5, baselineSSIM: 0.91,
+                      minPSNR: 30, minSSIM: 0.90)
+    expectEqual(pass, .pass, "PSNR/SSIM выше baseline → pass")
+
+    // Пол взят, но ХУЖЕ baseline хотя бы по одной метрике → failWorseThanBaseline.
+    // Наши метрики выше пола (30/0.90), но baseline сильнее — сравнение проиграно.
+    let worse = g2Gate(ourPSNR: 31, ourSSIM: 0.93, baselinePSNR: 33.5, baselineSSIM: 0.95,
+                       minPSNR: 30, minSSIM: 0.90)
+    expectEqual(worse, .failWorseThanBaseline, "выше пола, но хуже baseline → failWorseThanBaseline")
+
+    // Ниже пола даже при лучшем baseline → всё равно failBelowFloor (пол первичен).
+    let belowFloor = g2Gate(ourPSNR: 29, ourSSIM: 0.95, baselinePSNR: 25, baselineSSIM: 0.80,
+                            minPSNR: 30, minSSIM: 0.90)
+    expectEqual(belowFloor, .failBelowFloor, "ниже пола → failBelowFloor независимо от baseline")
+}

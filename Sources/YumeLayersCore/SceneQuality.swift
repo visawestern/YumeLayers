@@ -90,6 +90,35 @@ public struct QualityFloor {
     }
 }
 
+/// Вердикт формальной G2-вороты.
+public enum G2Verdict: Equatable, Sendable {
+    /// Не достигнут абсолютный пол (PSNR/SSIM ниже `minPSNR`/`minSSIM`).
+    case failBelowFloor
+    /// Пол достигнут, но модель хуже SD-VAE baseline хотя бы по одной метрике.
+    case failWorseThanBaseline
+    /// Пол достигнут, но baseline ещё не предоставлен — формальная G2 непроверима.
+    case awaitingBaseline
+    /// Пол достигнут И не хуже baseline — G2 закрыта.
+    case pass
+}
+
+/// Исполняемая логика приёмки G2 (чистая функция, вход — числа; детерминированно
+/// тестируется без GPU/данных). Порядок проверок: абсолютный пол ПЕРВИЧЕН (нельзя
+/// «не хуже baseline», если сам baseline ниже пола), затем сравнение с baseline.
+///
+/// Блокировка G2 на этом стенде — это отсутствие ЧИСЕЛ baseline (нет torch/MPS),
+/// а не отсутствие логики: она здесь и покрыта тестом `testG2GateLogic`. Когда
+/// baseline появится, гейт заработает как `.pass`/`.failWorseThanBaseline` без
+/// правок кода — достаточно передать `baselinePSNR`/`baselineSSIM`.
+public func g2Gate(ourPSNR: Float, ourSSIM: Float,
+                   baselinePSNR: Float?, baselineSSIM: Float?,
+                   minPSNR: Float = 30, minSSIM: Float = 0.90) -> G2Verdict {
+    if ourPSNR < minPSNR || ourSSIM < minSSIM { return .failBelowFloor }
+    guard let bp = baselinePSNR, let bs = baselineSSIM else { return .awaitingBaseline }
+    if ourPSNR < bp || ourSSIM < bs { return .failWorseThanBaseline }
+    return .pass
+}
+
 // ---------- Покадровый план ----------
 
 /// Планировщик пересчёта экспертов на клипе. Статичные слои — на ключевых
