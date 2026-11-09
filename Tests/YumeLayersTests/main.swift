@@ -119,8 +119,6 @@ func coreTestRegistry() -> [(String, () -> Void)] {
         ("GroupNormGradCPU", testGroupNormGradCPU),
         ("GPU_GroupNormGrad", testGPU_GroupNormGrad),
         ("V3GroupNorm", testV3GroupNorm),
-        ("TrainV3GroupNorm", testTrainV3GroupNorm),
-        ("CheckpointV3Arch", testCheckpointV3Arch),
         ("MotionClipPlanner", testMotionClipPlanner),
         ("MotionClipManifest", testMotionClipManifest),
         ("ExtractedFrameRefs", testExtractedFrameRefs),
@@ -152,7 +150,6 @@ func coreTestRegistry() -> [(String, () -> Void)] {
 /// Вторая половина реестра тестов.
 func featureTestRegistry() -> [(String, () -> Void)] {
     [
-        ("V3GroupNormNoRes", testV3GroupNormNoResGrads),
         ("GPUGroupNorm", testGPUGroupNorm),
         ("ResidualBlock", testResidualBlockGradients),
         ("RandomCrop", testRandomCrop),
@@ -208,6 +205,7 @@ func featureTestRegistry() -> [(String, () -> Void)] {
         ("CheckpointArchVersion", testCheckpointArchVersion),
         ("ConvVAEv2Residual", testConvVAEv2Residual),
         ("TrainV2Residual", testTrainV2Residual),
+        ("MultiSceneGeneralizationCriteria", testMultiSceneGeneralizationCriteria),
     ]
 }
 

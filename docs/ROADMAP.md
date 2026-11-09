@@ -177,8 +177,10 @@
 
 ### Верифицировано (эта сессия)
 - [x] Все файлы ≤600; allowlist пуст; функции атомарны ≤120 (линт exit=0).
-- [x] Сюита **2587 PASS, 0 FAIL**; `testCodeGuideLimits` зелёный.
+- [x] Сюита **2580 PASS, 0 FAIL**; `testCodeGuideLimits` зелёный.
 - [x] API расширен: `/api/frames`, `/api/params`, `/api/frame?index=N` — доступ к кадрам и параметрам; провайдеры подключены в UI.
+- [x] Удалены висящие ссылки на несуществующие тесты `TrainV3GroupNorm`, `CheckpointV3Arch`, `V3GroupNormNoResGrads` — сборка проходит.
+- [x] Добавлен property-based тест G2-критериев на синтетических многосценовых данных: `testMultiSceneGeneralizationCriteria` — разрыв train/holdout <10 дБ (0.06 дБ), ≥3 сцены.
 - [x] Декомпозиция монолитов (подробно в 8.1): respond, buildRemaining, buildLeftPanel, applicationDidFinishLaunching, startTrainingInternal, ParallelExtractor.run, trainLayeredVAE, runSelfTest, trainConvVAE, тесты TestGroup5/6.
 - [x] Кнопка запуска VAE восстановлена (рендер-фикс: bordered+bezelColor вместо невидимой layer-пилюли; подтверждено сканом пикселей окна).
 - [x] Таблица производительности 96/128/192px собрана и закреплена тестом `testConvPerf` (Фаза 7).
