@@ -85,6 +85,7 @@ func coreTestRegistry() -> [(String, () -> Void)] {
         ("GpuHandlerMissPolicy", testGpuHandlerMissPolicy),
         ("PerStepCancellationModel", testPerStepCancellationModel),
         ("TrainConvVAEPromptCancel", testTrainConvVAEPromptCancel),
+        ("WatchdogRestartVsExitPolicy", testWatchdogRestartVsExitPolicy),
         ("ReconOutput", testReconOutput),
         ("InterpolationPlan", testInterpolationPlan),
         ("InterpolationPlanProperties", testInterpolationPlanProperties),

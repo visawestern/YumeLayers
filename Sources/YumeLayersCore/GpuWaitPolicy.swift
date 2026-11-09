@@ -153,3 +153,28 @@ public func pauseSlices(totalMs: Double, sliceMs: Double = 100) -> [Double] {
     }
     return slices
 }
+
+/// Решение watchdog'а по зависшему command buffer: ЖДАТЬ или УБИТЬ процесс.
+///
+/// Осознанно НЕТ ветки «перезапустить шаг». Причина: перезапуск зависшего
+/// command buffer невозможен — очередь Metal уже забита этим буфером, а
+/// попытка отправить новый и ждать его утаскивает за собой WindowServer,
+/// который обращается к той же карте (4 ноября 2026 так случилось
+/// перезагружение машины). Единственный безопасный выход из ПО-настоящему
+/// застрявшего буфера — завершить процесс (exit 70), ОСВОБОДИВ очередь.
+///
+/// Ждём дальше, только если у времени ЕЩЁ есть запас И буфер не завершён
+/// успешно. Буфер completed → ждём ничего (данные читай, watchdog не нужен).
+public enum WatchdogDecision: Equatable, Sendable {
+    case keepWaiting
+    case exitProcess
+}
+
+public func watchdogDecision(bufferCompleted: Bool,
+                             elapsedSeconds: Double,
+                             deadlineSeconds: Double) -> WatchdogDecision {
+    // Успешно завершённый буфер — это НЕ зависание; продолжаем по статусу.
+    if bufferCompleted { return .keepWaiting }
+    if elapsedSeconds >= deadlineSeconds { return .exitProcess }
+    return .keepWaiting
+}

@@ -147,3 +147,29 @@ func testTrainConvVAEPromptCancel() {
     expect(maxDoneSeen < stepsPerEpoch,
            "эпоха НЕ дочитана (done=\(maxDoneSeen) < шагов в эпохе \(stepsPerEpoch)) → проверка на каждом шаге")
 }
+
+/// Стратегия watchdog по зависшему command buffer: чистая функция решений.
+/// Адвокат дьявола: здесь НЕТ варианта «перезапустить шаг», и это правильно —
+/// перезапуск забитого буфера утаскивает WindowServer (была перезагрузка).
+func testWatchdogRestartVsExitPolicy() {
+    section("Watchdog: решение ждать/убить (без небезопасного перезапуска шага)")
+
+    // Буфер реально completed — зависания нет, ждём (данные читает status-путь).
+    expectEqual(watchdogDecision(bufferCompleted: true, elapsedSeconds: 999, deadlineSeconds: 30),
+                .keepWaiting, "completed-буфер — не убиваем")
+
+    // Буфер не завершён, запас времени есть — ждём дальше.
+    expectEqual(watchdogDecision(bufferCompleted: false, elapsedSeconds: 5, deadlineSeconds: 30),
+                .keepWaiting, "завис, но время есть — ждём")
+
+    // Буфер не завершён, дедлайн исчерпан — убиваем процесс (очистить очередь).
+    expectEqual(watchdogDecision(bufferCompleted: false, elapsedSeconds: 30, deadlineSeconds: 30),
+                .exitProcess, "завис сверх дедлайна — exit")
+
+    // Граница: ровно на дедлайне — уже exit.
+    expectEqual(watchdogDecision(bufferCompleted: false, elapsedSeconds: 30.0, deadlineSeconds: 30),
+                .exitProcess, "граница дедлайна — exit")
+    // Чуть раньше дедлайна — ещё ждём.
+    expectEqual(watchdogDecision(bufferCompleted: false, elapsedSeconds: 29.9, deadlineSeconds: 30),
+                .keepWaiting, "чуть раньше дедлайна — ждём")
+}
