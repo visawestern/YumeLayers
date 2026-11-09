@@ -437,6 +437,50 @@ extension YumeAppDelegate {
             }
             return json
         }
+        api.framesProvider = { [weak self] in
+            guard let self = self else { return ["count":0,"names":[]] }
+            var info: [String: Any] = [:]
+            DispatchQueue.main.sync {
+                info["count"] = self.framesStore.count
+                info["names"] = self.framesStore.map { $0.name }
+            }
+            return info
+        }
+        api.paramsProvider = { [weak self] in
+            guard let self = self else { return [:] }
+            var dict: [String: Any] = [:]
+            DispatchQueue.main.sync {
+                dict["width"] = self.widthCtl.stringValue
+                dict["height"] = self.heightCtl.stringValue
+                dict["vaeWidth"] = self.widthField.stringValue
+                dict["vaeHeight"] = self.heightField.stringValue
+                dict["epochs"] = self.epochsCtl.stringValue
+                dict["steps"] = self.stepsCtl.stringValue
+                dict["batch"] = self.batchCtl.stringValue
+                dict["lr"] = self.lrCtl.stringValue
+                dict["extractLimit"] = self.extractLimitCtl.stringValue
+                dict["modelWidth"] = self.requestedModelWidth
+                dict["latentChannels"] = self.requestedLatentChannels
+                dict["lossKind"] = self.requestedLossKind
+                dict["edgeWeight"] = self.requestedEdgeWeight
+                dict["residual"] = self.requestedResidual
+                dict["groupNorm"] = self.requestedGroupNorm
+                dict["resume"] = self.resumeSwitch.state == .on
+                dict["adaptiveThrottle"] = self.adaptiveSwitch.state == .on
+            }
+            return dict
+        }
+        api.frameProvider = { [weak self] idx in
+            guard let self = self else { return nil }
+            var result: [String: Any]? = nil
+            DispatchQueue.main.sync {
+                guard idx >= 0 && idx < self.framesStore.count else { result = nil; return }
+                let f = self.framesStore[idx]
+                let b64 = f.jpeg.base64EncodedString()
+                result = ["index": idx, "name": f.name, "source": f.source, "jpegBase64": b64]
+            }
+            return result
+        }
     }
 
     /// Регистрирует stateProvider: снимок состояния окна.

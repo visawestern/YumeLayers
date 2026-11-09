@@ -60,6 +60,9 @@ final class ApiServer {
     var screenshotProvider: (() -> String?)?
     var layoutProvider: (() -> String)?
     var stateProvider: (() -> String)?
+    var framesProvider: (() -> [String: Any])?
+    var paramsProvider: (() -> [String: Any])?
+    var frameProvider: ((Int) -> [String: Any]?)?
 
     init() {
         print("YumeLayers API: http://127.0.0.1:\(port)")
@@ -249,6 +252,12 @@ final class ApiServer {
             self.route__api_test_frames(conn: conn, body: body, pathWithQuery: pathWithQuery); return
         case ("GET", "/api/compose"), ("POST", "/api/compose"):
             self.route__api_compose(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/frames"), ("POST", "/api/frames"):
+            self.route__api_frames(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/params"), ("POST", "/api/params"):
+            self.route__api_params(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/frame"), ("POST", "/api/frame"):
+            self.route__api_frame(conn: conn, body: body, pathWithQuery: pathWithQuery); return
         default:
             send(status: 404, body: "{\"error\":\"not found\"}", to: conn)
         }
@@ -468,6 +477,34 @@ final class ApiServer {
                 send(status: 200, body: provider(count), to: conn)
             } else {
                 send(status: 500, body: "{\"error\":\"no frames\"}", to: conn)
+            }
+    }
+
+    private func route__api_frames(conn: NWConnection, body: String, pathWithQuery: String) {
+            if let info = framesProvider?() {
+                send(status: 200, body: json(info), to: conn)
+            } else {
+                send(status: 500, body: "{\"error\":\"no frames provider\"}", to: conn)
+            }
+    }
+
+    private func route__api_params(conn: NWConnection, body: String, pathWithQuery: String) {
+            if let info = paramsProvider?() {
+                send(status: 200, body: json(info), to: conn)
+            } else {
+                send(status: 500, body: "{\"error\":\"no params provider\"}", to: conn)
+            }
+    }
+
+    private func route__api_frame(conn: NWConnection, body: String, pathWithQuery: String) {
+            let idx = queryInt(pathWithQuery, "index", def: -1)
+            guard idx >= 0 else {
+                send(status: 400, body: "{\"error\":\"missing index\"}", to: conn); return
+            }
+            if let info = frameProvider?(idx) {
+                send(status: 200, body: json(info), to: conn)
+            } else {
+                send(status: 404, body: "{\"error\":\"frame not found\"}", to: conn)
             }
     }
 
