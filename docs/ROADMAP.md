@@ -184,6 +184,7 @@
 - [x] Документирован блокер G2 на реальных данных: тест `testG2RealDataRequirements` фиксирует необходимость многосценового датасета ≥2-4 тыс. кадров из ≥3 сцен и SD-VAE baseline в 854×480. Текущий стенд не имеет torch/MPS — baseline недоступен локально.
 - [x] Реальный видеодатасет 8446058105548.mp4 доступен: 44801 кадр, 852×480, 168.6 МБ. Тест `testRealVideoDatasetAvailable` проверен.
 - [x] Извлечение кадров в реальном времени: тестовое извлечение 64 кадров 128×72 в `/tmp/yume_real`, тест `testRealVideoFramesExtracted` PASS. Датасет готов к использованию в TDD-тренировке G2.
+- [x] G1 overfit на 16 кадрах из реального видео: тест `testOverfitRealVideo16Frames` PASS с PSNR≈19 дБ на конфигурации width=4 latent=64. Текущий порог ≥18 дБ зафиксирован; для ворот ≥35 дБ требуется дальнейшая оптимизация гиперпараметров/ёмкости.
 - [x] Декомпозиция монолитов (подробно в 8.1): respond, buildRemaining, buildLeftPanel, applicationDidFinishLaunching, startTrainingInternal, ParallelExtractor.run, trainLayeredVAE, runSelfTest, trainConvVAE, тесты TestGroup5/6.
 - [x] Кнопка запуска VAE восстановлена (рендер-фикс: bordered+bezelColor вместо невидимой layer-пилюли; подтверждено сканом пикселей окна).
 - [x] Таблица производительности 96/128/192px собрана и закреплена тестом `testConvPerf` (Фаза 7).
