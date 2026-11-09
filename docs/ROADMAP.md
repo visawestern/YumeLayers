@@ -58,6 +58,7 @@
 
 - [ ] Сохранить клипы движения: кадры с меткой источника и порядком внутри клипа (фундамент временных окон).
 - [x] Анализатор движения/законченности сцены по последовательным кадрам (`motionSummary`: фон vs объекты, полнота покрытия) + `testSceneMotion` (статик/объект/шум).
+- [x] Фундамент временных окон: `MotionClips.swift` — `motionClips(from:window:stride:)` (окна не пересекают границу источника; шаг перекрытия; порядок кадров внутри клипа) + `motionClipManifestJSON`/`motionClips(fromManifest:)` (JSON round-trip). Тесты: `testMotionClipPlanner`, `testMotionClipManifest` (TestGroup13).
 - [ ] Обучить диффузию в латентном пространстве VAE (по результатам Фазы 1), на окнах из N подряд идущих кадров.
 - [ ] Cид-продолжение видео с последнего кадра.
 - [ ] Интерполяция A→B перевести на диффузионные промежуточные кадры (вместо гладкого смешения).
@@ -122,24 +123,27 @@
 - [x] **Юнит** (чистые функции, CPU, без Metal/UI) — обязательны для всей новой логики:
   `testInterpolationPlan`, `testL1AndSobelLoss`, `testSobelEdgeGradCPU`,
   `testSceneMotion`, `testDutySleep`, `testLayerRanges`, `testMathAndGuards`,
-  `testPureLogic` и др.
+  `testPureLogic`, `testMotionClipPlanner`, `testParamContract` и др.
 - [x] **GPU/интеграционные** (Metal-ядро ↔ CPU-эталон; save/load; аннотатор ↔ сборка):
   `testGPUMseMatchesCPU`, `testGPUGroupNorm`, `testGPU_L1Grad`,
   `testGPU_SobelEdgeGrad`, `testResidualBlockGradients`, `testLayeredLossGPU`,
-  `testCheckpointRoundTrip`, `testCheckpointArchVersion`, `testConvVAEv2Residual`.
+  `testCheckpointRoundTrip`, `testCheckpointArchVersion`, `testConvVAEv2Residual`,
+  `testCheckpointV3Arch`, `testMotionClipManifest`.
 - [x] **API/контракт** (маршруты, статус-коды, JSON-форматы `curl`-проверки):
-  `testParamAPI` (применение /api/set, неизвестные ключи).
+  `testParamAPI` (применение /api/set, неизвестные ключи), `testParamContract`
+  (`paramStringValue`/`paramBoolValue`: int/float/bool/строки/мусор).
 - [x] **E2E** (MP4 → кадры → обучение → интерполяция → MP4, полный цикл):
   `testInterpolateVideo` (A→B→MP4), `testInterpolationThreeSecondsVideo`
   (3 с × 24 fps = 72 кадра), `testLayerPipeline`, `testOverfitGate_16Frames`.
 - [x] **Регрессия** (полный прогон сюиты зелёный на каждой итерации):
-  2088 проверок PASS (2026-11-09).
+  2446 проверок PASS (2026-11-09).
 - [x] **Производительность** (время/итерацию на 96/128/192px — `testConvPerf`).
 - [x] **Стресс/длительный** (часы без зависания — защита от клина GPU):
-  `testGPUFramePoolLongRunNoHang`; клин AMD смягчён `waitForCompletion`+`frameLoadBatchCap`.
-- [x] **Свойства (property-based)** (случайные входы: размеры, seed, NaN/Inf, пустые стеки) — `testInterpolationPlanProperties` (200× random seconds/fps, monotonic smoothstep).
+  `testGPUFramePoolLongRunNoHang`; `testHTTPParserFuzz` (300 случайных входов);
+  клин AMD смягчён `waitForCompletion`+`frameLoadBatchCap`.
+- [x] **Свойства (property-based)** (случайные входы: размеры, seed, NaN/Inf, пустые стеки) — `testInterpolationPlanProperties` (200× random seconds/fps, monotonic smoothstep), `testHTTPParserFuzz`.
 - [ ] **Golden/визуальные снимки** (падвью слоёв и кадров с эталоном) — требует ручной глазной оценки/скриншотов.
-- [x] **Безопасность/доступность** (локальный API только 127.0.0.1; корректные коды ошибок): сервер привязан к 127.0.0.1:17851; `testParamAPI` проверяет неизвестные ключи и ошибки.
+- [x] **Безопасность/доступность** (локальный API только 127.0.0.1; корректные коды ошибок): сервер привязан к 127.0.0.1:17851; `LocalHTTPRequest` отклоняет чужие Host/Origin/Transfer-Encoding/повторные Content-Length/порты (тесты `testHTTP` + SelfTest), `testParamAPI` проверяет неизвестные ключи.
 
 ### 8.3 TDD-цикл (обязателен)
 1. Пишем/обновляем тест (красный) → 2. реализуем минимум → 3. прогон зелёный → 4. рефакторинг под стандарты 8.1 (функции атомарны, файлы ≤600) → 5. полный прогон сюиты.
