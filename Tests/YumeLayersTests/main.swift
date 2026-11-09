@@ -129,6 +129,9 @@ func coreTestRegistry() -> [(String, () -> Void)] {
         ("DiffusionSchedule", testDiffusionSchedule),
         ("ForwardDiffuse", testForwardDiffuse),
         ("LatentWindowDataset", testLatentWindowDataset),
+        ("GPUForwardDiffuse", testGPUForwardDiffuse),
+        ("GPUForwardDiffuseProperties", testGPUForwardDiffuseProperties),
+        ("GPURandnStats", testGPURandnStats),
     ]
 }
 

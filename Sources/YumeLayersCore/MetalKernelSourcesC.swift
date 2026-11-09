@@ -99,5 +99,16 @@ extension MetalKernels {
             }
         }
     }
+    // Диффузия: прямое зашумление латента x_t = √ᾱ·x0 + √(1−ᾱ)·ε.
+    kernel void diffuse_kernel(
+        device const float* x0 [[buffer(0)]],
+        device const float* noise [[buffer(1)]],
+        device float* out [[buffer(2)]],
+        constant float& sqrtAlphaBar [[buffer(3)]],
+        constant float& sqrtOneMinus [[buffer(4)]],
+        uint gid [[thread_position_in_grid]])
+    {
+        out[gid] = sqrtAlphaBar * x0[gid] + sqrtOneMinus * noise[gid];
+    }
     """
 }
