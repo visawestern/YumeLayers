@@ -76,6 +76,10 @@
   λ·∇L_edge к MSE/L1-градиенту (`dReconOverride`). Обучение с edgeWeight=0.5:
   loss 0.1067→0.0069 (тесты `testSobelEdgeGradCPU`, `testGPU_SobelEdgeGrad`,
   `testTrainWithEdge`).
+- Прогон на реальном видео 128×72 (2000 кадров, 4 эпохи ×800 шагов, lossKind=mse,
+  edgeWeight=0.5, width=1, latent=16): PSNR 15.87→19.96 дБ, loss 0.0376→0.0105
+  (лог `~/YumeLayers/train.log` 2026-11-09). Потолок без изменения архитектуры
+  остаётся ~20 дБ — для ворот PSNR≥30 требуется увеличение ёмкости/разрешения.
 - Шаг 4б (механика): обучение на патчах (`randomCrop` 128×96 из 320×256) +
   инференс полного кадра без переобучения (полностью свёрточная сеть).
   Тест `testTrainOnPatchesFullFrame`. Реальное обучение к G2 — далее.
