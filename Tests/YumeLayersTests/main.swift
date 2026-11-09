@@ -86,6 +86,8 @@ func coreTestRegistry() -> [(String, () -> Void)] {
         ("PerStepCancellationModel", testPerStepCancellationModel),
         ("TrainConvVAEPromptCancel", testTrainConvVAEPromptCancel),
         ("WatchdogRestartVsExitPolicy", testWatchdogRestartVsExitPolicy),
+        ("StabilizeHighResWorkingArea", testStabilizeHighResWorkingArea),
+        ("InterpolationUsesCheckpointArch", testInterpolationUsesCheckpointArch),
         ("ReconOutput", testReconOutput),
         ("InterpolationPlan", testInterpolationPlan),
         ("InterpolationPlanProperties", testInterpolationPlanProperties),

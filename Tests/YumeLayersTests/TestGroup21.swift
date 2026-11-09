@@ -173,3 +173,101 @@ func testWatchdogRestartVsExitPolicy() {
     expectEqual(watchdogDecision(bufferCompleted: false, elapsedSeconds: 29.9, deadlineSeconds: 30),
                 .keepWaiting, "чуть раньше дедлайна — ждём")
 }
+
+/// Фаза 1 (п. «стабилизация на высокой точности»): на рабочих разрешениях
+/// 128×72 и 192×108 кросс-кроп стабилизации НЕ должен сжимать рабочую область
+/// к «мылу» 80×56 и обязан оставить размер, кратный 8 (иначе латент VAE /8 не
+/// сойдётся по форме). Property-тест без GPU: синтез кадров со сдвигом камеры.
+func testStabilizeHighResWorkingArea() {
+    section("Фаза 1: стабилизация на высоких разрешениях — область > 80×56 и кратна 8")
+
+    func baseFrame(_ w: Int, _ h: Int, seed: UInt64) -> [Float] {
+        var rng = SplitMix64(seed: seed)
+        return makeSyntheticScene(w: w, h: h, rng: &rng)
+    }
+    // Кадр со сдвигом камеры «вправо на s» (края клампим).
+    func shifted(_ b: [Float], _ w: Int, _ h: Int, _ s: Int) -> [Float] {
+        var f = [Float](repeating: 0, count: w * h * 3)
+        for y in 0..<h {
+            for x in 0..<w {
+                let sx = min(w - 1, max(0, x + s))
+                let si = (y * w + sx) * 3, di = (y * w + x) * 3
+                f[di] = b[si]; f[di + 1] = b[si + 1]; f[di + 2] = b[si + 2]
+            }
+        }
+        return f
+    }
+
+    // Два рабочих разрешения из Фазы 1.
+    for (w, h) in [(128, 72), (192, 108)] {
+        let b = baseFrame(w, h, seed: 0x51A)
+        let frames = [-3, 0, 2].map { shifted(b, w, h, $0) }
+        let (aligned, cw, ch, report) = stabilizeFrames(frames, w: w, h: h, maxShift: 8)
+
+        expect(cw % 8 == 0 && ch % 8 == 0,
+               "\(w)×\(h): рабочая область \(cw)×\(ch) кратна 8 (VAE /8)")
+        expect(cw >= 80 && ch >= 56,
+               "\(w)×\(h): область \(cw)×\(ch) НЕ сжата к мылу (≥ 80×56)")
+        expect(cw > w / 2 && ch > h / 2,
+               "\(w)×\(h): сохранено > половины (кроп по maxShift=8, а не по половине)")
+        expect(!aligned.isEmpty, "\(w)×\(h): хотя бы один кадр выровнен")
+        expect(aligned.allSatisfy { $0.count == cw * ch * 3 },
+               "\(w)×\(h): каждый выходной кадр размера \(cw)×\(ch)×3")
+        expect(report.width == cw && report.height == ch,
+               "\(w)×\(h): report соответствует рабочей области")
+    }
+}
+
+/// Вскрывается живым E2E: `interpolateVideo` строил VAE ДЕФОЛТНОЙ архитектуры
+/// (`ConvVAEGPU(engine:)` = plain/width=1) и грузил в него веса residual-модели →
+/// `vae.load` бросал «checkpoint: несовпадение формы слоя N». Интерполяция любой
+/// residual/groupNorm/широкой модели была сломана, хотя реконструкции этот путь
+/// уже умели (читают archVersion/modelWidth из метаданных чекпоинта).
+/// Тест: сохранить residual-чекпоинт (archVersion=2) → интерполировать → не бросает,
+/// кадры produced. Красный до фикса, зелёный после.
+func testInterpolationUsesCheckpointArch() {
+    section("Фаза 5/E2E: interpolateVideo строит VAE из архитектуры чекпоинта (residual)")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+
+    // Residual-VAE (archVersion 2), дефолтные width=1/latent=16.
+    let vae = ConvVAEGPU(engine: engine, residual: true, groupNorm: false)
+    let dir = "/tmp/yume_interp_ckpt"
+    try? FileManager.default.removeItem(atPath: dir)
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    let ckpt = "\(dir)/conv.safetensors"
+    try! saveState(vae.matrices, to: ckpt, epoch: 0, step: 0, totalSteps: 1,
+                   dataFingerprint: "interp-test",
+                   modelWidth: vae.width, latentChannels: vae.latentChannels,
+                   archVersion: 2)
+
+    // Две опорные картинки 16×16 (кратно 8).
+    func png(_ seed: UInt64) -> String {
+        var rng = SplitMix64(seed: seed)
+        let img = makeSyntheticScene(w: 16, h: 16, rng: &rng)
+        let path = "\(dir)/img_\(seed).png"
+        FileManager.default.createFile(atPath: path, contents: encodePNG(width: 16, height: 16, rgb: img))
+        return path
+    }
+    let req = InterpolationRequest(
+        imageAPath: png(0xAA), imageBPath: png(0xBB),
+        seconds: 0.5, fps: 24,
+        outputPath: "\(dir)/out.mp4",
+        modelWidth: 16, modelHeight: 16,
+        checkpointPath: ckpt)
+
+    var thrown: String? = nil
+    var produced = 0
+    do {
+        let result = try interpolateVideo(req)
+        produced = result.frameCount
+    } catch {
+        thrown = String(describing: error)
+    }
+
+    expect(thrown == nil, "residual-интерполяция не падает по форме чекпоинта (было: \(thrown ?? "нет"))")
+    expect(produced > 0, "интерполяция выдала кадры (получено \(produced))")
+    // Выходной файл создан (то, из-за чего падал E2E: не было .mp4 → ffprobe FAIL).
+    expect(FileManager.default.fileExists(atPath: req.outputPath),
+           "создан выходной mp4: \(req.outputPath)")
+}

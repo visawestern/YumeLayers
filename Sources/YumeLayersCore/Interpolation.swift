@@ -289,10 +289,18 @@ public func interpolateVideo(_ request: InterpolationRequest,
     let outW = max(2, sourceSize.width - sourceSize.width % 2)
     let outH = max(2, sourceSize.height - sourceSize.height % 2)
 
-    // Модель: обученный VAE из чекпоинта.
-    let vae = ConvVAEGPU(engine: MetalEngine.shared)
-    let weights = try loadStateWithMeta(path: request.checkpointPath).mats
-    try vae.load(from: weights)
+    // Модель: обученный VAE из чекпоинта. Архитектуру (residual/groupNorm по
+    // archVersion, ширину каналов, число каналов латента) ОБЯЗАТЕЛЬНО берём из
+    // метаданных чекпоинта — иначе `load` бросит «несовпадение формы слоя» для
+    // любой non-plain модели (регрессия, вскрытая живым E2E: /api/train с
+    // residual=true, затем /api/interpolate падал без выходного mp4).
+    let st = try loadStateWithMeta(path: request.checkpointPath)
+    let vae = ConvVAEGPU(engine: MetalEngine.shared,
+                         latentChannels: st.latentChannels,
+                         width: st.modelWidth,
+                         residual: st.archVersion >= 2,
+                         groupNorm: st.archVersion >= 3)
+    try vae.load(from: st.mats)
 
     // Латенты опорных картинок.
     let latentA = try encodeLatent(vae: vae, image: imageA, w: pw, h: ph)
