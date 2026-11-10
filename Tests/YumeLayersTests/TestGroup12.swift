@@ -231,12 +231,52 @@ func testTrainConvVAELearnsOnRealFrames() {
            String(format: "продуктовый путь на реальных кадрах достигает ≥15 дБ (получено %.2f)", psnrs.last!))
 }
 
+/// Исполняемый G2-гейт: если на диске есть trained-чекпоинт (result реального
+/// доучивания) и raw hold-out, загружает модель с архитектурой из метаданных,
+/// реконструирует hold-out и ТРЕБУЕТ `g2Verdict == .pass` (PSNR≥23.4, SSIM≥0.69 —
+/// published SD-VAE). Пропускается без артефактов (чистый checkout).
+func testG2PassGateOnTrainedCheckpoint() {
+    section("G2 (гейт): trained-чекпоинт на реальном hold-out должен давать pass")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let ckpt = FileManager.default.homeDirectoryForCurrentUser.path + "/YumeLayers/checkpoints/conv.safetensors"
+    let hold = "/tmp/yume_holdout/holdout.raw"
+    let fm = FileManager.default
+    guard fm.fileExists(atPath: ckpt), let raw = fm.contents(atPath: hold) else {
+        skip("нет trained-чекпоинта/hold-out — G2-гейт проверяется после реального доучивания"); return
+    }
+    let w = 128, h = 72, frameBytes = w * h * 3
+    let count = min(raw.count / frameBytes, 48)
+    guard count >= 16, let st = try? loadStateWithMeta(path: ckpt) else { skip("мало hold-out кадров"); return }
+    let engine = MetalEngine.shared
+    let session = GpuSession(engine)
+    let vae = ConvVAEGPU(engine: engine, latentChannels: st.latentChannels, width: st.modelWidth,
+                         residual: st.archVersion >= 2, groupNorm: st.archVersion >= 3)
+    do { try vae.load(from: st.mats) } catch { skip("чекпоинт не грузится: \(error)"); return }
+    var sumP: Float = 0, sumS: Float = 0
+    raw.withUnsafeBytes { p in
+        let b = p.bindMemory(to: UInt8.self)
+        for i in 0..<count {
+            var img = [Float](repeating: 0, count: frameBytes)
+            let base = i * frameBytes
+            for j in 0..<frameBytes { img[j] = Float(b[base + j]) / 255.0 }
+            let x = GPUTensor(engine: engine, data: hwcToChw(img), rows: 3)
+            session.begin(); let c = vae.forward(session, image: x, w: w, h: h, deterministic: true); _ = session.end()
+            let recon = chwToHwc(c.recon.toArray())
+            sumP += psnr(reference: img, candidate: recon); sumS += luminanceSSIM(reference: img, candidate: recon)
+        }
+    }
+    let psnrV = sumP / Float(count), ssimV = sumS / Float(count)
+    let verdict = g2Verdict(ourPSNR: psnrV, ourSSIM: ssimV)
+    print(String(format: "      G2 gate (trained, hold-out %d кадров): PSNR %.2f дБ · SSIM %.3f · verdict %@",
+                 count, psnrV, ssimV, String(describing: verdict)))
+    expectEqual(verdict, .pass, "trained-модель на реальном hold-out достигает published SD-VAE (G2 pass)")
+}
+
 func testRealVideoDatasetAvailable() {
     section("G2: реальный видеодатасет 8446058105548.mp4 доступен")
     let videoPath = "/Users/apple/projects/YumeLayers/8446058105548.mp4"
     let fm = FileManager.default
     expect(fm.fileExists(atPath: videoPath), "видеофайл существует: \(videoPath)")
-    
     // Проверяем размер > 100 МБ
     if let attrs = try? fm.attributesOfItem(atPath: videoPath),
        let size = attrs[.size] as? UInt64 {
