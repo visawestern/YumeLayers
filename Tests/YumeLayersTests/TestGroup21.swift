@@ -427,3 +427,28 @@ func testTrainConvVAEResumeSkipsEpochs() {
            "resume НЕ повторяет эпоху 0 (пройденное пропущено)")
     tc.reset()
 }
+
+/// Property-инварианты (случайные входы): startEpoch всегда в [0, requested];
+/// гейт никогда не «ждёт» при отмене; resume=off / данные другие → всегда 0.
+func testResumePauseInvariants() {
+    section("Resume/Пауза: property-инварианты на случайных входах")
+    var rng = SplitMix64(seed: 0xBADB0B)
+    var badStart = 0, badPrecedence = 0, badOff = 0
+    for _ in 0..<4000 {
+        let saved = Int.random(in: -10...50, using: &rng)
+        let req = Int.random(in: 0...40, using: &rng)
+        let dataMatches = Bool.random(using: &rng)
+        let resume = Bool.random(using: &rng)
+        let se = resumeStartEpoch(savedEpoch: saved, requestedEpochs: req,
+                                  dataMatches: dataMatches, resume: resume)
+        if se < 0 || se > req { badStart += 1 }                 // в пределах [0, requested]
+        if (!resume || !dataMatches) && se != 0 { badOff += 1 }  // off/другие данные → 0
+        // Гейт: при cancelled=true никогда не .wait (отмена > пауза).
+        let paused = Bool.random(using: &rng)
+        let act = trainingGateAction(cancelled: true, paused: paused)
+        if act == .wait { badPrecedence += 1 }
+    }
+    expectEqual(badStart, 0, "startEpoch всегда ∈ [0, requestedEpochs]")
+    expectEqual(badOff, 0, "resume=off или данные другие → всегда 0")
+    expectEqual(badPrecedence, 0, "отмена приоритетнее паузы (никогда не .wait при cancel)")
+}

@@ -87,6 +87,7 @@ func coreTestRegistry() -> [(String, () -> Void)] {
         ("TrainingPauseControl", testTrainingPauseControl),
         ("ResumeStartEpoch", testResumeStartEpoch),
         ("TrainConvVAEResumeSkipsEpochs", testTrainConvVAEResumeSkipsEpochs),
+        ("ResumePauseInvariants", testResumePauseInvariants),
         ("TrainConvVAEPromptCancel", testTrainConvVAEPromptCancel),
         ("WatchdogRestartVsExitPolicy", testWatchdogRestartVsExitPolicy),
         ("StabilizeHighResWorkingArea", testStabilizeHighResWorkingArea),
