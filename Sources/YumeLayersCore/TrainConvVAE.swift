@@ -39,6 +39,9 @@ private struct TrainContext {
     let currentFingerprint: String
     let resumeWithoutOptimizer: Bool
     let pauseMs: Double
+    /// Первая эпоха цикла (epoch-aware resume): >0 — уже пройденные эпохи не
+    /// повторяем (не тратим тренинг впустую после клина/стопа).
+    let startEpoch: Int
     let onStep: ((TrainStepReport) -> Void)?
     let onProgress: TrainProgress?
     let gpuSensor = GpuSensor()
@@ -69,6 +72,7 @@ private struct TrainContext {
          inputPool: [GPUTensor], mseOutBufs: [MTLBuffer],
          previewDir: String, currentFingerprint: String,
          resumeWithoutOptimizer: Bool, pauseMs: Double,
+         startEpoch: Int = 0,
          onStep: ((TrainStepReport) -> Void)?, onProgress: TrainProgress?,
          t: Int, power: PowerController, currentDuty: Double) {
         self.p = p
@@ -88,10 +92,11 @@ private struct TrainContext {
         self.currentFingerprint = currentFingerprint
         self.resumeWithoutOptimizer = resumeWithoutOptimizer
         self.pauseMs = pauseMs
+        self.startEpoch = startEpoch
         self.onStep = onStep
         self.onProgress = onProgress
         self.t = t
-        self.stepsThisRun = 0
+        self.stepsThisRun = startEpoch * epochSteps   // глобальный прогресс с учётом пропущенных эпох
         self.start = Date()
         self.power = power
         self.currentDuty = currentDuty
@@ -355,7 +360,7 @@ extension TrainContext {
     /// а не после досчитывания всей эпохи (порядок проверок = модель
     /// `runEpochLoop`, зафиксированная тестом `testPerStepCancellationModel`).
     mutating func runEpochs() throws {
-        for ep in 0..<p.epochs {
+        for ep in max(0, startEpoch)..<p.epochs {
             if TrainingControl.shared.isCancelled {
                 yumeLog("Остановлено пользователем на эпохе \(ep)")
                 break
@@ -363,7 +368,20 @@ extension TrainContext {
             var es = EpochState()
             var stopped = false
             for stepIdx in 0..<epochSteps {
-                if TrainingControl.shared.isCancelled { stopped = true; break }
+                switch trainingGateAction(cancelled: TrainingControl.shared.isCancelled,
+                                          paused: TrainingControl.shared.isPaused) {
+                case .stop:
+                    stopped = true
+                case .wait:
+                    yumeLog("⏸ Пауза обучения по запросу (шаг \(es.stepsDone)/\(epochSteps) эпохи \(ep))")
+                    TrainingControl.shared.waitWhilePaused()
+                    // После выхода из паузы ещё раз: могли нажать «Стоп» во время неё.
+                    if TrainingControl.shared.isCancelled { stopped = true }
+                    else { yumeLog("▶ Обучение возобновлено") }
+                case .proceed:
+                    break
+                }
+                if stopped { break }
                 try runStep(ep: ep, stepIdx: stepIdx, state: &es)
             }
             // Прерванную эпоху не отчитываем и не чекпоинтим: незавершённая
@@ -430,9 +448,16 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
     } else {
         currentFingerprint = "none"
     }
-    let (adamStep, resumeWithoutOptimizer) = try loadResumeState(
+    let (adamStep, resumeWithoutOptimizer, savedEpoch, dataMatches) = try loadResumeState(
         into: vae, convPath: p.convPath, resume: p.resume,
         currentFingerprint: currentFingerprint)
+    // Epoch-aware: при resume продолжаем со следующей незавершённой эпохи,
+    // не переучивая пройденное (не тратим время после клина/стопа).
+    let startEpoch = resumeStartEpoch(savedEpoch: savedEpoch, requestedEpochs: p.epochs,
+                                      dataMatches: dataMatches, resume: p.resume)
+    if startEpoch > 0 {
+        yumeLog("↻ Возобновление: пропускаю \(startEpoch) завершённых эпох(и), продолжаю с эпохи \(startEpoch) из \(p.epochs)")
+    }
 
     let previewDir = (p.outPrefix as NSString).deletingLastPathComponent
     try FileManager.default.createDirectory(atPath: previewDir, withIntermediateDirectories: true)
@@ -456,6 +481,7 @@ public func trainConvVAE(p: Params, onProgress: TrainProgress? = nil,
         previewDir: previewDir, currentFingerprint: currentFingerprint,
         resumeWithoutOptimizer: resumeWithoutOptimizer,
         pauseMs: Double(max(p.pauseMs, 0)),
+        startEpoch: startEpoch,
         onStep: onStep, onProgress: onProgress,
         t: adamStep, power: power, currentDuty: power.duty)
 

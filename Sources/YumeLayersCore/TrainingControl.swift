@@ -8,6 +8,7 @@ public final class TrainingControl {
     public static let shared = TrainingControl()
     private let lock = NSLock()
     private var _cancelled = false
+    private var _paused = false
     /// Идёт ли прогон прямо сейчас (нужно watchdog'у остановки).
     private var _running = false
     /// Поколение прогона: старый watchdog не должен убивать новый прогон.
@@ -21,6 +22,31 @@ public final class TrainingControl {
     public var isRunning: Bool {
         lock.lock(); defer { lock.unlock() }
         return _running
+    }
+
+    /// Пауза: поток обучения встаёт на границе шага, но прогон НЕ отменяется и
+    /// НЕ сбрасывается — веса, Adam-моменты и счётчик шагов остаются. Отличие от
+    /// «Стоп» в том, что `resume()` продолжает с того же места.
+    public var isPaused: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _paused
+    }
+
+    public func pause() { lock.lock(); _paused = true; lock.unlock() }
+    public func resume() { lock.lock(); _paused = false; lock.unlock() }
+
+    /// Блокирует поток обучения, пока стоит пауза, и отпускает при снятии паузы
+    /// ИЛИ при отмене (пауза + «Стоп» → выход, а не вечное ожидание). Спит
+    /// короткими срезами, чтобы «Стоп» отрабатывал почти мгновенно, и НЕ трогает
+    /// watchdog (пауза — намеренное состояние, а не зависание).
+    public func waitWhilePaused(sliceMs: Double = 100) {
+        while true {
+            lock.lock()
+            let p = _paused, c = _cancelled
+            lock.unlock()
+            if !p || c { return }
+            Thread.sleep(forTimeInterval: max(sliceMs, 1) / 1000)
+        }
     }
 
     /// Начало прогона. Флаг отмены НЕ сбрасывается: сброс делает `reset()`
@@ -71,7 +97,24 @@ public final class TrainingControl {
     public func reset() {
         lock.lock(); defer { lock.unlock() }
         _cancelled = false
+        _paused = false
     }
+}
+
+/// Действие управляющего контура на границе шага обучения. Чистая функция —
+/// самая опасная ветка цикла (решает: считать шаг / стоять / выйти). Отмена
+/// приоритетнее паузы: «пауза + Стоп» обязаны выйти, иначе поток завис бы в
+/// паузе навсегда и не отреагировал на остановку.
+public enum TrainingGateAction: Equatable, Sendable {
+    case proceed    // идём дальше
+    case wait       // пауза: встать и ждать снятия/отмены
+    case stop       // отмена: прервать прогон
+}
+
+public func trainingGateAction(cancelled: Bool, paused: Bool) -> TrainingGateAction {
+    if cancelled { return .stop }
+    if paused { return .wait }
+    return .proceed
 }
 
 /// Правило срабатывания watchdog-остановки — вынесено как чистая функция,

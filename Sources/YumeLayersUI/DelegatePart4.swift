@@ -313,6 +313,23 @@ extension YumeAppDelegate {
         api.onStop = { [weak self] in
             DispatchQueue.main.async { self?.stopTraining() }
         }
+        // Пауза/продолжение: не отменяют прогон, а тормозят его на границе шага
+        // (флаг TrainingControl читает управляющий контур trainConvVAE). Кнопку
+        // переименуем через статус, но логика та же, что у кнопки «Стоп» — только мягче.
+        api.onPause = { [weak self] in
+            DispatchQueue.main.async {
+                TrainingControl.shared.pause()
+                self?.log("⏸ Обучение на паузе (нажмите «Продолжить» или /api/resume)")
+                self?.setStatus("Пауза обучения", ok: true)
+            }
+        }
+        api.onResume = { [weak self] in
+            DispatchQueue.main.async {
+                TrainingControl.shared.resume()
+                self?.log("▶ Обучение продолжено")
+                self?.setStatus("Обучение продолжается…", ok: true)
+            }
+        }
         api.onExtract = { [weak self] paths, maxFrames in
             DispatchQueue.main.async {
                 guard let self = self, !paths.isEmpty else { return }
@@ -508,6 +525,7 @@ extension YumeAppDelegate {
                     "resume": self.resumeSwitch.state == .on,
                     "adaptiveThrottle": self.adaptiveSwitch.state == .on,
                     "training": self.isTraining,
+                    "paused": TrainingControl.shared.isPaused,
                     "extracting": self.isExtracting,
                     "thermal": self.thermalStateName(),
                     "gpuBufferAllocations": MetalEngine.shared.totalBufferAllocations,

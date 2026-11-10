@@ -94,9 +94,11 @@ public struct ConvTrainingNaNError: Error, LocalizedError {
 /// Эпохи никогда не пропускаются: resume грузит только веса.
 func loadResumeState(into vae: ConvVAEGPU, convPath: String,
                              resume: Bool, currentFingerprint: String) throws
-    -> (adamStep: Int, resumeWithoutOptimizer: Bool) {
+    -> (adamStep: Int, resumeWithoutOptimizer: Bool, savedEpoch: Int, dataMatches: Bool) {
     var adamStep = 0
     var resumeWithoutOptimizer = false
+    var savedEpoch = 0
+    var dataMatches = true
     // Грузим из ЛУЧШЕЙ доступной модели: защищённый финал важнее рабочего
     // файла (рабочий файл мог быть перезаписан промежуточным чекпоинтом
     // прерванного прогона).
@@ -105,15 +107,19 @@ func loadResumeState(into vae: ConvVAEGPU, convPath: String,
         let st = try loadStateWithMeta(path: resumePath)
         do {
             try vae.load(from: st.mats)
+            savedEpoch = max(st.epoch, 0)   // число завершённых эпох в чекпоинте
             if let opt = st.optimizer {
                 try vae.loadOptimizerMoments(opt.moments)
                 adamStep = max(opt.step, 0)
-                yumeLog("Веса и состояние оптимизатора загружены из \(resumePath) (дообучение, шаг Adam = \(adamStep))")
+                yumeLog("Веса и состояние оптимизатора загружены из \(resumePath) (дообучение, шаг Adam = \(adamStep), эпох пройдено = \(savedEpoch))")
             } else {
                 resumeWithoutOptimizer = true
+                savedEpoch = 0  // без моментов Adam не доверяем пропуску эпох — идём по всем
                 yumeLog("⚠️ В чекпоинте \(resumePath) нет состояния оптимизатора (старый формат) — Adam начинается с нуля, первые \(resumeWarmupSteps) шагов идут с разгоном, чтобы не разрушить модель")
             }
             if let fp = st.fingerprint, !fp.isEmpty, fp != currentFingerprint {
+                dataMatches = false
+                savedEpoch = 0
                 yumeLog("⚠️ Данные отличаются от тех, на которых учился чекпоинт (другой файл?) — гружу веса, но эпохи не пропускаю")
             }
         } catch let error where isIncompatibleCheckpoint(error) {
@@ -123,8 +129,10 @@ func loadResumeState(into vae: ConvVAEGPU, convPath: String,
             yumeLog("⚠️ Чекпоинт \(resumePath) не совпадает по форме с текущей моделью:")
             yumeLog("   \((error as NSError).localizedDescription)")
             yumeLog("   Обучение начнётся с новых весов. Файл не тронут — при необходимости верните его из .backup.")
+            savedEpoch = 0
+            dataMatches = false
         }
     }
-    return (adamStep, resumeWithoutOptimizer)
+    return (adamStep, resumeWithoutOptimizer, savedEpoch, dataMatches)
 }
 

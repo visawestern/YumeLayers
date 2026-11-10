@@ -37,6 +37,9 @@ final class ApiServer {
 
     var onTrain: ((Int, Bool) -> Void)?
     var onStop: (() -> Void)?
+    /// Пауза/продолжение обучения (не отменяет, а тормозит на границе шага).
+    var onPause: (() -> Void)?
+    var onResume: (() -> Void)?
     var onExtract: (([String], Int?) -> Void)?
     /// Запуск интерполяции А→Б: (путь A, путь B, длительность, fps, путь результата).
     /// Последний параметр может быть nil — тогда файл кладётся в ~/YumeLayers/outputs.
@@ -230,6 +233,10 @@ final class ApiServer {
             self.route__api_train(conn: conn, body: body, pathWithQuery: pathWithQuery); return
         case ("GET", "/api/stop"), ("POST", "/api/stop"):
             self.route__api_stop(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/pause"), ("POST", "/api/pause"):
+            self.route__api_pause(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/resume"), ("POST", "/api/resume"):
+            self.route__api_resume(conn: conn, body: body, pathWithQuery: pathWithQuery); return
         case ("GET", "/api/extract"), ("POST", "/api/extract"):
             self.route__api_extract(conn: conn, body: body, pathWithQuery: pathWithQuery); return
         case ("GET", "/api/set"), ("POST", "/api/set"):
@@ -353,6 +360,16 @@ final class ApiServer {
     private func route__api_stop(conn: NWConnection, body: String, pathWithQuery: String) {
             onStop?()
             send(status: 200, body: "{\"ok\":true}", to: conn)
+    }
+
+    private func route__api_pause(conn: NWConnection, body: String, pathWithQuery: String) {
+            onPause?()
+            send(status: 200, body: "{\"ok\":true,\"paused\":true}", to: conn)
+    }
+
+    private func route__api_resume(conn: NWConnection, body: String, pathWithQuery: String) {
+            onResume?()
+            send(status: 200, body: "{\"ok\":true,\"paused\":false}", to: conn)
     }
 
     private func route__api_extract(conn: NWConnection, body: String, pathWithQuery: String) {
@@ -520,7 +537,7 @@ final class ApiServer {
     private func statusJSON() -> String {
         lock.lock(); defer { lock.unlock() }
         return """
-        {"training":\(_isTraining),"epoch":\(_epoch),"totalEpochs":\(_totalEpochs),\
+        {"training":\(_isTraining),"paused":\(TrainingControl.shared.isPaused),"epoch":\(_epoch),"totalEpochs":\(_totalEpochs),\
         "loss":\(_loss),"psnr":\(_psnr),"progress":\(_progress),\
         "extracting":\(_isExtracting),"extractProgress":\(_extractProgress),\
         "interpolating":\(_isInterpolating),"interpolationProgress":\(_interpolationProgress)}

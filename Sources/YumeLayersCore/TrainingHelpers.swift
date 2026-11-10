@@ -12,6 +12,17 @@ func archVersionOf(_ vae: ConvVAEGPU) -> Int {
     vae.groupNorm ? 3 : (vae.residual ? 2 : 1)
 }
 
+/// Epoch-aware возобновление: номер эпохи, с которой продолжаем цикл, чтобы не
+/// переучивать завершённые эпохи после клина/стопа (не тратить время впустую).
+/// Чистая, детерминированная функция → тестируется без GPU/данных.
+///  - resume=off либо данные сменились (fingerprint не совпал) → 0 (полный прогон);
+///  - иначе clamp(savedEpoch) в [0, requestedEpochs] — старт со следующей эпохи.
+public func resumeStartEpoch(savedEpoch: Int, requestedEpochs: Int,
+                             dataMatches: Bool, resume: Bool) -> Int {
+    guard resume, dataMatches else { return 0 }
+    return min(max(savedEpoch, 0), max(requestedEpochs, 0))
+}
+
 /// Сохранение промежуточного чекпоинта (каждые 500 шагов).
 ///
 /// Сохраняется и состояние оптимизатора: без него продолжение обучения

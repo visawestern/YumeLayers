@@ -307,3 +307,123 @@ func testG2GateLogic() {
                             minPSNR: 30, minSSIM: 0.90)
     expectEqual(belowFloor, .failBelowFloor, "ниже пола → failBelowFloor независимо от baseline")
 }
+
+/// Пауза/продолжение обучения: чистое решение на границе шага + флаг-жизненный
+/// цикл TrainingControl. Отмена ВАЖНЕЕ паузы (пауза+стоп → стоп, а не вечное
+/// ожидание), пауза важнее продолжения (запаузенный шаг не считается).
+func testTrainingPauseControl() {
+    section("TrainingControl: пауза/продолжение обучения (чистое решение + флаги)")
+
+    expectEqual(trainingGateAction(cancelled: false, paused: false), .proceed, "ни паузы ни отмены — продолжаем")
+    expectEqual(trainingGateAction(cancelled: false, paused: true), .wait, "пауза — ждём")
+    expectEqual(trainingGateAction(cancelled: true, paused: false), .stop, "отмена — стоп")
+    // Отмена приоритетнее паузы: не должно быть вечного .wait при stop.
+    expectEqual(trainingGateAction(cancelled: true, paused: true), .stop, "отмена+пауза — стоп (не wait)")
+
+    // Флаговый жизненный цикл TrainingControl (без потока обучения).
+    let tc = TrainingControl.shared
+    tc.reset()
+    expect(!tc.isPaused, "до паузы — не запАузовано")
+    tc.pause()
+    expect(tc.isPaused, "pause() → isPaused=true")
+    tc.resume()
+    expect(!tc.isPaused, "resume() → isPaused=false")
+
+    // waitWhilePaused: в паузе + cancel → обязан отпустить (иначе «стоп» во время
+    // паузы завис бы навсегда). Короткий срез — чтобы тест не блокировался.
+    tc.pause()
+    tc.cancel(graceSeconds: 120)
+    tc.waitWhilePaused(sliceMs: 5)   // вернётся по cancel, не зависнет
+    expect(tc.isCancelled, "после cancel во время паузы — отмена активна, пауза отпущена")
+    tc.reset()
+    expect(!tc.isCancelled && !tc.isPaused, "reset снимает отмену и паузу")
+}
+
+/// Epoch-aware возобновление: при resume пропускать уже завершённые эпохи, чтобы
+/// прерванный (клин/стоп) многочасовой прогон НЕ начинался с нуля и не тратил
+/// время впустую. Но если данные сменились (другой fingerprint) или resume выключен
+/// — начинать с 0 (полный прогон), чтобы не обучать на чужом таргете.
+func testResumeStartEpoch() {
+    section("Resume: пропуск завершённых эпох (не тратить тренинг впустую)")
+
+    // resume есть, данные те же, 2 эпохи уже записаны → продолжить с эпохи 2.
+    expectEqual(resumeStartEpoch(savedEpoch: 2, requestedEpochs: 4,
+                                 dataMatches: true, resume: true), 2,
+                "resume + те же данные → старт со следующей эпохи")
+
+    // Данные другие → не пропускаем (полный прогон).
+    expectEqual(resumeStartEpoch(savedEpoch: 2, requestedEpochs: 4,
+                                 dataMatches: false, resume: true), 0,
+                "другой fingerprint → старт с 0")
+
+    // resume выключен → старт с 0 даже с сохранёнными эпохами.
+    expectEqual(resumeStartEpoch(savedEpoch: 3, requestedEpochs: 5,
+                                 dataMatches: true, resume: false), 0,
+                "resume=off → старт с 0")
+
+    // Нет чекпоинта (savedEpoch=0) → старт с 0.
+    expectEqual(resumeStartEpoch(savedEpoch: 0, requestedEpochs: 3,
+                                 dataMatches: true, resume: true), 0,
+                "нет завершённых эпох → старт с 0")
+
+    // Уже обучили больше запрошенного → старт на requestedEpochs (0 новых эпох),
+    // но не за пределами (корректное окончание цикла).
+    expectEqual(resumeStartEpoch(savedEpoch: 6, requestedEpochs: 4,
+                                 dataMatches: true, resume: true), 4,
+                "savedEpoch > requested → старт у границы (без выхода за пределы)")
+
+    // Отрицательный savedEpoch не должен уходить в минус.
+    expectEqual(resumeStartEpoch(savedEpoch: -5, requestedEpochs: 4,
+                                 dataMatches: true, resume: true), 0,
+                "отрицательный savedEpoch → не меньше 0")
+}
+
+/// Сквозная проверка epoch-aware resume: оттренировать 2 эпохи → чекпоинт; затем
+/// resume=true при epochs=4 должен продолжить с эпох 2 и 3 (2 новых отчёта об
+/// эпохах), а НЕ перебирать эпохи 0 и 1. Доказывает, что `savedEpoch`/`startEpoch`
+/// реально wired в цикл, а не только чистая функция.
+func testTrainConvVAEResumeSkipsEpochs() {
+    section("Resume сквозной: trainConvVAE пропускает завершённые эпохи (не тратит время)")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+
+    let w = 32, h = 24
+    var frames = [MemoryFrame]()
+    for f in 0..<6 {
+        var rng = SplitMix64(seed: UInt64(3300 + f))
+        let img = makeSyntheticScene(w: w, h: h, rng: &rng)
+        guard let png = encodePNG(width: w, height: h, rgb: img) else { expect(false, "encodePNG"); return }
+        frames.append(MemoryFrame(name: "f\(f).png", jpeg: png))
+    }
+    let dir = "/tmp/yume_resume_ckpt"
+    try? FileManager.default.removeItem(atPath: dir)
+    func makeParams(epochs: Int, resume: Bool) -> Params {
+        var p = Params()
+        p.width = w; p.height = h
+        p.epochs = epochs; p.steps = 8; p.batch = 2; p.lr = 0.003
+        p.convPath = "\(dir)/conv.safetensors"; p.vaePath = "\(dir)/vae.safetensors"
+        p.diffPath = "\(dir)/diff.safetensors"; p.outPrefix = "\(dir)/outputs/gen"
+        p.memoryFrames = frames; p.controlFrames = frames; p.resume = resume
+        return p
+    }
+
+    let tc = TrainingControl.shared
+    tc.reset()
+    // 1) Полная тренировка 2 эпохи.
+    try? trainConvVAE(p: makeParams(epochs: 2, resume: false))
+    expect(FileManager.default.fileExists(atPath: "\(dir)/conv.safetensors"),
+           "чекпоинт после 2 эпох сохранён")
+
+    // 2) Resume до 4 эпох: считаем какие эпохи отчитаны (onProgress ep 0-based).
+    tc.reset()
+    var reportedEpochs: [Int] = []
+    try? trainConvVAE(p: makeParams(epochs: 4, resume: true),
+                      onProgress: { ep, _, _, _ in reportedEpochs.append(ep) })
+
+    print("      resume: отчитанные эпохи = \(reportedEpochs)")
+    // Эпохи 0 и 1 уже были в чекпоинте → resume продолжает с 2..3. Не должно быть ep=0/1.
+    expect(reportedEpochs.contains(2) || reportedEpochs.contains(3),
+           "resume отчитал продолжающие эпохи (2/3), а не переучил заново")
+    expect(!reportedEpochs.contains(0),
+           "resume НЕ повторяет эпоху 0 (пройденное пропущено)")
+    tc.reset()
+}
