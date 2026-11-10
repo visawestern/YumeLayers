@@ -396,6 +396,24 @@ public let defaultTargetTempC = 82.0
 /// принудительное остывание, независимо от доли работы.
 public let emergencyTempC = 86.0
 
+/// Аварийный ответ на перегрев: НЕ полный стоп, а резкое снижение нагрузки +
+/// короткий ограниченный cooldown (пользователь: «вместо стопа полного на переборе
+/// температуры делай снижение нагрузки»). Обучение продолжается на пониженном duty,
+/// карта охлаждается на короткой паузе, а не висит 20 секунд. Чистая функция,
+/// тестируется без GPU.
+public func emergencyThermalResponse(tempC: Double, currentDuty: Double,
+                                     threshold: Double = emergencyTempC,
+                                     maxCooldownSeconds: Double = 2)
+    -> (duty: Double, cooldownSeconds: Double) {
+    guard tempC.isFinite, tempC >= threshold else { return (currentDuty, 0) }
+    let over = tempC - threshold
+    // Резко режем долю работы (не в нуль — продолжаем), с полом 0.05.
+    let newDuty = max(currentDuty * 0.35, 0.05)
+    // Короткий cooldown: растёт с перегревом, но жёстко ограничен сверху (не 20 с).
+    let cooldown = min(max(maxCooldownSeconds, 0), 0.5 + over * 0.4)
+    return (newDuty, cooldown)
+}
+
 /// Пауза на остывание между эпохами, мс.
 ///
 /// Пауза — это тепловой инструмент, а не часть расписания. Если карта
@@ -501,6 +519,17 @@ public struct PowerController {
 
         duty = min(max(want, 0.05), ceiling)
         return duty
+    }
+
+    /// Аварийное снижение нагрузки на перегреве (термозащита). Применяет
+    /// `emergencyThermalResponse` к ВНУТРЕННЕМУ duty (не локальной переменной),
+    /// чтобы снижение сохранилось между замерами; возвращает короткий cooldown.
+    /// Контур сам поднимет duty обратно, когда карта остынет — обучение не стоит.
+    @discardableResult
+    mutating func emergencyThrottle(tempC: Double) -> Double {
+        let r = emergencyThermalResponse(tempC: tempC, currentDuty: duty)
+        duty = r.duty
+        return r.cooldownSeconds
     }
 }
 

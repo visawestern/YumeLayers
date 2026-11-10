@@ -477,3 +477,37 @@ func testPlateauDetection() {
     // Пусто/мусор → не паникуем.
     expect(!plateauDetected(losses: []), "пустая серия — не плато")
 }
+
+/// Аварийная термозащита: вместо ПОЛНОГО стопа (20-сек freeze) — резкое снижение
+/// нагрузки + короткий ограниченный cooldown. Пользователь: «вместо стопа полного на
+/// переборе температуры делай снижение нагрузки». Функция чистая → тестируется без GPU.
+func testEmergencyThermalThrottle() {
+    section("Термозащита: при перегреве снижаем нагрузку, а не останавливаемся полностью")
+
+    // Ниже аварийного порога — ничего не меняем, cooldown 0 (не трогаем режим).
+    let ok = emergencyThermalResponse(tempC: 80, currentDuty: 0.95, threshold: 86)
+    expectClose(ok.duty, 0.95, 1e-9, "холодно → duty без изменений")
+    expectEqual(ok.cooldownSeconds, 0, "холодно → без cooldown")
+
+    // Перебор порога → нагрузка РЕЗКО вниз (не нуль, обучение продолжается).
+    let hot = emergencyThermalResponse(tempC: 86, currentDuty: 0.95, threshold: 86)
+    expect(hot.duty < 0.95 * 0.6, String(format: "перегрев → duty снижен заметно (получено %.3f)", hot.duty))
+    expect(hot.duty >= 0.05, "duty не опускаем ниже пола 0.05")
+
+    // Cooldown КОРОТКИЙ и ограниченный (не 20 секунд полного стопа).
+    expect(hot.cooldownSeconds > 0, "перегрев → небольшой cooldown, чтобы остыть")
+    expect(hot.cooldownSeconds <= 2.0,
+           String(format: "cooldown ≤ 2 с (не полный стоп 20 с); получено %.2f", hot.cooldownSeconds))
+
+    // Сильный перегрев → чуть длиннее cooldown, но всё равно в пределах потолка.
+    let veryHot = emergencyThermalResponse(tempC: 92, currentDuty: 0.9, threshold: 86)
+    expect(veryHot.cooldownSeconds > hot.cooldownSeconds,
+           "сильнее перегрев → больше cooldown (пропорционально)")
+    expect(veryHot.cooldownSeconds <= 2.0, "cooldown жёстко ограничен сверху (никогда не 20 с)")
+    expect(veryHot.duty <= hot.duty, "сильнее перегрев → нагрузка не выше")
+
+    // NaN/нет показаний → безопасно: без изменений.
+    let nan = emergencyThermalResponse(tempC: .nan, currentDuty: 0.8, threshold: 86)
+    expectClose(nan.duty, 0.8, 1e-9, "NaN температуры → режим не трогаем")
+    expectEqual(nan.cooldownSeconds, 0, "NaN → без cooldown")
+}

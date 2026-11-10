@@ -274,13 +274,17 @@ extension TrainContext {
             if let s = stats, s.hasTemperature {
                 lastTempC = s.temperatureC
                 if s.temperatureC >= emergencyTempC {
-                    yumeLog(String(format: "🔥 GPU %.0f °C — принудительное остывание до 20 с",
-                                   s.temperatureC))
-                    let coolDeadline = Date().addingTimeInterval(20)
+                    // Перебор температуры: НЕ полный стоп на 20 с, а резкое снижение
+                    // нагрузки + короткий bounded cooldown. Обучение продолжается на
+                    // пониженной доле; контур сам поднимет duty, когда карта остынет.
+                    let cooldown = power.emergencyThrottle(tempC: s.temperatureC)
+                    currentDuty = power.duty
+                    yumeLog(String(format: "🔥 GPU %.0f °C → снижаю нагрузку до %.0f%% + cooldown %.1f с (не стоп)",
+                                   s.temperatureC, currentDuty * 100, cooldown))
+                    let coolDeadline = Date().addingTimeInterval(cooldown)
                     while Date() < coolDeadline, !TrainingControl.shared.isCancelled {
-                        Thread.sleep(forTimeInterval: 0.25)
+                        Thread.sleep(forTimeInterval: 0.2)
                     }
-                    currentDuty = max(power.duty * 0.5, 0.05)
                 }
                 if Date().timeIntervalSince(lastSensorLog) > 60 {
                     lastSensorLog = Date()
