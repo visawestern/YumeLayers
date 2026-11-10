@@ -223,6 +223,7 @@ func featureTestRegistry() -> [(String, () -> Void)] {
         ("RealVideoDatasetAvailable", testRealVideoDatasetAvailable),
         ("RealVideoFramesExtracted", testRealVideoFramesExtracted),
         ("OverfitRealVideo16Frames", testOverfitRealVideo16Frames),
+        ("TrainConvVAELearnsOnRealFrames", testTrainConvVAELearnsOnRealFrames),
         ("HoldoutRealVideoScenes", testHoldoutRealVideoScenes),
     ]
 }

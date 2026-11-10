@@ -175,6 +175,62 @@ func testG2RealDataRequirements() {
                  base.psnr, base.ssim, base.source))
 }
 
+/// Страж регрессии: продуктовый путь `trainConvVAE` (тот же, что `/api/train`)
+/// ОБЯЗАН учиться на реальных кадрах — loss убывает, PSNR растёт по эпохам.
+/// В живом прогоне 4000 кадров при modelWidth=4/latent=64/batch=8 застрял на
+/// детерминированном орбитационном цикле ~9.6 дБ (признак дивергенции). Этот тест
+/// на 64 реальных кадрах и стабильном конфиге (modelWidth=2/latent=32/batch=4)
+/// ловит, если обучение вообще перестало сходиться.
+func testTrainConvVAELearnsOnRealFrames() {
+    section("G1: продуктовый trainConvVAE учится на реальных кадрах (страж обучения)")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let dir = "/tmp/yume_real"
+    let fm = FileManager.default
+    guard let files = try? fm.contentsOfDirectory(atPath: dir),
+          files.filter({ $0.hasSuffix(".jpg") }).count >= 48 else {
+        skip("нет реальных кадров в \(dir) — сначала ffmpeg-экстракция"); return
+    }
+    let jpgs = files.filter { $0.hasSuffix(".jpg") }.sorted().prefix(64)
+    var mem = [MemoryFrame]()
+    for (i, name) in jpgs.enumerated() {
+        guard let d = fm.contents(atPath: "\(dir)/\(name)") else { continue }
+        mem.append(MemoryFrame(name: "\(i).jpg", jpeg: d))
+    }
+    expect(mem.count >= 48, "загружено ≥48 реальных JPEG-кадров (получено \(mem.count))")
+
+    let base = "/tmp/yume_learn_ckpt"
+    try? FileManager.default.removeItem(atPath: base)
+    var p = Params()
+    p.width = 128; p.height = 72
+    p.modelWidth = 2; p.latentChannels = 32
+    p.residual = true; p.groupNorm = false
+    p.lossKind = "mse"; p.edgeWeight = 0
+    p.epochs = 5; p.steps = 160; p.batch = 4
+    p.lr = 0.0004                       // консервативный — как рабочий e2e
+    p.convPath = "\(base)/conv.safetensors"; p.vaePath = "\(base)/vae.safetensors"
+    p.diffPath = "\(base)/diff.safetensors"; p.outPrefix = "\(base)/outputs/gen"
+    p.memoryFrames = mem; p.controlFrames = mem; p.resume = false
+
+    let tc = TrainingControl.shared
+    tc.reset()
+    var losses: [Double] = []
+    var psnrs: [Double] = []
+    try? trainConvVAE(p: p, onProgress: { _, loss, psnr, _ in
+        losses.append(loss); psnrs.append(psnr)
+    })
+    tc.reset()
+
+    print("      реальные кадры: loss \(losses.map { String(format: "%.3f", $0) }) → psnr \(psnrs.map { String(format: "%.1f", $0) })")
+    expect(losses.count >= 3, "получено ≥3 эпоховых отчёта (было \(losses.count))")
+    // Ключ: обучение сходится — loss к концу ниже старта И psnr вырос.
+    expect(losses.last! < losses.first!,
+           String(format: "loss убывает по эпохам (%.4f → %.4f)", losses.first!, losses.last!))
+    expect(psnrs.last! > psnrs.first!,
+           String(format: "PSNR растёт по эпохам (%.2f → %.2f дБ)", psnrs.first!, psnrs.last!))
+    expect(psnrs.last! >= 15.0,
+           String(format: "продуктовый путь на реальных кадрах достигает ≥15 дБ (получено %.2f)", psnrs.last!))
+}
+
 func testRealVideoDatasetAvailable() {
     section("G2: реальный видеодатасет 8446058105548.mp4 доступен")
     let videoPath = "/Users/apple/projects/YumeLayers/8446058105548.mp4"
