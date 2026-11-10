@@ -229,6 +229,15 @@ func featureTestRegistry() -> [(String, () -> Void)] {
         ("480pInterpolationFramesLoad", test480pInterpolationFramesLoad),
         ("G2PassGateOnTrainedCheckpoint", testG2PassGateOnTrainedCheckpoint),
         ("HoldoutRealVideoScenes", testHoldoutRealVideoScenes),
+        ("ResampleSegmentIndices", testResampleSegmentIndices),
+        ("MotionPairs", testMotionPairs),
+        ("MotionTimeEmbedding", testMotionTimeEmbedding),
+        ("MotionMLPShape", testMotionMLPShape),
+        ("MotionMLPNumericGrads", testMotionMLPNumericGrads),
+        ("MotionMLPTrainOverfit", testMotionMLPTrainOverfit),
+        ("MotionCheckpointRoundTrip", testMotionCheckpointRoundTrip),
+        ("MotionTrainingImprovesPrediction", testMotionTrainingImprovesPrediction),
+        ("MotionPixelQualityVsCeiling", testMotionPixelQualityVsCeiling),
     ]
 }
 

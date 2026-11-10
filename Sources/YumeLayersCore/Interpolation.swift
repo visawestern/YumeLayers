@@ -208,9 +208,14 @@ public struct InterpolationRequest {
     public var modelHeight: Int
     /// Путь к чекпоинту обученного VAE.
     public var checkpointPath: String
+    /// Путь к чекпоинту сети движения (необязателен). Если файл существует и
+    /// совместим с размерностью латента — промежуточные кадры считаются через
+    /// сеть движения (lerp + поправка), иначе — чистый lerp.
+    public var motionCheckpointPath: String?
 
     public init(imageAPath: String, imageBPath: String, seconds: Double, fps: Int,
-                outputPath: String, modelWidth: Int, modelHeight: Int, checkpointPath: String) {
+                outputPath: String, modelWidth: Int, modelHeight: Int, checkpointPath: String,
+                motionCheckpointPath: String? = nil) {
         self.imageAPath = imageAPath
         self.imageBPath = imageBPath
         self.seconds = seconds
@@ -219,6 +224,7 @@ public struct InterpolationRequest {
         self.modelWidth = modelWidth
         self.modelHeight = modelHeight
         self.checkpointPath = checkpointPath
+        self.motionCheckpointPath = motionCheckpointPath
     }
 }
 
@@ -306,19 +312,49 @@ public func interpolateVideo(_ request: InterpolationRequest,
     let latentA = try encodeLatent(vae: vae, image: imageA, w: pw, h: ph)
     let latentB = try encodeLatent(vae: vae, image: imageB, w: pw, h: ph)
 
+    // Сеть движения (опционально): lerp + поправка, обученная на реальных
+    // парах того же видео. Путь передаётся, если файл существует.
+    var motionNet: MotionMLPGPU? = nil
+    if let mp = request.motionCheckpointPath,
+       FileManager.default.fileExists(atPath: mp),
+       let mc = try? loadMotionCheckpoint(from: mp),
+       mc.meta.latentDim == latentA.count {
+        let net = MotionMLPGPU(engine: MetalEngine.shared,
+                               latentDim: mc.meta.latentDim,
+                               dimEmb: mc.meta.dimEmb,
+                               hidden: mc.meta.hidden)
+        try? net.load(from: mc.mats)
+        net.latentMean = mc.meta.latentMean
+        net.latentScale = mc.meta.latentScale
+        motionNet = net
+        yumeLog("Движение: используется сеть движения (latentDim=\(mc.meta.latentDim), hidden=\(mc.meta.hidden), mean=\(mc.meta.latentMean), scale=\(mc.meta.latentScale))")
+    }
+
     // Кадры.
     let plan = interpolationPlan(seconds: request.seconds, fps: request.fps)
     var frames: [[Float]] = []
     frames.reserveCapacity(plan.frameCount)
     for (index, linearTime) in plan.times.enumerated() {
         if InterpolationControl.shared.isCancelled { throw InterpolationError.cancelled }
-        let eased = smoothstep(linearTime)
-        let latent = interpolateScalars(latentA, latentB, t: eased)
+        let latent: [Float]
+        if index == 0 || index == plan.frameCount - 1 {
+            // Первый/последний кадр — точные опоры A/B (не реконструкции).
+            latent = index == 0 ? latentA : latentB
+        } else if let net = motionNet {
+            // Сеть обучалась на линейном времени t = (k−a)/(b−a) — вызываем
+            // её с тем же линейным временем (без smoothstep).
+            latent = predictMotionLatent(net: net, zA: latentA, zB: latentB,
+                                         t: linearTime)
+        } else {
+            // Без сети движения — прежний плавный lerp.
+            let eased = smoothstep(linearTime)
+            latent = interpolateScalars(latentA, latentB, t: eased)
+        }
         let frame: [Float]
         if index == 0 {
-            frame = imageA                       // первый кадр — точная опора A
+            frame = imageA
         } else if index == plan.frameCount - 1 {
-            frame = imageB                       // последний — точная опора B
+            frame = imageB
         } else {
             frame = try decodeLatent(vae: vae, latent: latent, w: pw, h: ph)
         }

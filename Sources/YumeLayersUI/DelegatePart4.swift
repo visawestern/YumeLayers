@@ -68,6 +68,8 @@ extension YumeAppDelegate {
         return FileManager.default.fileExists(atPath: bestCheckpointPath(for: p))
     }
 
+
+
     @objc func mediaTabChanged(_ sender: NSSegmentedControl) {
         let showResult = sender.selectedSegment == 1
         videoMediaCard?.isHidden = showResult
@@ -124,7 +126,8 @@ extension YumeAppDelegate {
                                            outputPath: out,
                                            modelWidth: widthCtl.intValue(def: 80),
                                            modelHeight: heightCtl.intValue(def: 56),
-                                           checkpointPath: checkpoint)
+                                           checkpointPath: checkpoint,
+                                           motionCheckpointPath: motionCheckpointPath(for: checkpoint))
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 let result = try interpolateVideo(request) { done, total in
@@ -359,6 +362,10 @@ extension YumeAppDelegate {
         api.onInterpolateStop = {
             InterpolationControl.shared.cancel()
         }
+        api.onTrainMotion = { [weak self] steps, window in
+            DispatchQueue.main.async { self?.trainMotionNow(steps: steps, window: window) }
+        }
+        configureReferencesCallback()
         api.onSaveRecons = { [weak self] dir in
             DispatchQueue.main.async { self?.saveReconstructionsToDisk(dir: dir) }
         }

@@ -35,6 +35,11 @@ extension YumeAppDelegate {
 
     /// Собирает карточку «1. Видео» и связанные контролы.
     private func buildExtractSection() -> (folderRow: NSStackView, page: NSView) {
+        // Кнопка «Обзор»: открывает ту же панель выбора видео, что и
+        // перетаскивание/«Выбрать». Раньше target/action не были привязаны —
+        // кнопка не работала (регрессия UI).
+        browseButton.target = self
+        browseButton.action = #selector(chooseVideo)
         let folderRow = fieldRow("Файл:", folderField, accessory: browseButton,
                                  info: "Выберите один или несколько видеофайлов (MP4/MOV). Кадры будут извлечены строго в порядке выбора — это важно для привязки движения к seed.")
 
@@ -232,6 +237,16 @@ extension YumeAppDelegate {
         interpRunButton.action = #selector(runInterpolation)
         interpStopButton.target = self
         interpStopButton.action = #selector(stopInterpolation)
+        // Скриншот текущего выбранного кадра → опорная A/B.
+        shotToAButton.target = self
+        shotToAButton.action = #selector(shotToReferenceA)
+        shotToAButton.bezelStyle = .rounded
+        shotToAButton.controlSize = .small
+        shotToBButton.target = self
+        shotToBButton.action = #selector(shotToReferenceB)
+        shotToBButton.bezelStyle = .rounded
+        shotToBButton.controlSize = .small
+        updateShotButtons()
         // При старте интерполяция не идёт — «Стоп» неактивна.
         // Активность переключает updateInterpolateButtons() при старте/завершении.
         interpStopButton.isEnabled = false
@@ -250,10 +265,15 @@ extension YumeAppDelegate {
         let interpButtons = NSStackView(views: [interpRunButton, interpStopButton])
         interpButtons.orientation = .horizontal
         interpButtons.spacing = 8
+        let shotRow = NSStackView(views: [shotToAButton, shotToBButton])
+        shotRow.orientation = .horizontal
+        shotRow.spacing = 8
+        shotRow.alignment = .centerY
         let interpPage = groupCard(title: "4. Генерация A→B",
                                    contentViews: [
             referenceRow("Кадр A:", interpAButton, interpALabel),
             referenceRow("Кадр B:", interpBButton, interpBLabel),
+            shotRow,
             valueRow("Длительность, с:", interpSecondsCtl,
                      info: "Число кадров = длительность × кадров в секунду."),
             valueRow("Кадров в секунду:", interpFpsCtl,

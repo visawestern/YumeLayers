@@ -167,6 +167,26 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
     let interpBLabel = NSTextField(labelWithString: "не выбран")
     let interpSecondsCtl = EditableValueControl(value: "5")
     let interpFpsCtl = EditableValueControl(value: "24")
+    /// Скриншот текущего выбранного кадра → опорная A / опорная B.
+    let shotToAButton = NSButton(title: "Кадр → A", target: nil, action: nil)
+    let shotToBButton = NSButton(title: "Кадр → B", target: nil, action: nil)
+    /// Папка скриншотов рядом с программой (fallback — ~/YumeLayers/screenshots).
+    var screenshotsDir: String {
+        let nearApp = Bundle.main.bundleURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("screenshots", isDirectory: true)
+        let homeDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("YumeLayers/screenshots", isDirectory: true)
+        let primary = nearApp.path
+        let fallback = homeDir.path
+        if (try? FileManager.default.createDirectory(atPath: primary,
+                                                     withIntermediateDirectories: true)) != nil {
+            return primary
+        }
+        try? FileManager.default.createDirectory(atPath: fallback,
+                                                withIntermediateDirectories: true)
+        return fallback
+    }
     let interpRunButton = NSButton(title: "Создать видео", target: nil, action: nil)
     let interpStopButton = NSButton(title: "Стоп", target: nil, action: nil)
     let interpProgressBar = NSProgressIndicator()

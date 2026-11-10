@@ -78,6 +78,7 @@ extension YumeAppDelegate {
         carouselNext.isEnabled = carouselPage < pages - 1
         carouselFirst.isEnabled = carouselPage > 0
         carouselLast.isEnabled = carouselPage < pages - 1
+        updateShotButtons()
     }
 
     func updatePagination() {
@@ -238,6 +239,9 @@ extension YumeAppDelegate {
                         }
                     }
                 )
+                // Итоговое обучение движения: после VAE учим сеть воспроизводить
+                // реальные промежуточные кадры между опорами (если есть кадры).
+                self.trainMotionAfterVae(p: p)
                 DispatchQueue.main.async {
                     self.finishTraining(ok: true)
                 }
@@ -247,6 +251,41 @@ extension YumeAppDelegate {
                     self.finishTraining(ok: false)
                 }
             }
+        }
+    }
+
+    /// Длина окна движения под текущие настройки интерполяции (секунды × fps).
+    func currentInterpolationWindow() -> Int {
+        let seconds = interpSecondsCtl.doubleValue(def: 5)
+        let fps = interpFpsCtl.intValue(def: 24)
+        return max(8, min(128, Int((seconds * Double(fps)).rounded())))
+    }
+
+    /// Обучение сети движения после успешного VAE. Ошибки не фатальны:
+    /// реконструкции/завершение обучения не отменяются, пишем в журнал.
+    func trainMotionAfterVae(p: Params, steps: Int = 300, window: Int? = nil) {
+        guard let frames = p.memoryFrames, !frames.isEmpty else {
+            log("Движение: нет кадров в памяти — сеть движения не обучалась")
+            return
+        }
+        let convPath = p.convPath
+        let motionPath = motionCheckpointPath(for: convPath)
+        let pw = max(8, ((max(p.width, 8) + 7) / 8) * 8)
+        let ph = max(8, ((max(p.height, 8) + 7) / 8) * 8)
+        // Окно обучения = целевой длине интервала A→B: сеть выучивает динамику
+        // именно этого масштаба (тест MotionTrainingImprovesPrediction).
+        let w = max(8, min(128, window ?? currentInterpolationWindow()))
+        do {
+            log("=== Запуск обучения движения (сеть предсказания промежуточных кадров, окно \(w) кадров) ===")
+            try trainMotionMLPFromCheckpoint(memoryFrames: frames,
+                                             vaeCheckpointPath: convPath,
+                                             pw: pw, ph: ph,
+                                             steps: steps, lr: 0.001,
+                                             window: w,
+                                             maxEncodedFrames: 512,
+                                             objectivePath: motionPath)
+        } catch {
+            log("⚠️ Движение: сеть движения не обучена (\(error.localizedDescription))")
         }
     }
 

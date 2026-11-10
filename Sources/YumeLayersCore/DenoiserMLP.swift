@@ -27,13 +27,16 @@ final class LinearGPU {
     let mb: GPUTensor
     let vb: GPUTensor
 
-    init(engine: MetalEngine, ic: Int, oc: Int, rng: inout SplitMix64) {
+    init(engine: MetalEngine, ic: Int, oc: Int, rng: inout SplitMix64,
+         zeroInit: Bool = false) {
         self.ic = ic
         self.oc = oc
         let scale = 1.0 / sqrt(Float(ic))
         var wData = [Float](repeating: 0, count: ic * oc)
-        for i in 0..<wData.count {
-            wData[i] = Float.random(in: -scale...scale, using: &rng)
+        if !zeroInit {
+            for i in 0..<wData.count {
+                wData[i] = Float.random(in: -scale...scale, using: &rng)
+            }
         }
         W = GPUTensor(engine: engine, data: wData, rows: oc)
         let zeroB = [Float](repeating: 0, count: oc)

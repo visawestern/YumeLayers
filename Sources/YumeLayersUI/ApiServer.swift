@@ -44,6 +44,8 @@ final class ApiServer {
     /// Запуск интерполяции А→Б: (путь A, путь B, длительность, fps, путь результата).
     /// Последний параметр может быть nil — тогда файл кладётся в ~/YumeLayers/outputs.
     var onInterpolate: ((String, String, Double, Int, String?) -> Void)?
+    /// Запуск обучения сети движения на текущих кадрах (шаги, окно).
+    var onTrainMotion: ((Int, Int?) -> Void)?
     /// Остановка текущей интерполяции.
     var onInterpolateStop: (() -> Void)?
     /// Запуск слойного контура (видео → слои → обучение → превью):
@@ -66,6 +68,11 @@ final class ApiServer {
     var framesProvider: (() -> [String: Any])?
     var paramsProvider: (() -> [String: Any])?
     var frameProvider: ((Int) -> [String: Any]?)?
+    /// Текущие опорные кадры интерполяции: ["imageA": путь, "imageB": путь].
+    var referencesProvider: (() -> [String: Any])?
+    /// Установка опорных кадров: {"imageA": путь, "imageB": путь}.
+    /// Возвращает (ok, применено, нераспознано).
+    var onSetReferences: (([String: Any]) -> (ok: Bool, applied: [String], unknown: [String]))?
 
     init() {
         print("YumeLayers API: http://127.0.0.1:\(port)")
@@ -249,6 +256,8 @@ final class ApiServer {
             self.route__api_interpolate(conn: conn, body: body, pathWithQuery: pathWithQuery); return
         case ("GET", "/api/interpolate/stop"), ("POST", "/api/interpolate/stop"):
             self.route__api_interpolate_stop(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/train-motion"), ("POST", "/api/train-motion"):
+            self.route__api_train_motion(conn: conn, body: body, pathWithQuery: pathWithQuery); return
         case ("GET", "/api/layered/train"), ("POST", "/api/layered/train"):
             self.route__api_layered_train(conn: conn, body: body, pathWithQuery: pathWithQuery); return
         case ("GET", "/api/layered/result"), ("POST", "/api/layered/result"):
@@ -265,6 +274,8 @@ final class ApiServer {
             self.route__api_params(conn: conn, body: body, pathWithQuery: pathWithQuery); return
         case ("GET", "/api/frame"), ("POST", "/api/frame"):
             self.route__api_frame(conn: conn, body: body, pathWithQuery: pathWithQuery); return
+        case ("GET", "/api/references"), ("POST", "/api/references"):
+            self.route__api_references(conn: conn, body: body, pathWithQuery: pathWithQuery); return
         default:
             send(status: 404, body: "{\"error\":\"not found\"}", to: conn)
         }
@@ -525,7 +536,7 @@ final class ApiServer {
             }
     }
 
-    private func queryInt(_ pathWithQuery: String, _ key: String, def: Int) -> Int {
+    func queryInt(_ pathWithQuery: String, _ key: String, def: Int) -> Int {
         guard let q = pathWithQuery.components(separatedBy: "?").dropFirst().first else { return def }
         for pair in q.components(separatedBy: "&") {
             let kv = pair.components(separatedBy: "=")
@@ -566,13 +577,13 @@ final class ApiServer {
         return "{\"path\":null}"
     }
 
-    private func json(_ object: [String: Any]) -> String {
+    func json(_ object: [String: Any]) -> String {
         guard let data = try? JSONSerialization.data(withJSONObject: object),
               let text = String(data: data, encoding: .utf8) else { return "{}" }
         return text
     }
 
-    private func send(status: Int, body: String, to conn: NWConnection) {
+    func send(status: Int, body: String, to conn: NWConnection) {
         var headers = "HTTP/1.1 \(status) " + (status == 200 ? "OK" : "Error") + "\r\n"
         headers += "Content-Type: application/json\r\n"
         headers += "Content-Length: \(body.utf8.count)\r\n"
