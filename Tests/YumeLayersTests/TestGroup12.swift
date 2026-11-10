@@ -231,6 +231,23 @@ func testTrainConvVAELearnsOnRealFrames() {
            String(format: "продуктовый путь на реальных кадрах достигает ≥15 дБ (получено %.2f)", psnrs.last!))
 }
 
+/// Проверка загрузки опорных кадров 480p для интерполяции.
+func test480pInterpolationFramesLoad() {
+    section("480p интерполяция: загрузка двух опорных кадров")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let f0 = "/tmp/yume_frames/frame_0000.jpg"
+    let f1 = "/tmp/yume_frames/frame_0064.jpg"
+    let fm = FileManager.default
+    expect(fm.fileExists(atPath: f0), "кадр 0000 существует")
+    expect(fm.fileExists(atPath: f1), "кадр 0064 существует")
+    if let attrs = try? fm.attributesOfItem(atPath: f0), let size = attrs[.size] as? UInt64 {
+        expect(size > 0, "кадр 0000 не пустой")
+    } else { expect(false, "не удалось получить атрибуты кадра 0000") }
+    if let attrs = try? fm.attributesOfItem(atPath: f1), let size = attrs[.size] as? UInt64 {
+        expect(size > 0, "кадр 0064 не пустой")
+    } else { expect(false, "не удалось получить атрибуты кадра 0064") }
+}
+
 /// Исполняемый G2-гейт: если на диске есть trained-чекпоинт (result реального
 /// доучивания) и raw hold-out, загружает модель с архитектурой из метаданных,
 /// реконструирует hold-out и ТРЕБУЕТ `g2Verdict == .pass` (PSNR≥23.4, SSIM≥0.69 —
