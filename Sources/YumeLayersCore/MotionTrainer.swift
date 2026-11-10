@@ -181,6 +181,147 @@ func buildMotionTrainingPairs(runs: [[Int]], latents: [Int: [Float]],
     return pairs
 }
 
+// ---------- Пиксельное обучение (PSNR-driven) ----------
+
+/// Один шаг пиксельного обучения: предсказанный латент декодируется VAE,
+/// MSE с целевым кадром считается в пикселях, градиент dL/dz идёт через
+/// декодер (gradToLatent) обратно в сеть движения.
+func runMotionStepPixel(net: MotionMLPGPU, vae: ConvVAEGPU,
+                        session: GpuSession,
+                        pair: MotionPair,
+                        latents: [Int: [Float]],
+                        frames: [Int: [Float]],
+                        pw: Int, ph: Int,
+                        mseBuf: MTLBuffer?,
+                        step: Int, lr: Float) -> Double {
+    let zA = latents[pair.a]!
+    let zB = latents[pair.b]!
+    let frameK = frames[pair.k]!
+    let t = pair.t
+    let emb = motionTimeEmbedding(t, dim: net.dimEmb)
+    let na = normalizeLatent(zA, mean: net.latentMean, scale: net.latentScale)
+    let nb = normalizeLatent(zB, mean: net.latentMean, scale: net.latentScale)
+    let base = interpolateScalars(na, nb, t: t)
+    let xT = na + nb
+    let latentDim = zA.count
+    let engine = session.engine
+    let xTensor = GPUTensor(engine: engine, rows: 1, cols: xT.count)
+    let baseTensor = GPUTensor(engine: engine, rows: 1, cols: base.count)
+    let targetTensor = GPUTensor(engine: engine, rows: 3, cols: pw * ph)
+    let meanTensor = GPUTensor(engine: engine,
+                               data: [Float](repeating: net.latentMean, count: latentDim),
+                               rows: 1)
+    session.begin()
+    session.upload(xTensor, from: xT)
+    session.upload(baseTensor, from: base)
+    session.upload(targetTensor, from: hwcToChw(frameK))
+    let (pred, cache) = net.forwardCached(session, xT: xTensor, emb: emb,
+                                         base: baseTensor)
+    let zAbs = session.add(session.smul(net.latentScale, pred), meanTensor)
+    let dec = vae.decode(session, z: zAbs, w: pw, h: ph)
+    let mse = session.encodeMSE(recon: dec.recon, target: targetTensor, into: mseBuf)
+    let dzAbs = vae.gradToLatent(session, dec, target: targetTensor, w: pw, h: ph)
+    let dOut = session.smul(net.latentScale, dzAbs)
+    let grads = net.backwardFromGrad(session, cache, dOut: dOut)
+    let gpuMs = session.end()
+    _ = gpuMs
+    let loss = Double(mse.contents().assumingMemoryBound(to: Float.self)[0])
+        / Double(max(pw * ph * 3, 1))
+    sanitizeGrads(grads, maxNorm: 10.0)
+    session.begin()
+    net.applyAdam(session, grads, t: step, lr: lr)
+    session.end()
+    return loss
+}
+
+/// Обучение сети движения с пиксельной потерей (PSNR-driven). Кадры
+/// декодируются в RGB один раз; на каждом шаге предсказание декодируется
+/// VAE и сравнивается с реальным кадром в пикселях.
+public func trainMotionMLPPixel(memoryFrames: [MemoryFrame],
+                                vae: ConvVAEGPU,
+                                pw: Int, ph: Int,
+                                steps: Int = 400,
+                                lr: Float = 0.001,
+                                window: Int = 24,
+                                maxEncodedFrames: Int = 128,
+                                checkpointPath: String,
+                                onProgress: ((Int, Int) -> Void)? = nil) throws {
+    guard !memoryFrames.isEmpty else {
+        throw NSError(domain: "YumeMotion", code: 2,
+                      userInfo: [NSLocalizedDescriptionKey: "нет кадров для обучения движения"])
+    }
+    guard steps > 0 else { return }
+    let runs = motionFrameRuns(memoryFrames)
+    let total = memoryFrames.count
+    let targetN = min(total, maxEncodedFrames)
+    let selected = resampleSegmentIndices(total: total, targetCount: targetN)
+    var latents: [Int: [Float]] = [:]
+    var frames: [Int: [Float]] = [:]
+    for i in selected {
+        guard i >= 0, i < memoryFrames.count,
+              let rgb = loadImageRGB(data: memoryFrames[i].jpeg, w: pw, h: ph) else { continue }
+        frames[i] = rgb
+        if let z = try? encodeLatent(vae: vae, image: rgb, w: pw, h: ph) {
+            latents[i] = z
+        }
+    }
+    guard !latents.isEmpty else {
+        throw NSError(domain: "YumeMotion", code: 3,
+                      userInfo: [NSLocalizedDescriptionKey: "не удалось закодировать ни одного кадра"])
+    }
+    let pairs = buildMotionTrainingPairs(runs: runs, latents: latents,
+                                         window: window)
+        .filter { frames[$0.k] != nil }
+    guard !pairs.isEmpty else {
+        throw NSError(domain: "YumeMotion", code: 4,
+                      userInfo: [NSLocalizedDescriptionKey: "недостаточно кадров одного источника для окон движения"])
+    }
+    let latentDim = latents.values.first!.count
+    let net = MotionMLPGPU(engine: MetalEngine.shared, latentDim: latentDim)
+    var sum: Double = 0
+    var sumSq: Double = 0
+    var count = 0
+    for z in latents.values {
+        for v in z {
+            sum += Double(v)
+            sumSq += Double(v) * Double(v)
+            count += 1
+        }
+    }
+    if count > 0 {
+        let mean = Float(sum / Double(count))
+        let variance = max((sumSq / Double(count)) - Double(mean) * Double(mean), 1e-6)
+        net.latentMean = mean
+        net.latentScale = max(Float(sqrt(variance)), 1e-3)
+    }
+    let session = GpuSession(MetalEngine.shared)
+    let mseBuf = MetalEngine.shared.device.makeBuffer(length: 4,
+                                                      options: .storageModeShared)
+    var rng = SplitMix64(seed: 0x900D_0000_0000_3333)
+    var lossSum: Double = 0
+    for step in 1...steps {
+        if TrainingControl.shared.isCancelled {
+            throw CancellationError()
+        }
+        let pair = pairs[Int(rng.next() % UInt64(pairs.count))]
+        let loss = runMotionStepPixel(net: net, vae: vae, session: session,
+                                      pair: pair, latents: latents,
+                                      frames: frames, pw: pw, ph: ph,
+                                      mseBuf: mseBuf,
+                                      step: step, lr: lr)
+        lossSum += loss
+        if step % 50 == 0 {
+            yumeLog(String(format: "Движение (пиксели): шаг %d/%d, MSE кадра %.4f (PSNR %.2f дБ)",
+                           step, steps, lossSum / Double(step),
+                           -10.0 * log10(max(lossSum / Double(step), 1e-12))))
+        }
+        onProgress?(step, steps)
+    }
+    try saveMotionCheckpoint(net: net, to: checkpointPath)
+    yumeLog(String(format: "✅ Сеть движения (пиксели) обучена: %d шагов, средний MSE кадра %.4f → чекпоинт %@",
+                   steps, lossSum / Double(steps), checkpointPath))
+}
+
 // ---------- Публичная точка входа (из UI) ----------
 
 /// Загружает VAE из чекпоинта и обучает сеть движения на реальных парах.
@@ -203,6 +344,27 @@ public func trainMotionMLPFromCheckpoint(memoryFrames: [MemoryFrame],
                        steps: steps, lr: lr, window: window,
                        maxEncodedFrames: maxEncodedFrames,
                        checkpointPath: objectivePath)
+}
+
+/// Загружает VAE из чекпоинта и обучает сеть движения с ПИКСЕЛЬНОЙ потерей.
+public func trainMotionMLPPixelFromCheckpoint(memoryFrames: [MemoryFrame],
+                                              vaeCheckpointPath: String,
+                                              pw: Int, ph: Int,
+                                              steps: Int = 300,
+                                              lr: Float = 0.001,
+                                              window: Int = 24,
+                                              maxEncodedFrames: Int = 128,
+                                              objectivePath: String) throws {
+    let st = try loadStateWithMeta(path: vaeCheckpointPath)
+    let engine = MetalEngine.shared
+    let vae = ConvVAEGPU(engine: engine, latentChannels: st.latentChannels,
+                         width: st.modelWidth, residual: st.archVersion >= 2,
+                         groupNorm: st.archVersion >= 3)
+    try vae.load(from: st.mats)
+    try trainMotionMLPPixel(memoryFrames: memoryFrames, vae: vae,
+                            pw: pw, ph: ph, steps: steps, lr: lr,
+                            window: window, maxEncodedFrames: maxEncodedFrames,
+                            checkpointPath: objectivePath)
 }
 
 // ---------- Инференс ----------
@@ -301,8 +463,8 @@ func runMotionStep(net: MotionMLPGPU, session: GpuSession,
 public func trainMotionMLP(memoryFrames: [MemoryFrame],
                            vae: ConvVAEGPU,
                            pw: Int, ph: Int,
-                           steps: Int = 400,
-                           lr: Float = 0.001,
+                           steps: Int = 600,
+                           lr: Float = 0.0005,
                            window: Int = 24,
                            maxEncodedFrames: Int = 512,
                            checkpointPath: String,

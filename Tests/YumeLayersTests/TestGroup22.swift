@@ -429,9 +429,8 @@ func testMotionPixelQualityVsCeiling() {
     net.latentScale = max(Float(sqrt(max((sumSq / Double(nElem)) - Double(mean) * Double(mean), 1e-6))), 1e-3)
     let pairs = (motionPairs(frameCount: 56, window: 56, stride: 56)
         + motionPairs(frameCount: 56, window: 48, stride: 24)
-        + motionPairs(frameCount: 56, window: 32, stride: 16)
-        + motionPairs(frameCount: 56, window: 16, stride: 8))
-        .filter { latents[$0.k] != nil }
+        + motionPairs(frameCount: 56, window: 24, stride: 12))
+        .filter { latents[$0.k] != nil && frames[$0.k] != nil }
     let session = GpuSession(engine)
     let mseBuf = engine.device.makeBuffer(length: 4, options: .storageModeShared)
     var rng = SplitMix64(seed: 0x7777_0000_0000_1111)
@@ -439,7 +438,7 @@ func testMotionPixelQualityVsCeiling() {
         let p = pairs[Int(rng.next() % UInt64(pairs.count))]
         _ = runMotionStep(net: net, session: session, pair: p,
                           latents: latents, mseBuf: mseBuf,
-                          step: step, lr: 0.001)
+                          step: step, lr: 0.0005)
     }
     // Метрики на окне (0, 55).
     var ceilSum = 0.0
@@ -472,6 +471,96 @@ func testMotionPixelQualityVsCeiling() {
     expect(count >= 40, "оценено достаточно кадров (\(count))")
     expect(motion >= lerp - 0.3, "сеть не хуже lerp в пикселях")
     expect(lerp < ceiling - 3.0, "в сегменте есть движение, заметное для lerp")
+}
+
+/// Замер потолка реконструкции VAE на нескольких разрешениях: показывает,
+/// какой выигрыш даст подъём рабочего разрешения перед тюнингом движения.
+func testMotionCeilingAcrossResolutions() {
+    section("Motion: потолок реконструкции VAE по разрешениям")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let fm = FileManager.default
+    let framesDir = "/tmp/yume_frames"
+    guard let files = try? fm.contentsOfDirectory(atPath: framesDir) else {
+        skip("нет /tmp/yume_frames"); return
+    }
+    let jpgs = files.filter { $0.hasSuffix(".jpg") }.sorted()
+    guard jpgs.count >= 8 else { skip("мало кадров"); return }
+    let ckpt = fm.homeDirectoryForCurrentUser.path + "/YumeLayers/checkpoints/conv.safetensors"
+    guard fm.fileExists(atPath: ckpt),
+          let st = try? loadStateWithMeta(path: ckpt) else { skip("нет VAE"); return }
+    let engine = MetalEngine.shared
+    let vae = ConvVAEGPU(engine: engine, latentChannels: st.latentChannels,
+                         width: st.modelWidth, residual: st.archVersion >= 2,
+                         groupNorm: st.archVersion >= 3)
+    guard (try? vae.load(from: st.mats)) != nil else { skip("чекпоинт не грузится"); return }
+    func mseRegion(_ a: [Float], _ b: [Float], width: Int, height: Int,
+                   cropW: Int) -> Double {
+        var s = 0.0
+        for y in 0..<height {
+            for x in 0..<cropW {
+                let base = (y * width + x) * 3
+                for c in 0..<3 {
+                    let d = Double(a[base + c] - b[base + c])
+                    s += d * d
+                }
+            }
+        }
+        return s / Double(cropW * height * 3)
+    }
+    let sizes: [(Int, Int)] = [(80, 56), (128, 72), (256, 144), (856, 480)]
+    for (w, h) in sizes {
+        var sum = 0.0
+        var count = 0
+        var skipReason = ""
+        let cropW = w == 856 ? 854 : w
+        for i in 0..<min(6, jpgs.count) {
+            let path = (framesDir as NSString).appendingPathComponent(jpgs[i])
+            guard let rgb = loadImageRGB(path: path, w: w, h: h) else { skipReason = "load"; continue }
+            guard let z = try? encodeLatent(vae: vae, image: rgb, w: w, h: h) else { skipReason = "encode"; continue }
+            guard let recon = try? decodeLatent(vae: vae, latent: z, w: w, h: h) else { skipReason = "decode"; continue }
+            let mse = mseRegion(rgb, recon, width: w, height: h, cropW: cropW)
+            sum += -10.0 * log10(max(mse, 1e-12))
+            count += 1
+        }
+        if count > 0 {
+            print(String(format: "      потолок VAE %d×%d (crop %d): %.2f дБ (n=%d)", w, h, cropW, sum / Double(count), count))
+        } else {
+            print("      потолок VAE \(w)×\(h): пропущено (последний сбой: \(skipReason))")
+        }
+    }
+}
+
+/// Диагностика: пошаговое выполнение пиксельного шага (находит падающий этап).
+/// Изолированная проверка backwardFromGrad (внешний градиент) — маленькие размеры.
+func testBackwardFromGradDirect() {
+    section("MotionMLP: backwardFromGrad (внешний dOut)")
+    guard gHasMetal else { skip("Metal недоступен"); return }
+    let engine = MetalEngine.shared
+    let latentDim = 2240
+    let net = MotionMLPGPU(engine: engine, latentDim: latentDim, dimEmb: 8, hidden: 96)
+    var rng = SplitMix64(seed: 11)
+    let zA = (0..<latentDim).map { _ in Float.random(in: -1...1, using: &rng) }
+    let zB = (0..<latentDim).map { _ in Float.random(in: -1...1, using: &rng) }
+    let base = interpolateScalars(zA, zB, t: 0.4)
+    let emb = motionTimeEmbedding(0.4, dim: 8)
+    let xT = zA + zB
+    let s1 = GpuSession(engine)
+    s1.begin()
+    let x1 = GPUTensor(engine: engine, data: xT, rows: 1)
+    let b1 = GPUTensor(engine: engine, data: base, rows: 1)
+    let (_, cache) = net.forwardCached(s1, xT: x1, emb: emb, base: b1)
+    _ = s1.end()
+    let s2 = GpuSession(engine)
+    s2.begin()
+    let dOut = GPUTensor(engine: engine,
+                         data: (0..<latentDim).map { _ in Float.random(in: -0.01...0.01, using: &rng) },
+                         rows: 1)
+    let grads = net.backwardFromGrad(s2, cache, dOut: dOut)
+    let ms = s2.end()
+    expect(grads.count == 6, "6 градиентов")
+    expect(grads.allSatisfy { $0.n > 0 }, "градиенты непустые")
+    expect(ms >= 0, "сессия завершилась")
+    print("      backwardFromGrad: OK (\(ms) мс)")
 }
 
 func testMotionTimeEmbedding() {

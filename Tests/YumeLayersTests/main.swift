@@ -238,6 +238,8 @@ func featureTestRegistry() -> [(String, () -> Void)] {
         ("MotionCheckpointRoundTrip", testMotionCheckpointRoundTrip),
         ("MotionTrainingImprovesPrediction", testMotionTrainingImprovesPrediction),
         ("MotionPixelQualityVsCeiling", testMotionPixelQualityVsCeiling),
+        ("MotionCeilingAcrossResolutions", testMotionCeilingAcrossResolutions),
+        ("BackwardFromGradDirect", testBackwardFromGradDirect),
     ]
 }
 

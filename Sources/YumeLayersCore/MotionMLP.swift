@@ -90,6 +90,18 @@ public final class MotionMLPGPU {
         return [gW1, gb1, gW2, gb2, gW3, gb3]
     }
 
+    /// Backward по ВНЕШНЕМУ градиенту выходного латента (например, от
+    /// пиксельной потери через декодер VAE). Возвращает 6 градиентов весов.
+    func backwardFromGrad(_ s: GpuSession, _ cache: Cache,
+                          dOut: GPUTensor) -> [GPUTensor] {
+        let (dA2, gW3, gb3) = l3.backward(s, cache.a2, dOut)
+        let dZ2 = s.mul(s.tanhGrad(cache.z2), dA2)
+        let (dA1, gW2, gb2) = l2.backward(s, cache.a1, dZ2)
+        let dZ1 = s.mul(s.tanhGrad(cache.z1), dA1)
+        let (gW1, gb1) = l1.backwardX(s, cache.xT, dZ1)
+        return [gW1, gb1, gW2, gb2, gW3, gb3]
+    }
+
     func applyAdam(_ s: GpuSession, _ grads: [GPUTensor], t: Int, lr: Float) {
         precondition(grads.count >= 6, "нужно 6 градиентов")
         l1.applyAdam(s, grads[0], grads[1], t: t, lr: lr)
