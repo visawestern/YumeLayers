@@ -13,7 +13,8 @@ VIDEO="/Users/apple/Downloads/8446035036876.mp4"
 
 fail() { echo "FAIL: $1"; exit 1; }
 ok()   { echo "ok: $1"; }
-jget() { python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('$1',''))"; }
+# Чистый shell-парсер скалярного поля плоского JSON (без Python).
+jget() { grep -o "\"$1\":[^,}]*" | head -n 1 | cut -d: -f2- | tr -d ' "'; }
 
 # Ждём, пока поле примет значение (или, для want=any-true, станет true).
 wait_field() { # $1=поле $2=значение $3=макс_сек
@@ -64,7 +65,7 @@ ok "обучение остановлено по /api/stop (training=false)"
 EPOCH=$(curl -s --max-time 3 "$BASE/api/status" | jget epoch)
 PROG=$(curl -s --max-time 3 "$BASE/api/status" | jget progress)
 echo "epoch=$EPOCH progress=$PROG"
-python3 -c "import sys; p=float('${PROG:-1}'); sys.exit(0 if p < 1.0 else 1)" \
+awk -v p="${PROG:-1}" 'BEGIN{ exit !(p+0 < 1.0) }' \
   || fail "прогресс дошёл до 1.0 — остановка не прервала прогон посреди (progress=$PROG)"
 ok "оборвано посреди прогона (progress=$PROG < 1.0, epoch=$EPOCH) → покадровый «Стоп» работает сквозно через HTTP"
 

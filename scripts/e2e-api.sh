@@ -18,10 +18,11 @@ OUT="/tmp/yume_e2e_api.mp4"
 
 fail() { echo "FAIL: $1"; exit 1; }
 ok()   { echo "ok: $1"; }
-
-jq_get() { python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('$1',''))"; }
+# Чистый shell: достаёт скалярное поле из плоского JSON-ответа API.
+# Без Python/внешних интерпретаторов — grep по `"key":value`, затем trim.
+jq_get() { grep -o "\"$1\":[^,}]*" | head -n 1 | cut -d: -f2- | tr -d ' "'; }
 wait_until() { # $1=поле json, $2=ожидаемое значение, $3=макс секунд
-  local field="$1" want="$2" max="$3" i=0
+  local field="$1" want="$2" max="$3" i=0 v=""
   while [ $i -lt "$max" ]; do
     v=$(curl -s --max-time 3 "$BASE/api/status" | jq_get "$field")
     [ "$v" = "$want" ] && return 0
@@ -48,7 +49,7 @@ curl -s -X POST "$BASE/api/train" -H "Content-Type: application/json" \
 wait_until training False 300
 PSNR=$(curl -s --max-time 3 "$BASE/api/status" | jq_get psnr)
 echo "psnr = $PSNR дБ"
-python3 -c "import sys; sys.exit(0 if float('$PSNR') > 0 else 1)" || fail "psnr > 0"
+awk -v v="$PSNR" 'BEGIN{ exit !(v+0 > 0) }' || fail "psnr > 0"
 
 curl -s -X POST "$BASE/api/interpolate" -H "Content-Type: application/json" \
   -d "{\"imageA\":\"$IMG_A\",\"imageB\":\"$IMG_B\",\"seconds\":3,\"fps\":24,\"out\":\"$OUT\"}" \
