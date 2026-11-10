@@ -40,6 +40,7 @@ extension YumeAppDelegate {
             interpBLabel.toolTip = url.path
         }
         updateInterpolateButtons()
+        updateShotPreviews()
     }
 
     @objc func runInterpolation() {

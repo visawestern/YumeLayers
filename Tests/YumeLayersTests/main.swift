@@ -240,6 +240,10 @@ func featureTestRegistry() -> [(String, () -> Void)] {
         ("MotionPixelQualityVsCeiling", testMotionPixelQualityVsCeiling),
         ("MotionCeilingAcrossResolutions", testMotionCeilingAcrossResolutions),
         ("BackwardFromGradDirect", testBackwardFromGradDirect),
+        ("MotionPoolMath", testMotionPoolMath),
+        ("MotionMLPDoubleNumericGrads", testMotionMLPDoubleNumericGrads),
+        ("MotionMLPDoubleOverfit", testMotionMLPDoubleOverfit),
+        ("MotionTrainingImprovesPrediction480", testMotionTrainingImprovesPrediction480),
     ]
 }
 

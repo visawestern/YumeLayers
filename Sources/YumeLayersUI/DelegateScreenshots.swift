@@ -49,8 +49,49 @@ extension YumeAppDelegate {
             interpBLabel.toolTip = path
         }
         updateInterpolateButtons()
+        updateShotPreviews()
         setStatus("Скриншот кадра \(selectedFrameIndex + 1) → \(isA ? "A" : "B")", ok: true)
         log("📸 Скриншот кадра \(selectedFrameIndex + 1) → \(isA ? "A" : "B"): \(path)")
+    }
+
+    /// Панель захвата кадров под видео: кнопки «Кадр → A/B» + превью
+    /// уже захваченных опорных кадров.
+    func makeShotCaptureBar() -> NSStackView {
+        shotVideoAButton.target = self
+        shotVideoAButton.action = #selector(shotToReferenceA)
+        shotVideoAButton.bezelStyle = .rounded
+        shotVideoAButton.controlSize = .small
+        shotVideoBButton.target = self
+        shotVideoBButton.action = #selector(shotToReferenceB)
+        shotVideoBButton.bezelStyle = .rounded
+        shotVideoBButton.controlSize = .small
+        for v in [shotPreviewAView, shotPreviewBView] {
+            v.imageScaling = .scaleProportionallyDown
+            v.wantsLayer = true
+            v.layer?.cornerRadius = 4
+            v.layer?.masksToBounds = true
+            v.layer?.borderWidth = 0.5
+            v.layer?.borderColor = NSColor.separatorColor.cgColor
+            v.widthAnchor.constraint(equalToConstant: 72).isActive = true
+            v.heightAnchor.constraint(equalToConstant: 40).isActive = true
+        }
+        let bar = NSStackView(views: [shotVideoAButton, shotPreviewAView,
+                                      shotVideoBButton, shotPreviewBView])
+        bar.orientation = .horizontal
+        bar.spacing = 10
+        bar.alignment = .centerY
+        updateShotPreviews()
+        return bar
+    }
+
+    /// Обновляет превью захваченных опорных кадров (A/B) из путей.
+    func updateShotPreviews() {
+        func load(_ path: String) -> NSImage? {
+            guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else { return nil }
+            return NSImage(contentsOfFile: path)
+        }
+        shotPreviewAView.image = load(interpImageAPath)
+        shotPreviewBView.image = load(interpImageBPath)
     }
 
     /// Конвертация JPEG-данных в PNG-данные (ImageIO, без декодирования в NSImage).

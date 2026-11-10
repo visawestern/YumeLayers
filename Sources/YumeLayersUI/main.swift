@@ -173,6 +173,11 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
     /// Скриншот текущего выбранного кадра → опорная A / опорная B.
     let shotToAButton = NSButton(title: "Кадр → A", target: nil, action: nil)
     let shotToBButton = NSButton(title: "Кадр → B", target: nil, action: nil)
+    /// Те же кнопки под просмотром видео, с превью захваченных кадров.
+    let shotVideoAButton = NSButton(title: "Кадр → A", target: nil, action: nil)
+    let shotVideoBButton = NSButton(title: "Кадр → B", target: nil, action: nil)
+    let shotPreviewAView = NSImageView()
+    let shotPreviewBView = NSImageView()
     /// Папка скриншотов рядом с программой (fallback — ~/YumeLayers/screenshots).
     var screenshotsDir: String {
         let nearApp = Bundle.main.bundleURL

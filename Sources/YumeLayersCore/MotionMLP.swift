@@ -28,6 +28,14 @@ public final class MotionMLPGPU {
     public var latentMean: Float = 0
     public var latentScale: Float = 1
 
+    /// Пространственные размеры полного латента VAE (h/8 × w/8).
+    public var latentH3: Int = 0
+    public var latentW3: Int = 0
+    /// Блок average-pool для редукции размерности (1 — без редукции).
+    public var poolBlock: Int = 1
+    /// Используется ли пулинг (значит latentDim — размерность пул-вектора).
+    public var usesPool: Bool { latentH3 > 0 && latentW3 > 0 && poolBlock > 1 }
+
     public init(engine: MetalEngine, latentDim: Int, dimEmb: Int = 8,
                 hidden: Int = 96,
                 seed: UInt64 = 0x900D_0000_0000_0001) {

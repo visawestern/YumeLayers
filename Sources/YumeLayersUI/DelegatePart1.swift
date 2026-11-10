@@ -296,9 +296,9 @@ extension YumeAppDelegate {
             try trainMotionMLPFromCheckpoint(memoryFrames: frames,
                                              vaeCheckpointPath: convPath,
                                              pw: pw, ph: ph,
-                                             steps: steps, lr: 0.001,
+                                             steps: steps, lr: 0.0005,
                                              window: w,
-                                             maxEncodedFrames: 512,
+                                             maxEncodedFrames: 128,
                                              objectivePath: motionPath,
                                              onProgress: { done, total in
                 DispatchQueue.main.async {

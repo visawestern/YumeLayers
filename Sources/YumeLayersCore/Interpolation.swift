@@ -314,21 +314,8 @@ public func interpolateVideo(_ request: InterpolationRequest,
 
     // Сеть движения (опционально): lerp + поправка, обученная на реальных
     // парах того же видео. Путь передаётся, если файл существует.
-    var motionNet: MotionMLPGPU? = nil
-    if let mp = request.motionCheckpointPath,
-       FileManager.default.fileExists(atPath: mp),
-       let mc = try? loadMotionCheckpoint(from: mp),
-       mc.meta.latentDim == latentA.count {
-        let net = MotionMLPGPU(engine: MetalEngine.shared,
-                               latentDim: mc.meta.latentDim,
-                               dimEmb: mc.meta.dimEmb,
-                               hidden: mc.meta.hidden)
-        try? net.load(from: mc.mats)
-        net.latentMean = mc.meta.latentMean
-        net.latentScale = mc.meta.latentScale
-        motionNet = net
-        yumeLog("Движение: используется сеть движения (latentDim=\(mc.meta.latentDim), hidden=\(mc.meta.hidden), mean=\(mc.meta.latentMean), scale=\(mc.meta.latentScale))")
-    }
+    let motion = loadMotionNetwork(checkpointPath: request.motionCheckpointPath,
+                                   latentCount: latentA.count)
 
     // Кадры.
     let plan = interpolationPlan(seconds: request.seconds, fps: request.fps)
@@ -340,7 +327,11 @@ public func interpolateVideo(_ request: InterpolationRequest,
         if index == 0 || index == plan.frameCount - 1 {
             // Первый/последний кадр — точные опоры A/B (не реконструкции).
             latent = index == 0 ? latentA : latentB
-        } else if let net = motionNet {
+        } else if let nd = motion.double {
+            // Double (Float64, CPU) — стабильна на больших латентах 480p.
+            latent = predictMotionLatentDouble(net: nd, zA: latentA,
+                                               zB: latentB, t: linearTime)
+        } else if let net = motion.gpu {
             // Сеть обучалась на линейном времени t = (k−a)/(b−a) — вызываем
             // её с тем же линейным временем (без smoothstep).
             latent = predictMotionLatent(net: net, zA: latentA, zB: latentB,
@@ -372,4 +363,44 @@ public func interpolateVideo(_ request: InterpolationRequest,
                                seconds: request.seconds,
                                width: outW,
                                height: outH)
+}
+
+/// Загруженная сеть движения (не более одного бэкенда).
+private struct MotionNetwork {
+    var gpu: MotionMLPGPU? = nil
+    var double: MotionMLPDouble? = nil
+}
+
+/// Загружает сеть движения из чекпоинта, если он существует и совместим
+/// с размерностью латента. Бэкенд: "cpu64" — Float64/CPU, иначе Float32/Metal.
+private func loadMotionNetwork(checkpointPath: String?, latentCount: Int) -> MotionNetwork {
+    var out = MotionNetwork()
+    guard let mp = checkpointPath,
+          FileManager.default.fileExists(atPath: mp),
+          let mc = try? loadMotionCheckpointAny(from: mp),
+          mc.meta.latentDim == latentCount else { return out }
+    if mc.meta.backend == "cpu64" {
+        let nd = MotionMLPDouble(latentDim: mc.meta.latentDim,
+                                 dimEmb: mc.meta.dimEmb,
+                                 hidden: mc.meta.hidden)
+        try? nd.load(from: mc.mats)
+        nd.latentMean = Double(mc.meta.latentMean)
+        nd.latentScale = Double(mc.meta.latentScale)
+        out.double = nd
+        yumeLog("Движение: используется сеть (Float64/CPU, latentDim=\(mc.meta.latentDim), hidden=\(mc.meta.hidden))")
+    } else {
+        let net = MotionMLPGPU(engine: MetalEngine.shared,
+                               latentDim: mc.meta.latentDim,
+                               dimEmb: mc.meta.dimEmb,
+                               hidden: mc.meta.hidden)
+        try? net.load(from: mc.mats)
+        net.latentMean = mc.meta.latentMean
+        net.latentScale = mc.meta.latentScale
+        net.latentH3 = mc.meta.latentH3
+        net.latentW3 = mc.meta.latentW3
+        net.poolBlock = mc.meta.poolBlock
+        out.gpu = net
+        yumeLog("Движение: используется сеть движения (latentDim=\(mc.meta.latentDim), hidden=\(mc.meta.hidden), mean=\(mc.meta.latentMean), scale=\(mc.meta.latentScale))")
+    }
+    return out
 }

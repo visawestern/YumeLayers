@@ -64,6 +64,7 @@ extension YumeAppDelegate {
 
         // Скрыть галочки и заполнить состояние коллажа при старте.
         renderCollagePage()
+        updateShotPreviews()
         for (i, g) in debugGrids.enumerated() {
             layoutViews["grid\(i)"] = g
         }
@@ -346,7 +347,10 @@ extension YumeAppDelegate {
             resultCard.trailingAnchor.constraint(equalTo: mediaZone.trailingAnchor),
         ])
 
-        let center = NSStackView(views: [mediaTabsControl, mediaZone, paginatorRow, collageHeader, collageCard])
+        // Панель захвата кадров → A/B под видео (с превью).
+        let shotBar = makeShotCaptureBar()
+
+        let center = NSStackView(views: [mediaTabsControl, mediaZone, shotBar, paginatorRow, collageHeader, collageCard])
         center.orientation = .vertical
         center.spacing = 10
         center.alignment = .leading
@@ -364,6 +368,7 @@ extension YumeAppDelegate {
         collageCard.widthAnchor.constraint(equalTo: center.widthAnchor, constant: centerInset).isActive = true
         paginatorRow.widthAnchor.constraint(equalTo: center.widthAnchor, constant: centerInset).isActive = true
         paginatorRow.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        shotBar.widthAnchor.constraint(equalTo: center.widthAnchor, constant: centerInset).isActive = true
 
         // Вертикальные пропорции: медиа 50%, коллаж 45% зоны.
         mediaZone.heightAnchor.constraint(equalTo: center.heightAnchor, multiplier: 0.43, constant: -38).isActive = true

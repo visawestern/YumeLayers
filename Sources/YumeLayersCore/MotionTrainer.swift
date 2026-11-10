@@ -20,15 +20,28 @@ public struct MotionCheckpointMeta: Equatable {
     /// переполняют MLP и дают NaN.
     public let latentMean: Float
     public let latentScale: Float
+    /// Пространственные размеры полного латента + блок average-pool
+    /// (1 — без редукции, legacy-модели).
+    public let latentH3: Int
+    public let latentW3: Int
+    public let poolBlock: Int
+    /// Бэкенд сети: "gpu" (Float32/Metal) или "cpu64" (Float64/CPU).
+    public let backend: String
 
     public init(latentDim: Int, dimEmb: Int, hidden: Int, archVersion: Int = 5,
-                latentMean: Float = 0, latentScale: Float = 1) {
+                latentMean: Float = 0, latentScale: Float = 1,
+                latentH3: Int = 0, latentW3: Int = 0, poolBlock: Int = 1,
+                backend: String = "gpu") {
         self.latentDim = latentDim
         self.dimEmb = dimEmb
         self.hidden = hidden
         self.archVersion = archVersion
         self.latentMean = latentMean
         self.latentScale = latentScale > 0 ? latentScale : 1
+        self.latentH3 = latentH3
+        self.latentW3 = latentW3
+        self.poolBlock = poolBlock > 0 ? poolBlock : 1
+        self.backend = backend
     }
 }
 
@@ -60,6 +73,10 @@ public func saveMotionCheckpoint(net: MotionMLPGPU, to path: String) throws {
     dict["archVersion"] = 5
     dict["latentMean"] = net.latentMean
     dict["latentScale"] = net.latentScale
+    dict["latentH3"] = net.latentH3
+    dict["latentW3"] = net.latentW3
+    dict["poolBlock"] = net.poolBlock
+    dict["backend"] = "gpu"
     let header = try JSONSerialization.data(withJSONObject: dict)
     var headerLen = UInt64(header.count).littleEndian
     var file = Data()
@@ -120,13 +137,21 @@ public func loadMotionCheckpoint(from path: String) throws -> MotionCheckpoint? 
     let v = (obj["archVersion"] as? Int) ?? 5
     let mean = (obj["latentMean"] as? Float) ?? 0
     let scale = (obj["latentScale"] as? Float) ?? 1
+    let h3 = (obj["latentH3"] as? Int) ?? 0
+    let w3 = (obj["latentW3"] as? Int) ?? 0
+    let block = (obj["poolBlock"] as? Int) ?? 1
+    let backend = (obj["backend"] as? String) ?? "gpu"
     return MotionCheckpoint(mats: mats,
                             meta: MotionCheckpointMeta(latentDim: latentDim,
                                                        dimEmb: dimEmb,
                                                        hidden: hidden,
                                                        archVersion: v,
                                                        latentMean: mean,
-                                                       latentScale: scale))
+                                                       latentScale: scale,
+                                                       latentH3: h3,
+                                                       latentW3: w3,
+                                                       poolBlock: block,
+                                                       backend: backend))
 }
 
 // ---------- Подготовка данных ----------
@@ -397,7 +422,18 @@ public func predictMotionLatent(net: MotionMLPGPU, zA: [Float], zB: [Float],
         return interpolateScalars(zA, zB, t: t)
     }
     let s = net.latentScale > 0 ? net.latentScale : 1
-    return norm.map { $0 * s + net.latentMean }
+    let full = norm.map { $0 * s + net.latentMean }
+    // Если сеть обучена на пул-векторах — разворачиваем до полного латента
+    // (nearest), чтобы декодер VAE получил родной размер.
+    if net.usesPool {
+        let (ph, pw) = latentPoolDims(h3: net.latentH3, w3: net.latentW3,
+                                       block: net.poolBlock)
+        let channels = full.count / (ph * pw)
+        return upsampleLatentNearest(full, channels: channels, ph: ph, pw: pw,
+                                     h3: net.latentH3, w3: net.latentW3,
+                                     block: net.poolBlock)
+    }
+    return full
 }
 
 // ---------- Обучение ----------
@@ -479,11 +515,24 @@ public func trainMotionMLP(memoryFrames: [MemoryFrame],
     let total = memoryFrames.count
     let targetN = min(total, maxEncodedFrames)
     let selected = resampleSegmentIndices(total: total, targetCount: targetN)
-    let latents = encodeMotionLatents(frames: memoryFrames, selected: selected,
-                                      vae: vae, pw: pw, ph: ph)
-    guard !latents.isEmpty else {
+    let fullLatents = encodeMotionLatents(frames: memoryFrames, selected: selected,
+                                          vae: vae, pw: pw, ph: ph)
+    guard !fullLatents.isEmpty else {
         throw NSError(domain: "YumeMotion", code: 3,
                       userInfo: [NSLocalizedDescriptionKey: "не удалось закодировать ни одного кадра"])
+    }
+    // Редукция размерности: пространственный average-pool. Для больших
+    // латентов (854×480 → 205k измерений) MLP переполняется — пулинг
+    // блоками 8×8 даёт 32×8×14 = 3584 стабильных измерения.
+    let h3 = max(1, pw / 8)
+    let w3 = max(1, ph / 8)
+    let poolBlock = (h3 * w3 > 4000 && fullLatents.values.first!.count / (h3 * w3) > 1)
+        ? 8 : 1
+    let channels = fullLatents.values.first!.count / (h3 * w3)
+    var latents: [Int: [Float]] = [:]
+    for (idx, z) in fullLatents {
+        latents[idx] = averagePoolLatent(z, channels: channels, h3: h3,
+                                         w3: w3, block: poolBlock)
     }
     let pairs = buildMotionTrainingPairs(runs: runs, latents: latents,
                                          window: window)
@@ -493,6 +542,9 @@ public func trainMotionMLP(memoryFrames: [MemoryFrame],
     }
     let latentDim = latents.values.first!.count
     let net = MotionMLPGPU(engine: MetalEngine.shared, latentDim: latentDim)
+    net.latentH3 = h3
+    net.latentW3 = w3
+    net.poolBlock = poolBlock
     // Нормализация латентов по обучающему набору (mean/scale — скаляры).
     var sum: Double = 0
     var sumSq: Double = 0
