@@ -198,7 +198,7 @@ extension TrainContext {
                 }
             }
             let (_, grads) = vae.backward(session, batchCache, target: img,
-                                          beta: rgbKLBeta,
+                                          beta: p.klBeta,
                                           dReconOverride: dRecon)
             recons.append(batchCache.recon)
             mseBufs.append(session.encodeMSE(recon: batchCache.recon, target: img,

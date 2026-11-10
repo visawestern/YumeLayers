@@ -30,9 +30,11 @@ extension YumeAppDelegate {
         p.width = widthCtl.intValue(def: 80)
         p.height = heightCtl.intValue(def: 56)
         p.memoryFrames = framesStore
+        // Окно вычисляем на main (чтение UI из фона небезопасно).
+        let w = max(8, min(128, window ?? currentInterpolationWindow()))
         setStatus("Обучение движения…", ok: true)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.trainMotionAfterVae(p: p, steps: max(1, steps), window: window)
+            self?.trainMotionAfterVae(p: p, steps: max(1, steps), window: w)
         }
     }
 

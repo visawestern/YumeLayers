@@ -165,6 +165,10 @@ public struct Params {
     public var residual: Bool = false
     /// Архитектура v3 (групповая нормализация), по умолчанию выключена.
     public var groupNorm: Bool = false
+    /// Вес KL-регуляризатора VAE. Для больших разрешений (854×480) дефолтный
+    /// 0.01 даёт постколлапс (модель игнорирует mu и опирается на шум) —
+    /// на 480p нужно ~0.001 (число пикселей выросло в ~90 раз).
+    public var klBeta: Float = 0.01
     public var outPrefix: String
 }
 

@@ -399,15 +399,18 @@ func testMotionPixelQualityVsCeiling() {
     }
     let jpgs = files.filter { $0.hasSuffix(".jpg") }.sorted()
     guard jpgs.count >= 56 else { skip("мало кадров"); return }
-    let ckpt = fm.homeDirectoryForCurrentUser.path + "/YumeLayers/checkpoints/conv.safetensors"
+    let ckpt = ProcessInfo.processInfo.environment["YUME_VAE_CKPT"]
+        ?? (fm.homeDirectoryForCurrentUser.path + "/YumeLayers/checkpoints/conv.safetensors")
     guard fm.fileExists(atPath: ckpt),
-          let st = try? loadStateWithMeta(path: ckpt) else { skip("нет VAE"); return }
+          let st = try? loadStateWithMeta(path: ckpt) else { skip("нет VAE: \(ckpt)"); return }
     let engine = MetalEngine.shared
     let vae = ConvVAEGPU(engine: engine, latentChannels: st.latentChannels,
                          width: st.modelWidth, residual: st.archVersion >= 2,
                          groupNorm: st.archVersion >= 3)
     guard (try? vae.load(from: st.mats)) != nil else { skip("чекпоинт не грузится"); return }
-    let pw = 80, ph = 56
+    let env = ProcessInfo.processInfo.environment
+    let pw = Int(env["YUME_MOTION_W"] ?? "") ?? 80
+    let ph = Int(env["YUME_MOTION_H"] ?? "") ?? 56
     var latents: [Int: [Float]] = [:]
     var frames: [Int: [Float]] = [:]
     for i in 0..<56 {
@@ -485,9 +488,10 @@ func testMotionCeilingAcrossResolutions() {
     }
     let jpgs = files.filter { $0.hasSuffix(".jpg") }.sorted()
     guard jpgs.count >= 8 else { skip("мало кадров"); return }
-    let ckpt = fm.homeDirectoryForCurrentUser.path + "/YumeLayers/checkpoints/conv.safetensors"
+    let ckpt = ProcessInfo.processInfo.environment["YUME_VAE_CKPT"]
+        ?? (fm.homeDirectoryForCurrentUser.path + "/YumeLayers/checkpoints/conv.safetensors")
     guard fm.fileExists(atPath: ckpt),
-          let st = try? loadStateWithMeta(path: ckpt) else { skip("нет VAE"); return }
+          let st = try? loadStateWithMeta(path: ckpt) else { skip("нет VAE: \(ckpt)"); return }
     let engine = MetalEngine.shared
     let vae = ConvVAEGPU(engine: engine, latentChannels: st.latentChannels,
                          width: st.modelWidth, residual: st.archVersion >= 2,
@@ -510,20 +514,34 @@ func testMotionCeilingAcrossResolutions() {
     let sizes: [(Int, Int)] = [(80, 56), (128, 72), (256, 144), (856, 480)]
     for (w, h) in sizes {
         var sum = 0.0
+        var sumNoisy = 0.0
         var count = 0
         var skipReason = ""
         let cropW = w == 856 ? 854 : w
         for i in 0..<min(6, jpgs.count) {
             let path = (framesDir as NSString).appendingPathComponent(jpgs[i])
             guard let rgb = loadImageRGB(path: path, w: w, h: h) else { skipReason = "load"; continue }
-            guard let z = try? encodeLatent(vae: vae, image: rgb, w: w, h: h) else { skipReason = "encode"; continue }
-            guard let recon = try? decodeLatent(vae: vae, latent: z, w: w, h: h) else { skipReason = "decode"; continue }
+            // Детерминированный путь (как в интерполяции).
+            guard let z = try? encodeLatent(vae: vae, image: rgb, w: w, h: h),
+                  let recon = try? decodeLatent(vae: vae, latent: z, w: w, h: h) else { skipReason = "encode/decode"; continue }
             let mse = mseRegion(rgb, recon, width: w, height: h, cropW: cropW)
             sum += -10.0 * log10(max(mse, 1e-12))
+            // Не-детерминированный (как в обучении): полный forward с шумом.
+            let engine2 = MetalEngine.shared
+            let sess = GpuSession(engine2)
+            let x = GPUTensor(engine: engine2, data: hwcToChw(rgb), rows: 3)
+            sess.begin()
+            let c = vae.forward(sess, image: x, w: w, h: h, deterministic: false,
+                                seed: trainingNoiseSeed(step: i, batchIndex: 0))
+            _ = sess.end()
+            let reconNoisy = chwToHwc(c.recon.toArray())
+            let mseN = mseRegion(rgb, reconNoisy, width: w, height: h, cropW: cropW)
+            sumNoisy += -10.0 * log10(max(mseN, 1e-12))
             count += 1
         }
         if count > 0 {
-            print(String(format: "      потолок VAE %d×%d (crop %d): %.2f дБ (n=%d)", w, h, cropW, sum / Double(count), count))
+            print(String(format: "      потолок VAE %d×%d (crop %d): %.2f дБ · с шумом %.2f дБ (n=%d)",
+                         w, h, cropW, sum / Double(count), sumNoisy / Double(count), count))
         } else {
             print("      потолок VAE \(w)×\(h): пропущено (последний сбой: \(skipReason))")
         }

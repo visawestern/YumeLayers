@@ -280,6 +280,11 @@ extension YumeAppDelegate {
                             self.requestedGroupNorm = b
                             applied.append(key)
                         } else { unknown.append(key) }
+                    case "klBeta":
+                        if let s = paramStringValue(value), let f = Float(s), f > 0 {
+                            self.requestedKlBeta = f
+                            applied.append(key)
+                        } else { unknown.append(key) }
                     case "pauseMs":
                         if let s = paramStringValue(value) { self.pauseCtl.setValue(s); applied.append(key) } else { unknown.append(key) }
                     case "gpuPowerPercent":
@@ -489,6 +494,7 @@ extension YumeAppDelegate {
                 dict["edgeWeight"] = self.requestedEdgeWeight
                 dict["residual"] = self.requestedResidual
                 dict["groupNorm"] = self.requestedGroupNorm
+                dict["klBeta"] = self.requestedKlBeta
                 dict["resume"] = self.resumeSwitch.state == .on
                 dict["adaptiveThrottle"] = self.adaptiveSwitch.state == .on
             }

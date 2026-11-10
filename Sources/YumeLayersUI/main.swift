@@ -159,6 +159,9 @@ final class YumeAppDelegate: NSObject, NSApplicationDelegate {
     var requestedResidual = false
     /// Архитектура v3 (групповая нормализация) для следующего обучения.
     var requestedGroupNorm = false
+    /// Вес KL-регуляризатора для следующего обучения (по умолчанию 0.01;
+    /// для 480p нужно ~0.001, иначе постколлапс).
+    var requestedKlBeta: Float = 0.01
 
     // ——— Генерация A→B: интерполяция между двумя опорными картинками ———
     let interpAButton = NSButton(title: "Выбрать…", target: nil, action: nil)

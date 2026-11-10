@@ -151,6 +151,7 @@ extension YumeAppDelegate {
         p.edgeWeight = requestedEdgeWeight
         p.residual = requestedResidual
         p.groupNorm = requestedGroupNorm
+        p.klBeta = requestedKlBeta
         p.convPath = (convPathCtl.stringValue as NSString).expandingTildeInPath
 
         guard p.lr.isFinite, p.lr > 0, p.lr <= 1,
@@ -186,6 +187,9 @@ extension YumeAppDelegate {
         guard let p = resolveTrainingFrames(pIn, maxFrames: maxFrames) else { return }
         lastParams = p
         configureTrainingUI(p)
+        // Окно движения считается на main-потоке (чтение UI-контролов из фона
+        // может заблокировать/уронить приложение), затем передаётся в фон.
+        let motionWindow = currentInterpolationWindow()
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 try trainConvVAE(
@@ -241,9 +245,17 @@ extension YumeAppDelegate {
                 )
                 // Итоговое обучение движения: после VAE учим сеть воспроизводить
                 // реальные промежуточные кадры между опорами (если есть кадры).
-                self.trainMotionAfterVae(p: p)
+                // Окно вычисляется на main-потоке ДО погружения в фон
+                // (чтение UI-контролов из фона = deadlock/краш).
+                self.trainMotionAfterVae(p: p, window: motionWindow)
                 DispatchQueue.main.async {
                     self.finishTraining(ok: true)
+                }
+            } catch is CancellationError {
+                // Штатная остановка пользователем (кнопка «Стоп»/API) — НЕ ошибка:
+                // не показываем красный статус «Ошибка», а просто завершаем обучение.
+                DispatchQueue.main.async {
+                    self.finishTraining(ok: false)
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -263,9 +275,11 @@ extension YumeAppDelegate {
 
     /// Обучение сети движения после успешного VAE. Ошибки не фатальны:
     /// реконструкции/завершение обучения не отменяются, пишем в журнал.
+    /// Функция вызывается из фоновых потоков, поэтому UI-лог оборачивается
+    /// в main.async (прямой доступ к NSTextView из фона = SIGSEGV).
     func trainMotionAfterVae(p: Params, steps: Int = 300, window: Int? = nil) {
         guard let frames = p.memoryFrames, !frames.isEmpty else {
-            log("Движение: нет кадров в памяти — сеть движения не обучалась")
+            DispatchQueue.main.async { self.log("Движение: нет кадров в памяти — сеть движения не обучалась") }
             return
         }
         let convPath = p.convPath
@@ -276,16 +290,26 @@ extension YumeAppDelegate {
         // именно этого масштаба (тест MotionTrainingImprovesPrediction).
         let w = max(8, min(128, window ?? currentInterpolationWindow()))
         do {
-            log("=== Запуск обучения движения (сеть предсказания промежуточных кадров, окно \(w) кадров) ===")
+            DispatchQueue.main.async {
+                self.log("=== Запуск обучения движения (сеть предсказания промежуточных кадров, окно \(w) кадров) ===")
+            }
             try trainMotionMLPFromCheckpoint(memoryFrames: frames,
                                              vaeCheckpointPath: convPath,
                                              pw: pw, ph: ph,
                                              steps: steps, lr: 0.001,
                                              window: w,
                                              maxEncodedFrames: 512,
-                                             objectivePath: motionPath)
+                                             objectivePath: motionPath,
+                                             onProgress: { done, total in
+                DispatchQueue.main.async {
+                    self.setTrainProgress(Double(done) / Double(max(total, 1)),
+                                          done: done, total: total)
+                }
+            })
         } catch {
-            log("⚠️ Движение: сеть движения не обучена (\(error.localizedDescription))")
+            DispatchQueue.main.async {
+                self.log("⚠️ Движение: сеть движения не обучена (\(error.localizedDescription))")
+            }
         }
     }
 

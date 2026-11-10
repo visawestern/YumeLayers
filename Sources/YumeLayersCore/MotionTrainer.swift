@@ -333,7 +333,8 @@ public func trainMotionMLPFromCheckpoint(memoryFrames: [MemoryFrame],
                                          lr: Float = 0.001,
                                          window: Int = 24,
                                          maxEncodedFrames: Int = 512,
-                                         objectivePath: String) throws {
+                                         objectivePath: String,
+                                         onProgress: ((Int, Int) -> Void)? = nil) throws {
     let st = try loadStateWithMeta(path: vaeCheckpointPath)
     let engine = MetalEngine.shared
     let vae = ConvVAEGPU(engine: engine, latentChannels: st.latentChannels,
@@ -343,7 +344,7 @@ public func trainMotionMLPFromCheckpoint(memoryFrames: [MemoryFrame],
     try trainMotionMLP(memoryFrames: memoryFrames, vae: vae, pw: pw, ph: ph,
                        steps: steps, lr: lr, window: window,
                        maxEncodedFrames: maxEncodedFrames,
-                       checkpointPath: objectivePath)
+                       checkpointPath: objectivePath, onProgress: onProgress)
 }
 
 /// Загружает VAE из чекпоинта и обучает сеть движения с ПИКСЕЛЬНОЙ потерей.
