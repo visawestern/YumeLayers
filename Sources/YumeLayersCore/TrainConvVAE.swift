@@ -52,6 +52,10 @@ private struct TrainContext {
     var start: Date
     var stepTimes: [Double] = []
     var stableRun = true
+    /// Средние loss по завершённым эпохам — для детектора плато (не крутить часы
+    /// на застрявшем обучении молча).
+    var epochLossHistory: [Double] = []
+    var plateauWarned = false
     var stepBaselineMs = 0.0
     var lastHeatLevel: HeatLevel = .nominal
     var pendingSleepMs = 0.0
@@ -397,6 +401,17 @@ extension TrainContext {
                                 previewTarget: es.previewTarget, previewRecon: es.previewRecon,
                                 previewDir: previewDir, pw: pw, ph: ph,
                                 onProgress: onProgress)
+
+            // Детектор плато: если несколько эпох подряд без улучшения — предупредить
+            // один раз, чтобы не жечь GPU/GPU-время на застрявшем обучении.
+            epochLossHistory.append(es.lossSum / Double(max(es.stepsDone, 1)))
+            if !plateauWarned && plateauDetected(losses: epochLossHistory) {
+                plateauWarned = true
+                let tail = epochLossHistory.suffix(4).map { String(format: "%.4f", $0) }
+                yumeLog("⚠️ Обучение на плато: loss почти не снижается (\(tail.joined(separator: " → "))). "
+                      + "Вероятно, конфигурация расходится (слишком большой modelWidth/latent/batch или высокий lr). "
+                      + "Стоп через /api/stop, смена конфига и дообучение через resume=true (не теряет пройденное).")
+            }
 
             try saveEpochCheckpoints(vae: vae, convPath: p.convPath, step: t,
                                      nextEpoch: ep + 1, epochSteps: epochSteps,

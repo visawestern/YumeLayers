@@ -23,6 +23,19 @@ public func resumeStartEpoch(savedEpoch: Int, requestedEpochs: Int,
     return min(max(savedEpoch, 0), max(requestedEpochs, 0))
 }
 
+/// Детектор плато/дивергенции: по серии средних loss по эпохам решает, перестало ли
+/// обучение улучшаться. Чистая функция — тестируется без GPU (`testPlateauDetection`).
+/// Срабатывает, если за `window` эпох относительное улучшение меньше `relTolerance`
+/// (включая рост/колебание). Требует минимум window+1 точек, иначе рано судить.
+public func plateauDetected(losses: [Double], relTolerance: Double = 0.02, window: Int = 3) -> Bool {
+    guard window >= 1, losses.count >= window + 1 else { return false }
+    let recent = Array(losses.suffix(window + 1))
+    guard let first = recent.first, let last = recent.last,
+          first.isFinite, last.isFinite, first > 0 else { return false }
+    let improvement = (first - last) / first
+    return improvement < relTolerance
+}
+
 /// Сохранение промежуточного чекпоинта (каждые 500 шагов).
 ///
 /// Сохраняется и состояние оптимизатора: без него продолжение обучения
